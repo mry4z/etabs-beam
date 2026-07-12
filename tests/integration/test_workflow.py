@@ -46,8 +46,9 @@ def test_read_and_export_open_etabs_model(tmp_path: Path) -> None:
     assert sum(len(result.stations) for result in designs.values()) > 0
     assert workbook["梁表"].max_row - 1 == len(beams)
     assert workbook["设计站点"].max_row - 1 == sum(len(result.stations) for result in designs.values())
-    assert workbook["关键配筋位置"].max_row - 1 == len(beams)
     assert workbook["导出说明"]["B2"].value.startswith("N_mm_C")
+    beam_headers = [cell.value for cell in workbook["梁表"][1]]
+    assert workbook["梁表"].cell(2, beam_headers.index("左端顶部弯矩纵筋面积（2D 内）") + 1).value is not None
 
     headers = [cell.value for cell in workbook["设计站点"][1]]
     rows_by_beam: dict[str, list[tuple[object, ...]]] = {}

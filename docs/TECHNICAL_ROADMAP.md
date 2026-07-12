@@ -152,3 +152,5 @@ class ACI318Provider(IDesignProvider):        # 远景，仅留空壳+TODO
 - CHM 中 v22 方法签名可能与旧版差异 → 以 `CSI API ETABS v1.chm` 为准，不照搬网络旧例。
 
 **远景扩展**：ACI 318-14/318-19 自研配筋（`ACI318Provider`），届时迁移现有 `ConcreteBeamDesign` 手算逻辑并补全规范系数。
+
+另预留 **ETABS SQLite 数据本地归档**：待目标 ETABS 版本提供稳定、可授权使用的 SQLite 数据访问或导出能力后，导出流程可将模型对应的 SQLite 数据副本保存至本地，并记录模型路径、软件版本、时间、单位和校验值。该能力只读归档，不替代 OAPI 主读取路径，也不得写入或改变正在打开的 ETABS 模型。

@@ -58,6 +58,7 @@ etabs beam/
 │
 ├── build/output/
 │   ├── reports/                               # 生成的 .xlsx 梁表（不入库）
+│   ├── model_archives/                        # 远期：ETABS SQLite 数据本地只读归档（不入库）
 │   └── logs/                                  # 工作流日志（不入库）
 │
 ├── extracted_frames/                          # 视频逆向资料，仅作本地研究参考，不入库
@@ -140,6 +141,7 @@ EtabsResultProvider ──→ BeamDesignResult[] ──→ ExcelExport
 | 文件 | 位置 | 是否入库 |
 |---|---|---|
 | 梁表 | `build/output/reports/beam_schedule_<timestamp>.xlsx` | 否 |
+| 模型数据归档（远期） | `build/output/model_archives/` | 否 |
 | 运行日志 | `build/output/logs/etabs_beam_<timestamp>.log` | 否 |
 | 本机配置 | `config.yaml` 或 `config.local.yaml` | 否 |
 | 配置示例 | `config.example.yaml` | 是 |
