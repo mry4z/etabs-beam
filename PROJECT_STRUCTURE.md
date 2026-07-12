@@ -210,5 +210,6 @@ docs(oapi): record validated pythonnet call signatures
 - [ ] `utils/io.py`、`utils/logger.py` 的实现或清理
 - [ ] 用户手册、开发者手册与完整 API 参考
 - [x] Git 仓库初始化
-- [ ] 首个基线提交与 CI/CD
+- [x] 首个 Git 基线提交
+- [ ] CI/CD
 - [ ] ACI/GB 规范扩展、SAP2000、GUI、打包
