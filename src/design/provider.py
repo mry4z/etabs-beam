@@ -9,14 +9,14 @@ from typing import Protocol
 @dataclass(frozen=True)
 class DesignStation:
     location: float
-    top_combo: str
-    top_area: float
-    bottom_combo: str
-    bottom_area: float
+    top_flexural_combo: str
+    top_flexural_area: float
+    bottom_flexural_combo: str
+    bottom_flexural_area: float
     shear_combo: str
     shear_area: float
-    torsion_long_combo: str
-    torsion_long_area: float
+    torsion_longitudinal_combo: str
+    torsion_longitudinal_area: float
     torsion_trans_combo: str
     torsion_trans_area: float
     error: str = ""
@@ -33,20 +33,20 @@ class BeamDesignResult:
         return bool(self.stations)
 
     @property
-    def max_top_area(self) -> float | None:
-        return max((station.top_area for station in self.stations), default=None)
+    def max_top_flexural_area(self) -> float | None:
+        return max((station.top_flexural_area for station in self.stations), default=None)
 
     @property
-    def max_bottom_area(self) -> float | None:
-        return max((station.bottom_area for station in self.stations), default=None)
+    def max_bottom_flexural_area(self) -> float | None:
+        return max((station.bottom_flexural_area for station in self.stations), default=None)
 
     @property
     def max_shear_area(self) -> float | None:
         return max((station.shear_area for station in self.stations), default=None)
 
     @property
-    def max_torsion_long_area(self) -> float | None:
-        return max((station.torsion_long_area for station in self.stations), default=None)
+    def max_torsion_longitudinal_area(self) -> float | None:
+        return max((station.torsion_longitudinal_area for station in self.stations), default=None)
 
     @property
     def max_torsion_trans_area(self) -> float | None:

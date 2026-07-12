@@ -46,6 +46,7 @@ def test_read_and_export_open_etabs_model(tmp_path: Path) -> None:
     assert sum(len(result.stations) for result in designs.values()) > 0
     assert workbook["梁表"].max_row - 1 == len(beams)
     assert workbook["设计站点"].max_row - 1 == sum(len(result.stations) for result in designs.values())
+    assert workbook["关键配筋位置"].max_row - 1 == len(beams)
     assert workbook["导出说明"]["B2"].value.startswith("N_mm_C")
 
     headers = [cell.value for cell in workbook["设计站点"][1]]
@@ -59,6 +60,6 @@ def test_read_and_export_open_etabs_model(tmp_path: Path) -> None:
             station = expected[index]
             row = exported[index]
             assert row[headers.index("位置")] == pytest.approx(station.location)
-            assert row[headers.index("顶筋面积")] == pytest.approx(station.top_area)
-            assert row[headers.index("底筋面积")] == pytest.approx(station.bottom_area)
+            assert row[headers.index("顶部弯矩纵筋面积（不含受扭纵筋）")] == pytest.approx(station.top_flexural_area)
+            assert row[headers.index("底部弯矩纵筋面积（不含受扭纵筋）")] == pytest.approx(station.bottom_flexural_area)
             assert row[headers.index("剪力筋 Av/s")] == pytest.approx(station.shear_area)

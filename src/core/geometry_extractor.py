@@ -23,6 +23,7 @@ class BeamGeometry:
     start: Point3D
     end: Point3D
     section: str
+    depth: float | None = None
 
     @property
     def length(self) -> float:
@@ -82,6 +83,7 @@ class GeometryExtractor:
         start = self._point_coordinates(str(point_i))
         end = self._point_coordinates(str(point_j))
         section, _ = api_values(self.sap.FrameObj.GetSection(name, None, None), f"GetSection({name})")
+        section = str(section)
         return BeamGeometry(
             name=name,
             label=str(label),
@@ -90,7 +92,8 @@ class GeometryExtractor:
             point_j=str(point_j),
             start=start,
             end=end,
-            section=str(section),
+            section=section,
+            depth=self._section_depth(section),
         )
 
     def _point_coordinates(self, point_name: str) -> Point3D:
@@ -101,3 +104,34 @@ class GeometryExtractor:
         if len(values) != 3:
             raise EtabsApiError(f"GetCoordCartesian({point_name}): 返回参数数量异常。")
         return float(values[0]), float(values[1]), float(values[2])
+
+    def _section_depth(self, section_name: str) -> float | None:
+        """Return the section total height T3 when its OAPI type is supported."""
+        from ETABSv1 import eFramePropType
+
+        values = api_values(
+            self.sap.PropFrame.GetTypeOAPI(section_name, eFramePropType.Rectangular),
+            f"PropFrame.GetTypeOAPI({section_name})",
+        )
+        section_type = values[0]
+        if section_type == eFramePropType.Rectangular:
+            rectangle = api_values(
+                self.sap.PropFrame.GetRectangle(section_name, None, None, 0.0, 0.0, 0, None, None),
+                f"PropFrame.GetRectangle({section_name})",
+            )
+            return float(rectangle[2])
+        if section_type == eFramePropType.ConcreteTee:
+            tee = api_values(
+                self.sap.PropFrame.GetConcreteTee(
+                    section_name, None, None, 0.0, 0.0, 0.0, 0.0, 0.0, False, 0, None, None
+                ),
+                f"PropFrame.GetConcreteTee({section_name})",
+            )
+            return float(tee[2])
+        if section_type == eFramePropType.General:
+            general = api_values(
+                self.sap.PropFrame.GetGeneral(section_name, None, None, 0.0, 0.0, *([0.0] * 12), 0, None, None),
+                f"PropFrame.GetGeneral({section_name})",
+            )
+            return float(general[2])
+        return None

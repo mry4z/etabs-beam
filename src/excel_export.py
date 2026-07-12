@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 
 from src.core.continuity_analyzer import ContinuityGroup
 from src.core.geometry_extractor import BeamGeometry
+from src.design.key_positions import key_positions
 from src.design.provider import BeamDesignResult
 from src.utils.io import available_output_path
 
@@ -32,7 +33,7 @@ def export_beam_schedule(
         for group in groups
         for position, name in enumerate(group.members)
     }
-    rows, station_rows = [], []
+    rows, station_rows, key_position_rows = [], [], []
     for beam in beams:
         design = designs.get(beam.name, BeamDesignResult(beam.name))
         group_id, position, group_size, neighbors = memberships.get(beam.name, (0, 1, 1, (None, None)))
@@ -55,10 +56,10 @@ def export_beam_schedule(
                 "左邻梁": neighbors[0] or "",
                 "右邻梁": neighbors[1] or "",
                 "设计站点数": len(design.stations),
-                "最大顶筋面积": design.max_top_area,
-                "最大底筋面积": design.max_bottom_area,
+                "最大顶部弯矩纵筋面积（不含受扭纵筋）": design.max_top_flexural_area,
+                "最大底部弯矩纵筋面积（不含受扭纵筋）": design.max_bottom_flexural_area,
                 "最大剪力筋 Av/s": design.max_shear_area,
-                "最大扭转纵筋面积": design.max_torsion_long_area,
+                "最大受扭纵筋面积（仅受扭需求）": design.max_torsion_longitudinal_area,
                 "最大扭转横向筋 At/s": design.max_torsion_trans_area,
             }
         )
@@ -68,35 +69,65 @@ def export_beam_schedule(
                     "梁对象": beam.name,
                     "楼层": beam.story,
                     "位置": station.location,
-                    "顶筋组合": station.top_combo,
-                    "顶筋面积": station.top_area,
-                    "底筋组合": station.bottom_combo,
-                    "底筋面积": station.bottom_area,
+                    "顶部弯矩组合": station.top_flexural_combo,
+                    "顶部弯矩纵筋面积（不含受扭纵筋）": station.top_flexural_area,
+                    "底部弯矩组合": station.bottom_flexural_combo,
+                    "底部弯矩纵筋面积（不含受扭纵筋）": station.bottom_flexural_area,
                     "剪力组合": station.shear_combo,
                     "剪力筋 Av/s": station.shear_area,
-                    "扭转纵筋组合": station.torsion_long_combo,
-                    "扭转纵筋面积": station.torsion_long_area,
+                    "受扭纵筋组合": station.torsion_longitudinal_combo,
+                    "受扭纵筋面积（仅受扭需求）": station.torsion_longitudinal_area,
                     "扭转横向筋组合": station.torsion_trans_combo,
                     "扭转横向筋 At/s": station.torsion_trans_area,
                     "错误": station.error,
                     "警告": station.warning,
                 }
             )
+        positions = key_positions(beam, design)
+        if positions:
+            key_position_rows.append(_key_position_row(beam, positions))
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="梁表")
         pd.DataFrame(station_rows).to_excel(writer, index=False, sheet_name="设计站点")
+        pd.DataFrame(key_position_rows).to_excel(writer, index=False, sheet_name="关键配筋位置")
         pd.DataFrame(
             [
                 {"项目": "导出单位", "说明": "N_mm_C；工作流在导出后恢复 ETABS 原始当前单位。"},
                 {"项目": "设计结果来源", "说明": "ETABS DesignConcrete.GetSummaryResultsBeam"},
                 {"项目": "长度与坐标", "说明": "mm"},
-                {"项目": "设计站点字段", "说明": "遵循 ETABS Summary Results Beam 的 N_mm_C 当前单位语义。"},
+                {"项目": "顶部/底部纵筋", "说明": "ETABS TopArea/BotArea：弯矩需求，不含受扭钢筋。"},
+                {"项目": "受扭纵筋", "说明": "ETABS TLArea：仅受扭所需纵筋，不是总纵筋。"},
+                {"项目": "关键位置", "说明": "D 为梁高；两端区为距 I/J 端 2D，跨中区取其间最大值。"},
             ]
         ).to_excel(writer, index=False, sheet_name="导出说明")
         for sheet in writer.book.worksheets:
             _format_sheet(sheet)
     return output_path
+
+
+def _key_position_row(beam: BeamGeometry, positions: object) -> dict[str, object]:
+    data = {
+        "梁对象": beam.name,
+        "楼层": beam.story,
+        "梁高 D (mm)": positions.depth,
+        "端部范围 2D (mm)": positions.end_zone,
+    }
+    for label, demand in (
+        ("左顶部弯矩纵筋", positions.left_top_flexural),
+        ("左底部弯矩纵筋", positions.left_bottom_flexural),
+        ("左抗剪筋", positions.left_shear),
+        ("中顶部弯矩纵筋", positions.middle_top_flexural),
+        ("中底部弯矩纵筋", positions.middle_bottom_flexural),
+        ("中抗剪筋", positions.middle_shear),
+        ("右顶部弯矩纵筋", positions.right_top_flexural),
+        ("右底部弯矩纵筋", positions.right_bottom_flexural),
+        ("右抗剪筋", positions.right_shear),
+    ):
+        data[f"{label}位置 (mm，自 I 端)"] = demand.location
+        data[f"{label}控制组合"] = demand.combo
+        data[f"{label}面积"] = demand.area
+    return data
 
 
 def _neighbors(members: tuple[str, ...], position: int) -> tuple[str | None, str | None]:

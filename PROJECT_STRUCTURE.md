@@ -26,6 +26,7 @@ etabs beam/
 │   │   ├── __init__.py
 │   │   ├── provider.py                        # 已实现：统一设计结果数据模型/协议
 │   │   ├── etabs_result.py                    # 已实现：ETABS 混凝土设计摘要读取
+│   │   ├── key_positions.py                   # 已实现：左中右（2D/跨中/2D）控制配筋选择
 │   │   └── aci318.py                          # 预留：自研 ACI 318 接口，未实现
 │   └── utils/
 │       ├── __init__.py
@@ -93,6 +94,7 @@ EtabsResultProvider ──→ BeamDesignResult[] ──→ ExcelExport
 | `GeometryExtractor` | `SapModel`、选择模式 | `BeamGeometry` 列表 | 已实现 |
 | `ContinuityAnalyzer` | `BeamGeometry` 列表 | `ContinuityGroup` 列表 | 已实现 |
 | `EtabsResultProvider` | `SapModel`、梁对象名 | `BeamDesignResult` | 已实现 |
+| `key_positions` | 梁几何、设计站点 | 左/中/右弯矩筋与抗剪筋控制值 | 已实现 |
 | `ExcelExport` | 几何、连续性、设计结果 | `.xlsx` | 已实现 |
 | `ACI318Provider` | 待定义 | 自研设计结果 | 远景 |
 
