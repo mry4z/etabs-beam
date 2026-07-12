@@ -16,11 +16,12 @@ etabs beam/
 │   ├── __init__.py
 │   ├── config.py                              # 已实现：YAML 配置与路径解析
 │   ├── workflow.py                            # 已实现：CLI 工作流编排
-│   ├── excel_export.py                        # 已实现：Excel 双工作表导出
+│   ├── excel_export.py                        # 已实现：梁表、设计站点、说明和异常记录导出
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── etabs_connector.py                 # 已实现：附着、API 错误处理和临时单位恢复
 │   │   ├── geometry_extractor.py              # 已实现：梁识别与几何提取
+│   │   ├── beam_merger.py                     # 已实现：同截面过度分割梁段合并与特殊情况记录
 │   │   └── continuity_analyzer.py             # 已实现：连续梁分组
 │   ├── design/
 │   │   ├── __init__.py
@@ -82,7 +83,9 @@ config
   ↓
 EtabsConnector ──→ GeometryExtractor ──→ ContinuityAnalyzer
   ↓                       ↓                       ↓
-SapModel          BeamGeometry[]        ContinuityGroup[]
+SapModel          BeamGeometry[] → BeamMerger → 逻辑梁[]
+                          ↓                       ↓
+                    原始设计结果           ContinuityGroup[]
   ↓
 EtabsResultProvider ──→ BeamDesignResult[] ──→ ExcelExport
                                                     ↓

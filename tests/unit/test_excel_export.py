@@ -13,7 +13,7 @@ def test_export_creates_a_readable_workbook(tmp_path: Path) -> None:
     beam = BeamGeometry("B1", "B1", "L1", "P1", "P2", (0, 0, 0), (6, 0, 0), "B300x500")
     output = export_beam_schedule([beam], [ContinuityGroup(1, "L1", ("B1",))], {"B1": BeamDesignResult("B1")}, tmp_path)
     workbook = load_workbook(output)
-    assert workbook.sheetnames == ["梁表", "设计站点", "导出说明"]
+    assert workbook.sheetnames == ["梁表", "设计站点", "导出说明", "异常记录"]
     assert workbook["梁表"].cell(2, 1).value == "B1"
 
 

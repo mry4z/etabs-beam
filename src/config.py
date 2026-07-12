@@ -21,6 +21,7 @@ class EtabsSettings:
 class GeometrySettings:
     coordinate_tolerance_mm: float = 1.0
     slope_limit_deg: float = 1.0
+    merge_angle_limit_deg: float = 3.0
     export_unit: str = "N_mm_C"
 
 
@@ -86,6 +87,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         geometry=GeometrySettings(
             coordinate_tolerance_mm=float(geometry.get("coordinate_tolerance_mm", 1.0)),
             slope_limit_deg=float(geometry.get("slope_limit_deg", 1.0)),
+            merge_angle_limit_deg=float(geometry.get("merge_angle_limit_deg", 3.0)),
             export_unit=_normalize_unit(geometry.get("unit_system", "N_mm_C")),
         ),
         output=OutputSettings(

@@ -43,6 +43,10 @@ def key_positions(beam: BeamGeometry, design: BeamDesignResult) -> BeamKeyPositi
     end_zone = min(2.0 * beam.depth, beam.length / 2.0)
     left = [station for station in design.stations if station.location <= end_zone]
     right = [station for station in design.stations if station.location >= beam.length - end_zone]
+    if not left:
+        left = [min(design.stations, key=lambda station: abs(station.location - end_zone))]
+    if not right:
+        right = [min(design.stations, key=lambda station: abs(station.location - (beam.length - end_zone)))]
     middle = [station for station in design.stations if end_zone < station.location < beam.length - end_zone]
     if not middle:
         middle = [min(design.stations, key=lambda station: abs(station.location - beam.length / 2.0))]

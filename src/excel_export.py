@@ -9,6 +9,7 @@ import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from src.core.beam_merger import MergeRecord
 from src.core.continuity_analyzer import ContinuityGroup
 from src.core.geometry_extractor import BeamGeometry
 from src.design.key_positions import key_positions
@@ -22,6 +23,7 @@ def export_beam_schedule(
     designs: dict[str, BeamDesignResult],
     reports_dir: Path,
     filename_pattern: str = "beam_schedule_{timestamp}.xlsx",
+    special_records: list[MergeRecord] | None = None,
 ) -> Path:
     """Write one row per beam plus a station-detail worksheet."""
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -39,6 +41,7 @@ def export_beam_schedule(
         group_id, position, group_size, neighbors = memberships.get(beam.name, (0, 1, 1, (None, None)))
         row = {
             "梁对象": beam.name,
+            "原始梁对象": "+".join(beam.source_names or (beam.name,)),
             "标签": beam.label,
             "楼层": beam.story,
             "截面": beam.section,
@@ -108,6 +111,17 @@ def export_beam_schedule(
                 },
             ]
         ).to_excel(writer, index=False, sheet_name="导出说明")
+        records = special_records or []
+        record_rows = [
+            {
+                "级别": record.severity,
+                "类别": record.category,
+                "梁对象": record.beam_names,
+                "说明": record.message,
+            }
+            for record in records
+        ] or [{"级别": "信息", "类别": "检查", "梁对象": "", "说明": "本次导出未记录特殊情况。"}]
+        pd.DataFrame(record_rows).to_excel(writer, index=False, sheet_name="异常记录")
         for sheet in writer.book.worksheets:
             _format_sheet(sheet)
     return output_path

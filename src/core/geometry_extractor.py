@@ -24,9 +24,13 @@ class BeamGeometry:
     end: Point3D
     section: str
     depth: float | None = None
+    source_names: tuple[str, ...] = ()
+    path_points: tuple[Point3D, ...] = ()
 
     @property
     def length(self) -> float:
+        if len(self.path_points) > 1:
+            return sum(length(start, end) for start, end in zip(self.path_points, self.path_points[1:]))
         return length(self.start, self.end)
 
 

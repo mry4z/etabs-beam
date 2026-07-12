@@ -30,3 +30,11 @@ def test_key_positions_use_two_depth_end_zones_and_midspan_maximum() -> None:
 def test_key_positions_returns_none_without_a_supported_depth() -> None:
     beam = BeamGeometry("B1", "B1", "L1", "P1", "P2", (0, 0, 0), (10, 0, 0), "Unknown")
     assert key_positions(beam, BeamDesignResult("B1", (_station(5, 1, 1, 1),))) is None
+
+
+def test_key_positions_falls_back_to_nearest_station_for_empty_end_zone() -> None:
+    beam = BeamGeometry("B1", "B1", "L1", "P1", "P2", (0, 0, 0), (10000, 0, 0), "R", 1000)
+    result = key_positions(beam, BeamDesignResult("B1", (_station(5000, 7, 8, 9),)))
+    assert result is not None
+    assert result.left_top_flexural.location == 5000
+    assert result.right_shear.location == 5000

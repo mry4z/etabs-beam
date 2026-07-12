@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from src.config import AppConfig, load_config
+from src.core.beam_merger import BeamMerger, MergeRecord
 from src.core.continuity_analyzer import ContinuityAnalyzer
 from src.core.etabs_connector import EtabsConnector
 from src.core.geometry_extractor import GeometryExtractor
@@ -32,21 +33,34 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
         beams = extractor.extract(mode)
         logger.info("已读取 %s 根梁（模式：%s）。", len(beams), mode)
 
+        provider = EtabsResultProvider(sap)
+        raw_designs = {}
+        special_records: list[MergeRecord] = []
+        for beam in beams:
+            try:
+                raw_designs[beam.name] = provider.get_beam_design(beam.name)
+            except Exception as exc:
+                logger.warning("梁 %s 未读取到设计结果：%s", beam.name, exc)
+                special_records.append(MergeRecord("警告", "设计结果", beam.name, str(exc)))
+
+        merge_result = BeamMerger(
+            config.geometry.coordinate_tolerance_mm,
+            config.geometry.merge_angle_limit_deg,
+        ).merge(beams, raw_designs)
+        beams = merge_result.beams
+        designs = merge_result.designs
+        special_records.extend(merge_result.records)
+        logger.info("逻辑梁合并后剩余 %s 根梁。", len(beams))
+
         groups = ContinuityAnalyzer(
             config.geometry.coordinate_tolerance_mm,
             config.geometry.slope_limit_deg,
         ).analyze(beams)
         logger.info("已识别 %s 个连续梁组。", len(groups))
 
-        provider = EtabsResultProvider(sap)
-        designs = {}
-        for beam in beams:
-            try:
-                designs[beam.name] = provider.get_beam_design(beam.name)
-            except Exception as exc:
-                logger.warning("梁 %s 未读取到设计结果：%s", beam.name, exc)
-
-        output = export_beam_schedule(beams, groups, designs, config.output.reports_dir, config.output.report_filename)
+        output = export_beam_schedule(
+            beams, groups, designs, config.output.reports_dir, config.output.report_filename, special_records
+        )
 
     logger.info("ETABS 当前单位已恢复为：%s", _unit_name(connector.present_units()))
     logger.info("梁表已导出：%s", output)

@@ -30,6 +30,8 @@ class EtabsResultProvider:
             raise EtabsApiError(f"GetSummaryResultsBeam({beam_name}): 返回参数数量异常。")
 
         count = int(values[0])
+        if any(column is None for column in values[1:]):
+            raise EtabsApiError(f"GetSummaryResultsBeam({beam_name}): ETABS 返回空设计数组。")
         columns = [list(column) for column in values[1:]]
         if count == 0:
             return BeamDesignResult(beam_name)
