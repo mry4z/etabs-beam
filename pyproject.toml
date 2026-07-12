@@ -1,0 +1,10 @@
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --cov=src --cov-fail-under=60"
+markers = [
+    "integration: requires an already open ETABS instance and explicit opt-in",
+]
