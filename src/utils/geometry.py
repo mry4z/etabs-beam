@@ -5,7 +5,6 @@ from __future__ import annotations
 from math import acos, degrees, sqrt
 from typing import TypeAlias
 
-
 Point3D: TypeAlias = tuple[float, float, float]
 
 

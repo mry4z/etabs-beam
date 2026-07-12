@@ -19,7 +19,6 @@ from src.core.geometry_extractor import GeometryExtractor
 from src.design.etabs_result import EtabsResultProvider
 from src.excel_export import export_beam_schedule
 
-
 pytestmark = pytest.mark.skipif(
     os.getenv("ETABS_INTEGRATION") != "1",
     reason="需要已打开的 ETABS；设置 ETABS_INTEGRATION=1 后显式运行。",
