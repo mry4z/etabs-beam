@@ -52,3 +52,15 @@ def test_perpendicular_branch_does_not_join_straight_chain() -> None:
 def test_beam_exceeding_slope_limit_is_not_continuous() -> None:
     beams = [_beam("B1", (0, 0, 3), (6, 0, 3)), _beam("B2", (6, 0, 3), (12, 0.2, 3))]
     assert len(ContinuityAnalyzer(slope_limit_deg=1.0).analyze(beams)) == 2
+
+
+def test_complex_collinear_branch_preserves_every_beam_as_singletons(caplog) -> None:
+    beams = [
+        _beam("B1", (-6, 0, 3), (0, 0, 3)),
+        _beam("B2", (0, 0, 3), (6, 0, 3)),
+        _beam("B3", (0, 0, 3), (12, 0, 3)),
+        _beam("B4", (0, 0, 3), (18, 0, 3)),
+    ]
+    groups = ContinuityAnalyzer().analyze(beams)
+    assert [group.members for group in groups] == [("B1",), ("B2",), ("B3",), ("B4",)]
+    assert "含分支或环" in caplog.text

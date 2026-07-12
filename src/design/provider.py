@@ -45,6 +45,10 @@ class BeamDesignResult:
         return max((station.shear_area for station in self.stations), default=None)
 
     @property
+    def max_torsion_long_area(self) -> float | None:
+        return max((station.torsion_long_area for station in self.stations), default=None)
+
+    @property
     def max_torsion_trans_area(self) -> float | None:
         return max((station.torsion_trans_area for station in self.stations), default=None)
 

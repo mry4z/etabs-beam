@@ -35,7 +35,7 @@ def export_beam_schedule(
     rows, station_rows = [], []
     for beam in beams:
         design = designs.get(beam.name, BeamDesignResult(beam.name))
-        group_id, position, group_size, neighbors = memberships[beam.name]
+        group_id, position, group_size, neighbors = memberships.get(beam.name, (0, 1, 1, (None, None)))
         rows.append(
             {
                 "梁对象": beam.name,
@@ -58,6 +58,7 @@ def export_beam_schedule(
                 "最大顶筋面积": design.max_top_area,
                 "最大底筋面积": design.max_bottom_area,
                 "最大剪力筋 Av/s": design.max_shear_area,
+                "最大扭转纵筋面积": design.max_torsion_long_area,
                 "最大扭转横向筋 At/s": design.max_torsion_trans_area,
             }
         )

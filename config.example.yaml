@@ -12,9 +12,6 @@ etabs:
   # API 版本（必须与 DLL 版本匹配）
   api_version: "22"
 
-  # 连接超时时间（秒）
-  timeout_sec: 30
-
   # 连接模式
   # "attach" - attach 到已运行的 ETABS 实例（推荐阶段1）
   # "create" - 创建新实例（后续备选）

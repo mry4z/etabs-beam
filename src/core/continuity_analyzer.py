@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from src.core.geometry_extractor import BeamGeometry
@@ -40,8 +41,19 @@ class ContinuityAnalyzer:
                 if beam.name in visited:
                     continue
                 component = self._component(beam.name, adjacency, visited)
-                groups.append(ContinuityGroup(group_id, story, tuple(self._ordered(component, adjacency))))
-                group_id += 1
+                if self._is_simple_path(component, adjacency):
+                    groups.append(ContinuityGroup(group_id, story, tuple(self._ordered(component, adjacency))))
+                    group_id += 1
+                    continue
+
+                logging.getLogger(__name__).warning(
+                    "楼层 %s 的连续梁拓扑含分支或环，已降级为独立梁组：%s",
+                    story,
+                    ", ".join(sorted(component)),
+                )
+                for name in sorted(component):
+                    groups.append(ContinuityGroup(group_id, story, (name,)))
+                    group_id += 1
         return groups
 
     def _are_continuous(self, left: BeamGeometry, right: BeamGeometry) -> bool:
@@ -74,3 +86,16 @@ class ContinuityAnalyzer:
             candidates = sorted((adjacency[current] & component) - ({previous} if previous else set()))
             previous, current = current, (candidates[0] if candidates else None)
         return ordered
+
+    @staticmethod
+    def _is_simple_path(component: set[str], adjacency: dict[str, set[str]]) -> bool:
+        """Return true only for a connected non-branching path.
+
+        Branches and cycles have no unambiguous left/right relationship for the
+        current export format. They are deliberately downgraded to singleton
+        groups rather than silently dropping members during ordering.
+        """
+        if len(component) == 1:
+            return True
+        degrees = [len(adjacency[name] & component) for name in component]
+        return max(degrees) <= 2 and degrees.count(1) == 2

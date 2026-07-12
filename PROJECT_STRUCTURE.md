@@ -148,7 +148,7 @@ EtabsResultProvider ──→ BeamDesignResult[] ──→ ExcelExport
 
 `src/config.py` 读取 `config.yaml`；若文件不存在，自动回退至 `config.example.yaml`。当前已读取的配置包括：
 
-- `etabs.dll_path`、`timeout_sec`、`mode`
+- `etabs.dll_path`、`mode`
 - `geometry.coordinate_tolerance_mm`、`slope_limit_deg`；导出单位固定为 `N_mm_C`，由工作流记录并恢复原 ETABS 当前单位
 - `output.reports_dir`、`logs_dir`、文件名模式
 - `logging.level`

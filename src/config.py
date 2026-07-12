@@ -15,7 +15,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 @dataclass(frozen=True)
 class EtabsSettings:
     dll_path: Path
-    timeout_sec: int = 30
     mode: str = "attach"
 
 
@@ -83,7 +82,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     return AppConfig(
         etabs=EtabsSettings(
             dll_path=dll_path,
-            timeout_sec=int(etabs.get("timeout_sec", 30)),
             mode=str(etabs.get("mode", "attach")),
         ),
         geometry=GeometrySettings(

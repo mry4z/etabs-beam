@@ -186,13 +186,13 @@ after  = N_mm_C
 | 首根梁 | 对象 `65`，标签 `B1`，楼层 `Story4`，截面 `ConcBm1` |
 | 首根梁长度 | 18,000 mm |
 | 首根梁设计站点 | 58 |
-| 单元测试 | 15 / 15 通过，默认覆盖率 65.84%（60% 基线） |
+| 单元测试 | 17 / 17 通过，默认覆盖率 65.86%（60% 基线） |
 | 自动化集成测试 | 1 / 1 通过；含代表性梁站点 API/Excel 数值比对 |
 
 已生成验证文件：
 
-- `build/output/reports/beam_schedule_20260712_114259.xlsx`
-- `build/output/logs/etabs_beam_20260712_114258.log`
+- `build/output/reports/beam_schedule_20260712_223402.xlsx`
+- `build/output/logs/etabs_beam_20260712_223401.log`
 
 工作簿复核结果：`梁表` 96 行、`设计站点` 5,568 行，首根梁的设计站点数与 ETABS API 返回一致。
 
