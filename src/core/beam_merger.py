@@ -97,21 +97,52 @@ class BeamMerger:
 
     def _build_links(self, beams: list[BeamGeometry]) -> dict[str, list[_Link]]:
         links = {beam.name: [] for beam in beams}
-        for index, left in enumerate(beams):
-            for right in beams[index + 1 :]:
-                if not self._compatible(left, right):
-                    continue
-                pairs = [
-                    (0, 0, distance(left.start, right.start)),
-                    (0, 1, distance(left.start, right.end)),
-                    (1, 0, distance(left.end, right.start)),
-                    (1, 1, distance(left.end, right.end)),
-                ]
-                left_endpoint, right_endpoint, gap = min(pairs, key=lambda pair: pair[2])
-                if gap <= self.coordinate_tolerance_mm:
-                    links[left.name].append(_Link(right.name, left_endpoint, right_endpoint))
-                    links[right.name].append(_Link(left.name, right_endpoint, left_endpoint))
+        groups: dict[tuple[str, str], list[BeamGeometry]] = {}
+        for beam in beams:
+            groups.setdefault((beam.story, beam.section.strip().casefold()), []).append(beam)
+        checked: set[tuple[str, str]] = set()
+        for group in groups.values():
+            endpoint_index: dict[tuple[int, int, int], list[tuple[str, int]]] = {}
+            by_name = {beam.name: beam for beam in group}
+            for beam in group:
+                for endpoint_index_value, point in enumerate((beam.start, beam.end)):
+                    cell = self._endpoint_cell(point)
+                    nearby: set[tuple[str, int]] = set()
+                    for neighbor in self._neighbor_cells(cell):
+                        nearby.update(endpoint_index.get(neighbor, ()))
+                    for other_name, _ in nearby:
+                        pair_key = tuple(sorted((beam.name, other_name)))
+                        if pair_key in checked:
+                            continue
+                        checked.add(pair_key)
+                        other = by_name[other_name]
+                        if not self._compatible(beam, other):
+                            continue
+                        pairs = [
+                            (0, 0, distance(beam.start, other.start)),
+                            (0, 1, distance(beam.start, other.end)),
+                            (1, 0, distance(beam.end, other.start)),
+                            (1, 1, distance(beam.end, other.end)),
+                        ]
+                        beam_endpoint, other_endpoint, gap = min(pairs, key=lambda pair: pair[2])
+                        if gap <= self.coordinate_tolerance_mm:
+                            links[beam.name].append(_Link(other.name, beam_endpoint, other_endpoint))
+                            links[other.name].append(_Link(beam.name, other_endpoint, beam_endpoint))
+                    endpoint_index.setdefault(cell, []).append((beam.name, endpoint_index_value))
         return links
+
+    def _endpoint_cell(self, point: tuple[float, float, float]) -> tuple[int, int, int]:
+        tolerance = max(self.coordinate_tolerance_mm, 1e-6)
+        return tuple(int(round(value / tolerance)) for value in point)
+
+    @staticmethod
+    def _neighbor_cells(cell: tuple[int, int, int]) -> tuple[tuple[int, int, int], ...]:
+        return tuple(
+            (cell[0] + dx, cell[1] + dy, cell[2] + dz)
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for dz in (-1, 0, 1)
+        )
 
     def _compatible(self, left: BeamGeometry, right: BeamGeometry) -> bool:
         if left.story != right.story or left.section.strip().casefold() != right.section.strip().casefold():

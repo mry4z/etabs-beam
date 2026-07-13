@@ -8,6 +8,7 @@ test with small coordinate-only models.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -22,6 +23,8 @@ class BeamLineSpanSettings:
     coordinate_tolerance_mm: float = 1.0
     merge_angle_deg: float = 15.0
     through_support_angle_deg: float = 3.0
+    intersection_grid_mm: float = 5000.0
+    story_workers: int = 1
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,27 @@ def analyze_beam_lines(
     """
     settings = settings or BeamLineSpanSettings()
     column_point_names = column_point_names or set()
+    by_story: dict[str, list[BeamGeometry]] = {}
+    for beam in beams:
+        by_story.setdefault(beam.story, []).append(beam)
+    story_inputs = [(story_beams, column_point_names, settings) for story_beams in by_story.values()]
+    if settings.story_workers > 1 and len(story_inputs) > 1:
+        with ThreadPoolExecutor(max_workers=settings.story_workers) as executor:
+            story_results = list(executor.map(_analyze_story, story_inputs))
+    else:
+        story_results = [_analyze_story(item) for item in story_inputs]
+    unnumbered_lines = [line for lines, _ in story_results for line in lines]
+    records = [record for _, story_records in story_results for record in story_records]
+    numbered_lines, spans = _number_lines(unnumbered_lines, settings)
+    records.extend(_validation_records(numbered_lines, spans, settings))
+    return BeamLineSpanResult(tuple(numbered_lines), tuple(spans), tuple(records))
+
+
+def _analyze_story(
+    input_data: tuple[list[BeamGeometry], set[str], BeamLineSpanSettings]
+) -> tuple[list[_UnnumberedLine], list[str]]:
+    """Analyze one story; this function is isolated so stories can run in parallel."""
+    beams, column_point_names, settings = input_data
     column_points = _column_coordinates(beams, column_point_names, settings.coordinate_tolerance_mm)
     designs = {
         beam.name: BeamDesignResult(beam.name, status=DesignResultStatus.SKIPPED)
@@ -117,28 +141,16 @@ def analyze_beam_lines(
         beam for beam in candidates
         if _candidate_is_primary(beam, source_by_name, column_point_names, column_points, settings)
     ]
-
     primary_lines = _split_candidates(
-        primary_candidates,
-        "PB",
-        column_points,
-        (),
-        source_by_name,
-        settings,
+        primary_candidates, "PB", column_points, {}, source_by_name, settings,
     )
     primary_paths = tuple(line.path_points for line in primary_lines)
+    primary_index = _build_segment_index(primary_paths, settings.intersection_grid_mm)
     secondary_candidates = [beam for beam in candidates if beam not in primary_candidates]
     secondary_lines = _split_candidates(
-        secondary_candidates,
-        "SB",
-        column_points,
-        primary_paths,
-        source_by_name,
-        settings,
+        secondary_candidates, "SB", (), primary_index, source_by_name, settings,
     )
-    numbered_lines, spans = _number_lines(primary_lines + secondary_lines, settings)
-    records.extend(_validation_records(numbered_lines, spans, settings))
-    return BeamLineSpanResult(tuple(numbered_lines), tuple(spans), tuple(records))
+    return primary_lines + secondary_lines, records
 
 
 def _column_coordinates(beams: list[BeamGeometry], names: set[str], tolerance: float) -> tuple[Point3D, ...]:
@@ -172,14 +184,14 @@ def _split_candidates(
     candidates: list[BeamGeometry],
     beam_type: str,
     column_points: tuple[Point3D, ...],
-    primary_paths: tuple[tuple[Point3D, ...], ...],
+    primary_index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]],
     source_by_name: dict[str, BeamGeometry],
     settings: BeamLineSpanSettings,
 ) -> list[_UnnumberedLine]:
     lines: list[_UnnumberedLine] = []
     for candidate in candidates:
         path = _oriented_path(candidate.path_points or (candidate.start, candidate.end))
-        markers = column_points if beam_type == "PB" else _path_intersections(path, primary_paths, settings)
+        markers = column_points if beam_type == "PB" else _path_intersections(path, primary_index, settings)
         parts = _split_path(path, markers, settings.coordinate_tolerance_mm)
         for line_parts in _group_parts(parts, settings, beam_type):
             span_paths = tuple(line_parts)
@@ -421,16 +433,54 @@ def _path_length(path: tuple[Point3D, ...]) -> float:
 
 
 def _path_intersections(
-    path: tuple[Point3D, ...], primary_paths: tuple[tuple[Point3D, ...], ...], settings: BeamLineSpanSettings
+    path: tuple[Point3D, ...],
+    primary_index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]],
+    settings: BeamLineSpanSettings,
 ) -> tuple[Point3D, ...]:
     intersections: list[Point3D] = []
     for left, right in zip(path, path[1:]):
-        for primary in primary_paths:
-            for p_left, p_right in zip(primary, primary[1:]):
-                point = _segment_intersection(left, right, p_left, p_right, settings.coordinate_tolerance_mm)
-                if point is not None:
-                    intersections.append(point)
+        for p_left, p_right in _indexed_candidates(left, right, primary_index, settings.intersection_grid_mm):
+            point = _segment_intersection(left, right, p_left, p_right, settings.coordinate_tolerance_mm)
+            if point is not None:
+                intersections.append(point)
     return _unique_points(intersections, settings.coordinate_tolerance_mm)
+
+
+def _build_segment_index(
+    paths: tuple[tuple[Point3D, ...], ...], grid_size: float
+) -> dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]]:
+    cells: dict[tuple[int, int], list[tuple[Point3D, Point3D]]] = {}
+    for path in paths:
+        for left, right in zip(path, path[1:]):
+            min_x, max_x = sorted((left[0], right[0]))
+            min_y, max_y = sorted((left[1], right[1]))
+            for cell_x in range(_grid_index(min_x, grid_size), _grid_index(max_x, grid_size) + 1):
+                for cell_y in range(_grid_index(min_y, grid_size), _grid_index(max_y, grid_size) + 1):
+                    cells.setdefault((cell_x, cell_y), []).append((left, right))
+    return {key: tuple(value) for key, value in cells.items()}
+
+
+def _indexed_candidates(
+    left: Point3D,
+    right: Point3D,
+    index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]],
+    grid_size: float,
+) -> tuple[tuple[Point3D, Point3D], ...]:
+    min_x, max_x = sorted((left[0], right[0]))
+    min_y, max_y = sorted((left[1], right[1]))
+    candidates: list[tuple[Point3D, Point3D]] = []
+    seen: set[tuple[Point3D, Point3D]] = set()
+    for cell_x in range(_grid_index(min_x, grid_size), _grid_index(max_x, grid_size) + 1):
+        for cell_y in range(_grid_index(min_y, grid_size), _grid_index(max_y, grid_size) + 1):
+            for segment in index.get((cell_x, cell_y), ()):
+                if segment not in seen:
+                    seen.add(segment)
+                    candidates.append(segment)
+    return tuple(candidates)
+
+
+def _grid_index(value: float, grid_size: float) -> int:
+    return int(value // grid_size)
 
 
 def _segment_intersection(a: Point3D, b: Point3D, c: Point3D, d: Point3D, tolerance: float) -> Point3D | None:

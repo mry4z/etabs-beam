@@ -1,4 +1,4 @@
-from src.core.beam_line_span_analyzer import analyze_beam_lines
+from src.core.beam_line_span_analyzer import BeamLineSpanSettings, analyze_beam_lines
 from src.core.geometry_extractor import BeamGeometry
 from src.drawing.dxf_export import export_structural_spans_csv, export_structural_spans_dxf
 
@@ -63,3 +63,17 @@ def test_structural_span_dxf_has_one_polyline_and_matching_arial_label(tmp_path)
     assert "7\nARIAL" in text
     csv = export_structural_spans_csv(result.spans, tmp_path / "spans.csv")
     assert "F2-PB1-S2" in csv.read_text(encoding="utf-8-sig")
+
+
+def test_story_groups_can_be_analyzed_in_parallel_with_same_result() -> None:
+    beams = [
+        _beam("F1-A", "C1", "C2", (0, 0, 0), (10, 0, 0)),
+        BeamGeometry("F2-A", "F2-A", "F3", "C1", "C2", (0, 0, 3000), (10, 0, 3000), "B", 600),
+    ]
+    supports = {"C1", "C2"}
+    serial = analyze_beam_lines(beams, supports)
+    parallel = analyze_beam_lines(
+        beams, supports, settings=BeamLineSpanSettings(story_workers=2)
+    )
+    assert [span.span_id for span in serial.spans] == [span.span_id for span in parallel.spans]
+    assert [span.path_points for span in serial.spans] == [span.path_points for span in parallel.spans]

@@ -224,6 +224,12 @@ after  = N_mm_C
 
 当前连接到的模型为 `E:\051 SAP_ETABS MODEL\IRAQ-HOSPITAL\20260606\EMHS-0606-P4700-GF.v6.3.edb`，读取 4,165 根混凝土梁并归并为 1,652 根逻辑梁，其中主梁 760、次梁 892；输出为 `build/output/drawing_data/beam_groups_full_15deg_20260713_160709.dxf` 及同名 `.csv`。此前 `beam` 目录下的 v6.2 模型与本次当前 ETABS 窗口路径不同，审核时应以 DXF 文件记录的 MODEL 图例为准。
 
+### 支承定义结构分跨验证（2026-07-13）
+
+API ID `278156` 当前附着模型为 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P4700-GF.v6.2.EDB`。按楼层隔离后读取 4,166 根混凝土梁、1,421 个柱支承点，识别 1,705 条 Beam Line 和 3,023 个 Span：主梁 810 条/1,568 跨，次梁 895 条/1,455 跨，弧形梁线 35 条，悬挑跨 669 个。DXF 中 `POLYLINE` 数量为 3,023，每跨一条多段线；CSV 同步记录 `梁编号、楼层、主次梁、弧形、悬挑、源对象、路径点坐标`。
+
+输出文件：`build/output/drawing_data/beam_spans_structural_20260713_194933.dxf` 和同名 `.csv`。该文件使用黄色 `BEAM_PRIMARY`、绿色 `BEAM_SECONDARY`，标注文字使用 `ARIAL` 且颜色跟随梁线。结构分跨分析已按楼层隔离；`story_workers` 可在不访问 ETABS 的纯几何阶段启用楼层并行，串行/并行单元测试结果一致。分析过程中产生 813 条合并/异常记录，目前尚未写入独立审核文件，需结合 CAD 图形审核后再接入正式 Excel。
+
 ---
 
 ## 7. 当前限制与后续验证
