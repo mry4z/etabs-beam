@@ -12,6 +12,7 @@ from math import atan2, degrees
 from pathlib import Path
 from typing import Iterable
 
+from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.merge_comparison import MergeAngleDifference
 from src.utils.geometry import Point3D
 
@@ -90,6 +91,7 @@ def _text(layer: str, color: int, point: Point3D, value: str, height: float, ang
         "0", "TEXT", "8", layer, "62", str(color),
         "10", f"{point[0]:.3f}", "20", f"{point[1]:.3f}", "30", f"{point[2]:.3f}",
         "40", f"{height:.3f}", "1", _safe_text(value), "50", f"{angle:.3f}",
+        "7", "ARIAL",
     ]
 
 
@@ -106,7 +108,13 @@ def _tables() -> list[str]:
     values = ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", str(len(_LAYERS))]
     for name, color in _LAYERS:
         values.extend(["0", "LAYER", "2", name, "70", "0", "62", str(color), "6", "CONTINUOUS"])
-    values.extend(["0", "ENDTAB", "0", "ENDSEC"])
+    values.extend([
+        "0", "ENDTAB", "0", "TABLE", "2", "STYLE", "70", "1",
+        "0", "STYLE", "2", "ARIAL", "70", "0", "40", "0",
+        "41", "1", "50", "0", "71", "0", "42", "2.5",
+        "3", "arial.ttf", "4", "",
+        "0", "ENDTAB", "0", "ENDSEC",
+    ])
     return values
 
 
@@ -314,6 +322,73 @@ def export_beam_groups_csv(
             serialized = ";".join(f"{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}" for p in points)
             writer.writerow([beam_id, beam.story, prefix, "+".join(beam.source_names or (beam.name,)), serialized])
     return path
+
+
+def export_structural_spans_dxf(
+    spans: Iterable[BeamSpan], output_path: str | Path, *, model_name: str = "", text_height: float = 150.0
+) -> Path:
+    """Export one colored polyline and same-colored Arial label per structural span."""
+    spans = list(spans)
+    entities: list[str] = []
+    for span in spans:
+        primary = span.beam_type == "PB"
+        layer = "BEAM_PRIMARY" if primary else "BEAM_SECONDARY"
+        color = 2 if primary else 3
+        entities.extend(_polyline(layer, color, span.path_points))
+        entities.extend(
+            _text(layer, color, _midpoint(span.path_points), span.span_id, text_height, _text_angle(span.path_points))
+        )
+    legend_x, legend_y = _legend_origin_from_paths([span.path_points for span in spans])
+    legend = [
+        f"STRUCTURAL SPANS | total={len(spans)} primary={sum(span.beam_type == 'PB' for span in spans)}",
+        "YELLOW BEAM_PRIMARY = PB span; GREEN BEAM_SECONDARY = SB span",
+        "Every POLYLINE is one support-defined span; labels use ARIAL",
+    ]
+    for offset, value in enumerate(legend):
+        entities.extend(
+            _text(
+                "MERGE_LEGEND", 7,
+                (legend_x, legend_y - offset * text_height * 1.3, 0.0),
+                value, text_height,
+            )
+        )
+    if model_name:
+        entities.extend(
+            _text(
+                "MERGE_LEGEND", 7,
+                (legend_x, legend_y - len(legend) * text_height * 1.3, 0.0),
+                f"MODEL {_safe_text(model_name)}", text_height * 0.8,
+            )
+        )
+    values = _header() + _tables() + ["0", "SECTION", "2", "ENTITIES"] + entities + ["0", "ENDSEC", "0", "EOF"]
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(values) + "\n", encoding="ascii")
+    return path
+
+
+def export_structural_spans_csv(spans: Iterable[BeamSpan], output_path: str | Path) -> Path:
+    """Write the support-defined span IDs, source Objects and path coordinates."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["梁编号", "楼层", "主次梁", "弧形", "悬挑", "源对象", "路径点坐标"])
+        for span in spans:
+            coordinates = ";".join(f"{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}" for p in span.path_points)
+            writer.writerow([
+                span.span_id, span.story, span.beam_type,
+                "是" if span.is_curved else "否", "是" if span.is_cantilever else "否",
+                "+".join(span.source_objects), coordinates,
+            ])
+    return path
+
+
+def _legend_origin_from_paths(paths: Iterable[tuple[Point3D, ...]]) -> tuple[float, float]:
+    points = [point for path in paths for point in path]
+    if not points:
+        return (0.0, 0.0)
+    return (min(point[0] for point in points), max(point[1] for point in points))
 
 
 def _as_difference_stub(beam: object) -> MergeAngleDifference:

@@ -7,6 +7,7 @@
 | `EtabsConnector` | `attach()` | 附着到活动 ETABS 并返回 `SapModel` |
 | `EtabsConnector` | `temporary_present_units()` | 临时切换显示单位并在结束时恢复 |
 | `GeometryExtractor` | `extract("all" | "selected")` | 返回 `BeamGeometry` 列表 |
+| `analyze_beam_lines` | `analyze_beam_lines(beams, column_point_names)` | 按柱/主梁支承识别 `BeamLine`、`BeamSpan` 和异常记录 |
 | `ContinuityAnalyzer` | `analyze(beams)` | 返回 `ContinuityGroup` 列表 |
 | `EtabsResultProvider` | `get_beam_design(name)` | 返回 `BeamDesignResult` |
 | `export_beam_schedule()` | 几何、连续性、设计结果 | 写入 Excel 文件 |
