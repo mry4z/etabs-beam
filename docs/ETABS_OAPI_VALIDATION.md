@@ -240,7 +240,7 @@ API ID `278156` 当前附着模型为 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P47
 - `build/output/drawing_data/beam_spans_structural_stitched_20260713_211158.csv`
 - `build/output/drawing_data/beam_spans_structural_stitched_20260713_211158.records.txt`
 
-离线回归测试为 `36 passed, 1 skipped`，覆盖率 `82.07%`。上述输出尚待用户进行 CAD 全量复核，复核通过后再接入正式 Excel 和模型方向整理流程。
+离线回归测试为 `36 passed, 1 skipped`，覆盖率 `81.93%`。上述输出尚待用户进行 CAD 全量复核，复核通过后再接入正式 Excel 和模型方向整理流程。
 
 ---
 
