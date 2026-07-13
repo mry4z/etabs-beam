@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.core.etabs_connector import EtabsApiError, api_values
-from src.design.provider import BeamDesignResult, DesignStation
+from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
 
 
 class EtabsResultProvider:
@@ -34,7 +34,11 @@ class EtabsResultProvider:
             raise EtabsApiError(f"GetSummaryResultsBeam({beam_name}): ETABS 返回空设计数组。")
         columns = [list(column) for column in values[1:]]
         if count == 0:
-            return BeamDesignResult(beam_name)
+            return BeamDesignResult(
+                beam_name,
+                status=DesignResultStatus.NO_RESULTS,
+                status_message="ETABS 未返回混凝土梁设计站点。",
+            )
         if any(len(column) < count for column in columns):
             raise EtabsApiError(f"GetSummaryResultsBeam({beam_name}): 结果数组长度不一致。")
 

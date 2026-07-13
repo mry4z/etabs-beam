@@ -1,6 +1,6 @@
 from src.core.beam_merger import BeamMerger
 from src.core.geometry_extractor import BeamGeometry
-from src.design.provider import BeamDesignResult, DesignStation
+from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
 
 
 def _beam(name: str, start: tuple[float, float, float], end: tuple[float, float, float]) -> BeamGeometry:
@@ -42,3 +42,15 @@ def test_merger_keeps_branch_as_original_objects_and_records_warning() -> None:
     result = BeamMerger(angle_limit_deg=10).merge(beams, {})
     assert len(result.beams) == 3
     assert any(record.category == "合并拓扑" for record in result.records)
+
+
+def test_merger_marks_partial_result_when_one_segment_has_no_design_stations() -> None:
+    beams = [_beam("B1", (0, 0, 0), (10, 0, 0)), _beam("B2", (10, 0, 0), (20, 0, 0))]
+    designs = {
+        "B1": BeamDesignResult("B1", (_station(5, 10),)),
+        "B2": BeamDesignResult(
+            "B2", status=DesignResultStatus.NO_RESULTS, status_message="ETABS 未返回混凝土梁设计站点。"
+        ),
+    }
+    result = BeamMerger().merge(beams, designs)
+    assert result.designs[result.beams[0].name].status == DesignResultStatus.PARTIAL

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from src.core.geometry_extractor import BeamGeometry
-from src.design.provider import BeamDesignResult, DesignStation
+from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
 from src.utils.geometry import distance, plan_angle_deg
 
 
@@ -42,7 +42,7 @@ class BeamMerger:
     def __init__(
         self,
         coordinate_tolerance_mm: float = 1.0,
-        angle_limit_deg: float = 3.0,
+        angle_limit_deg: float = 15.0,
         depth_tolerance_mm: float = 1.0,
     ) -> None:
         self.coordinate_tolerance_mm = coordinate_tolerance_mm
@@ -53,7 +53,9 @@ class BeamMerger:
         self,
         beams: list[BeamGeometry],
         designs: dict[str, BeamDesignResult],
+        excluded_design_names: set[str] | None = None,
     ) -> BeamMergeResult:
+        excluded_design_names = excluded_design_names or set()
         links = self._build_links(beams)
         components = self._components(beams, links)
         merged_beams: list[BeamGeometry] = []
@@ -79,8 +81,7 @@ class BeamMerger:
 
             ordered = self._ordered_segments(component, links, by_name)
             merged = self._merged_geometry(ordered, by_name)
-            design = self._merged_design(merged.name, ordered, designs, records)
-            self._record_uncovered_end_zones(merged, design, records)
+            design = self._merged_design(merged.name, ordered, designs, records, excluded_design_names)
             merged_beams.append(merged)
             merged_designs[merged.name] = design
             records.append(
@@ -93,20 +94,6 @@ class BeamMerger:
             )
 
         return BeamMergeResult(merged_beams, merged_designs, records)
-
-    @staticmethod
-    def _record_uncovered_end_zones(beam: BeamGeometry, design: BeamDesignResult, records: list[MergeRecord]) -> None:
-        if not design.stations or beam.depth is None or beam.depth <= 0:
-            return
-        end_zone = min(2.0 * beam.depth, beam.length / 2.0)
-        if not any(station.location <= end_zone for station in design.stations):
-            records.append(
-                MergeRecord("警告", "设计站点覆盖", beam.name, "左端 2D 区域无直接设计站点，导出时采用最近站点。")
-            )
-        if not any(station.location >= beam.length - end_zone for station in design.stations):
-            records.append(
-                MergeRecord("警告", "设计站点覆盖", beam.name, "右端 2D 区域无直接设计站点，导出时采用最近站点。")
-            )
 
     def _build_links(self, beams: list[BeamGeometry]) -> dict[str, list[_Link]]:
         links = {beam.name: [] for beam in beams}
@@ -235,16 +222,23 @@ class BeamMerger:
         ordered: list[tuple[str, bool, float]],
         designs: dict[str, BeamDesignResult],
         records: list[MergeRecord],
+        excluded_design_names: set[str],
     ) -> BeamDesignResult:
         stations: list[DesignStation] = []
         offset = 0.0
-        source_names = []
+        source_results: list[BeamDesignResult] = []
         for source, reverse, segment_length in ordered:
-            source_names.append(source)
             design = designs.get(source)
-            if design is None or not design.stations:
-                records.append(MergeRecord("警告", "设计结果", source, "合并梁段没有可用的 ETABS 设计站点。"))
-            elif design.stations:
+            if design is None:
+                design = BeamDesignResult(
+                    source,
+                    status=DesignResultStatus.API_ERROR,
+                    status_message="合并梁段没有可用的 ETABS 设计结果。",
+                )
+                if source not in excluded_design_names:
+                    records.append(MergeRecord("警告", "设计结果", source, design.status_message))
+            source_results.append(design)
+            if design.stations:
                 for station in design.stations:
                     local = segment_length - station.location if reverse else station.location
                     stations.append(_offset_station(station, offset + local))
@@ -255,7 +249,8 @@ class BeamMerger:
             if deduped and abs(deduped[-1].location - station.location) <= 1.0:
                 continue
             deduped.append(station)
-        return BeamDesignResult(name, tuple(deduped))
+        status, message = _merged_status(source_results, bool(deduped))
+        return BeamDesignResult(name, tuple(deduped), status, message)
 
 
 def _offset_station(station: DesignStation, location: float) -> DesignStation:
@@ -274,3 +269,19 @@ def _offset_station(station: DesignStation, location: float) -> DesignStation:
         station.error,
         station.warning,
     )
+
+
+def _merged_status(
+    source_results: list[BeamDesignResult], has_stations: bool
+) -> tuple[DesignResultStatus, str]:
+    statuses = {result.status for result in source_results}
+    messages = [result.status_message for result in source_results if result.status_message]
+    if has_stations:
+        if statuses == {DesignResultStatus.AVAILABLE}:
+            return DesignResultStatus.AVAILABLE, ""
+        return DesignResultStatus.PARTIAL, "；".join(dict.fromkeys(messages))
+    if statuses == {DesignResultStatus.SKIPPED}:
+        return DesignResultStatus.SKIPPED, "；".join(dict.fromkeys(messages))
+    if DesignResultStatus.API_ERROR in statuses:
+        return DesignResultStatus.API_ERROR, "；".join(dict.fromkeys(messages))
+    return DesignResultStatus.NO_RESULTS, "；".join(dict.fromkeys(messages)) or "ETABS 未返回混凝土梁设计站点。"

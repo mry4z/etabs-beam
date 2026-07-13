@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Protocol
+
+
+class DesignResultStatus(str, Enum):
+    """Availability state of a beam's ETABS concrete-design result."""
+
+    AVAILABLE = "有设计结果"
+    NO_RESULTS = "无设计结果"
+    SKIPPED = "不纳入混凝土设计"
+    API_ERROR = "读取失败"
+    PARTIAL = "部分梁段缺设计结果"
 
 
 @dataclass(frozen=True)
@@ -27,6 +38,8 @@ class DesignStation:
 class BeamDesignResult:
     beam_name: str
     stations: tuple[DesignStation, ...] = field(default_factory=tuple)
+    status: DesignResultStatus = DesignResultStatus.AVAILABLE
+    status_message: str = ""
 
     @property
     def has_results(self) -> bool:

@@ -15,6 +15,8 @@ def test_export_creates_a_readable_workbook(tmp_path: Path) -> None:
     workbook = load_workbook(output)
     assert workbook.sheetnames == ["梁表", "设计站点", "导出说明", "异常记录"]
     assert workbook["梁表"].cell(2, 1).value == "B1"
+    headers = [cell.value for cell in workbook["梁表"][1]]
+    assert workbook["梁表"].cell(2, headers.index("设计结果状态") + 1).value == "有设计结果"
 
 
 def test_export_includes_maximum_torsion_longitudinal_area(tmp_path: Path) -> None:

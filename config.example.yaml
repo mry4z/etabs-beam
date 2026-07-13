@@ -29,8 +29,8 @@ geometry:
   # 超过此值则判为非水平梁（连续梁判据）
   slope_limit_deg: 1.0
 
-  # 同截面梁段合并时允许的平面夹角（度）；用于轻微折线梁
-  merge_angle_limit_deg: 3.0
+  # 同截面梁段合并时允许的平面夹角（度）；用于折线梁
+  merge_angle_limit_deg: 15.0
 
   # 导出固定使用的 ETABS 当前单位；运行结束后自动恢复模型原单位
   # 当前 MVP 仅接受 N_mm_C

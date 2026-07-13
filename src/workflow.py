@@ -11,6 +11,7 @@ from src.core.continuity_analyzer import ContinuityAnalyzer
 from src.core.etabs_connector import EtabsConnector
 from src.core.geometry_extractor import GeometryExtractor
 from src.design.etabs_result import EtabsResultProvider
+from src.design.provider import BeamDesignResult, DesignResultStatus
 from src.excel_export import export_beam_schedule
 from src.utils.logger import configure_logger
 
@@ -36,17 +37,41 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
         provider = EtabsResultProvider(sap)
         raw_designs = {}
         special_records: list[MergeRecord] = []
+        excluded_design_names: set[str] = set()
         for beam in beams:
+            if beam.depth is None or beam.section.strip().casefold() in {"", "none", "null"}:
+                raw_designs[beam.name] = BeamDesignResult(
+                    beam.name,
+                    status=DesignResultStatus.SKIPPED,
+                    status_message="非混凝土或无有效混凝土截面。",
+                )
+                excluded_design_names.add(beam.name)
+                logger.info("梁 %s 截面 %s 不属于当前混凝土设计统计范围，跳过设计结果读取。", beam.name, beam.section)
+                continue
             try:
                 raw_designs[beam.name] = provider.get_beam_design(beam.name)
+                if not raw_designs[beam.name].has_results:
+                    special_records.append(
+                        MergeRecord(
+                            "警告",
+                            "设计结果",
+                            beam.name,
+                            raw_designs[beam.name].status_message or "ETABS 未返回混凝土梁设计站点。",
+                        )
+                    )
             except Exception as exc:
                 logger.warning("梁 %s 未读取到设计结果：%s", beam.name, exc)
+                raw_designs[beam.name] = BeamDesignResult(
+                    beam.name,
+                    status=DesignResultStatus.API_ERROR,
+                    status_message=str(exc),
+                )
                 special_records.append(MergeRecord("警告", "设计结果", beam.name, str(exc)))
 
         merge_result = BeamMerger(
             config.geometry.coordinate_tolerance_mm,
             config.geometry.merge_angle_limit_deg,
-        ).merge(beams, raw_designs)
+        ).merge(beams, raw_designs, excluded_design_names)
         beams = merge_result.beams
         designs = merge_result.designs
         special_records.extend(merge_result.records)

@@ -57,6 +57,8 @@ def export_beam_schedule(
             "组内梁数": group_size,
             "左邻梁": neighbors[0] or "",
             "右邻梁": neighbors[1] or "",
+            "设计结果状态": design.status.value,
+            "设计结果说明": design.status_message,
             "设计站点数": len(design.stations),
             "左端顶部弯矩纵筋面积（2D 内）": None,
             "跨中顶部弯矩纵筋面积": None,

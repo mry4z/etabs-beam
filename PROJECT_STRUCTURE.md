@@ -22,6 +22,7 @@ etabs beam/
 │   │   ├── etabs_connector.py                 # 已实现：附着、API 错误处理和临时单位恢复
 │   │   ├── geometry_extractor.py              # 已实现：梁识别与几何提取
 │   │   ├── beam_merger.py                     # 已实现：同截面过度分割梁段合并与特殊情况记录
+│   │   ├── merge_comparison.py                 # 已实现：不同归并夹角的逻辑梁差异比较
 │   │   └── continuity_analyzer.py             # 已实现：连续梁分组
 │   ├── design/
 │   │   ├── __init__.py
@@ -51,6 +52,7 @@ etabs beam/
 │   ├── ETABS_OAPI_VALIDATION.md               # 已实现：实测 API 用法与验证证据
 │   ├── DEVELOPMENT.md                          # 已实现：开发与质量检查说明
 │   ├── USER_GUIDE.md                           # 已实现：用户操作说明
+│   ├── DRAWING_NUMBERING_INTERCHANGE.md        # 远期：逻辑梁编号、局部坐标与 CAD 中间数据规范
 │   ├── API.md                                  # 已实现：当前代码 API 概览
 │   └── api/design_results.md                   # 已实现：设计摘要字段映射
 │
@@ -59,6 +61,7 @@ etabs beam/
 │
 ├── build/output/
 │   ├── reports/                               # 生成的 .xlsx 梁表（不入库）
+│   ├── drawing_data/                           # 远期：逻辑梁编号与 CAD 中间数据（不入库）
 │   ├── model_archives/                        # 远期：ETABS SQLite 数据本地只读归档（不入库）
 │   └── logs/                                  # 工作流日志（不入库）
 │
@@ -144,6 +147,7 @@ EtabsResultProvider ──→ BeamDesignResult[] ──→ ExcelExport
 | 文件 | 位置 | 是否入库 |
 |---|---|---|
 | 梁表 | `build/output/reports/beam_schedule_<timestamp>.xlsx` | 否 |
+| 图纸中间数据（远期） | `build/output/drawing_data/` | 否 |
 | 模型数据归档（远期） | `build/output/model_archives/` | 否 |
 | 运行日志 | `build/output/logs/etabs_beam_<timestamp>.log` | 否 |
 | 本机配置 | `config.yaml` 或 `config.local.yaml` | 否 |

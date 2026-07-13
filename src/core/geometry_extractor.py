@@ -79,7 +79,40 @@ class GeometryExtractor:
             self.sap.FrameObj.GetDesignOrientation(name, eFrameDesignOrientation.Beam),
             f"GetDesignOrientation({name})",
         )
-        return bool(values) and int(values[0]) == self.BEAM_DESIGN_ORIENTATION
+        if not values or int(values[0]) != self.BEAM_DESIGN_ORIENTATION:
+            return False
+        section, _ = api_values(self.sap.FrameObj.GetSection(name, None, None), f"GetSection({name})")
+        return self._is_concrete_section(str(section))
+
+    def _is_concrete_section(self, section_name: str) -> bool:
+        """Return whether a frame property is eligible for concrete beam design.
+
+        Rigid-end helper members are intentionally excluded before geometry
+        extraction. For other properties, use the material type returned by
+        ``PropFrame.GetNameInPropFile`` and ``PropMaterial.GetTypeOAPI``. The
+        supported-shape fallback keeps compatibility with older OAPI builds.
+        """
+        if not section_name.strip() or section_name.strip().casefold() in {"none", "null"}:
+            return False
+        if "rigid" in section_name.casefold():
+            return False
+        try:
+            from ETABSv1 import eFramePropType, eMatType
+
+            values = api_values(
+                self.sap.PropFrame.GetNameInPropFile(section_name, None, None, None, eFramePropType.Rectangular),
+                f"PropFrame.GetNameInPropFile({section_name})",
+            )
+            material_name = str(values[2]) if len(values) >= 3 and values[2] else ""
+            if material_name:
+                material_type = api_values(
+                    self.sap.PropMaterial.GetTypeOAPI(material_name, eMatType.Concrete, 0),
+                    f"PropMaterial.GetTypeOAPI({material_name})",
+                )[0]
+                return material_type == eMatType.Concrete or "concrete" in str(material_type).casefold()
+        except Exception:
+            pass
+        return self._section_depth(section_name) is not None
 
     def _extract_one(self, name: str) -> BeamGeometry:
         label, story = api_values(self.sap.FrameObj.GetLabelFromName(name, None, None), f"GetLabelFromName({name})")
