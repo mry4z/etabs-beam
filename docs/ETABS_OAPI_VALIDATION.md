@@ -234,11 +234,11 @@ API ID `278156` 当前附着模型为 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P47
 
 首轮 CAD 复核发现，连续且共线的梁段会因截面变化被 `BeamMerger` 分成多个候选组，进而重新编号并造成假悬挑。修正后的 `beam_line_span_analyzer` 增加跨截面端点拓扑串接：截面仅保留为源 Object/Span 属性，梁线确定后再按柱或主梁支承分跨；同时 DXF 标注改为沿多段路径累计长度的真实中点，并采用中点所在梁段切线方向。
 
-使用 API ID `278156`、模型 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P4700-GF.v6.2.EDB` 重新验证：读取 4,166 根混凝土梁，识别 1,173 条 Beam Line、2,976 跨（PB 519 条/1,556 跨，SB 654 条/1,420 跨），records 中无警告或错误。原 `GF-GRD-F-SB17`～`SB24` 已合并为一根 22 跨梁线，原 `T1-F2-SB65`、`SB70`、`SB75`、`SB85`、`SB88` 已合并为一根 6 跨梁线。输出文件为：
+使用 API ID `278156`、模型 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P4700-GF.v6.2.EDB` 重新验证：读取 4,166 根混凝土梁，识别 1,173 条 Beam Line、2,976 跨（PB 519 条/1,556 跨，SB 654 条/1,420 跨），records 中无警告或错误。源 Object 全部被覆盖；其中 38 个 Object 的实体几何跨越结构支承，因此在相邻 Span 中按实际贡献一对多列示。原 `GF-GRD-F-SB17`～`SB24` 已合并为一根 22 跨梁线，原 `T1-F2-SB65`、`SB70`、`SB75`、`SB85`、`SB88` 已合并为一根 6 跨梁线。输出文件为：
 
-- `build/output/drawing_data/beam_spans_structural_stitched_20260713_205852.dxf`
-- `build/output/drawing_data/beam_spans_structural_stitched_20260713_205852.csv`
-- `build/output/drawing_data/beam_spans_structural_stitched_20260713_205852.records.txt`
+- `build/output/drawing_data/beam_spans_structural_stitched_20260713_211158.dxf`
+- `build/output/drawing_data/beam_spans_structural_stitched_20260713_211158.csv`
+- `build/output/drawing_data/beam_spans_structural_stitched_20260713_211158.records.txt`
 
 离线回归测试为 `36 passed, 1 skipped`，覆盖率 `82.07%`。上述输出尚待用户进行 CAD 全量复核，复核通过后再接入正式 Excel 和模型方向整理流程。
 

@@ -432,12 +432,24 @@ def _source_names_by_paths(
             (source.start[1] + source.end[1]) / 2,
             (source.start[2] + source.end[2]) / 2,
         )
-        position = _path_position(line_path, midpoint, settings.coordinate_tolerance_mm * 5)
-        if position is None:
-            # A source Object may cross a support point or carry a small
-            # modelling gap. Assign it to the nearest span rather than
-            # duplicating the whole candidate into every split line.
-            position = _path_position(line_path, midpoint, float("inf"))
+        source_start = _path_position(line_path, source.start, settings.coordinate_tolerance_mm * 5)
+        source_end = _path_position(line_path, source.end, settings.coordinate_tolerance_mm * 5)
+        if source_start is None or source_end is None:
+            # A source Object may carry a small modelling gap; use the nearest
+            # projection for its endpoints rather than dropping its mapping.
+            source_start = _path_position(line_path, source.start, float("inf"))
+            source_end = _path_position(line_path, source.end, float("inf"))
+        if source_start is not None and source_end is not None:
+            source_low, source_high = sorted((source_start, source_end))
+            assigned = False
+            for index, (start, end) in enumerate(zip(starts, ends)):
+                overlap = min(source_high, end) - max(source_low, start)
+                if overlap > settings.coordinate_tolerance_mm * 0.5:
+                    selected[index].append(name)
+                    assigned = True
+            if assigned:
+                continue
+        position = _path_position(line_path, midpoint, float("inf"))
         if position is None:
             continue
         index = next(
