@@ -1,10 +1,43 @@
 from src.core.beam_line_span_analyzer import BeamLineSpanSettings, analyze_beam_lines
 from src.core.geometry_extractor import BeamGeometry
-from src.drawing.dxf_export import export_structural_spans_csv, export_structural_spans_dxf
+from src.drawing.dxf_export import _midpoint, export_structural_spans_csv, export_structural_spans_dxf
 
 
-def _beam(name, pi, pj, start, end):
-    return BeamGeometry(name, name, "F2", pi, pj, start, end, "B", 600)
+def _beam(name, pi, pj, start, end, section="B"):
+    return BeamGeometry(name, name, "F2", pi, pj, start, end, section, 600)
+
+
+def test_section_changes_across_supports_keep_one_primary_beam_line() -> None:
+    beams = [
+        _beam("A", "C1", "P", (0, 0, 0), (10, 0, 0), "B600"),
+        _beam("B", "P", "C2", (10, 0, 0), (20, 0, 0), "B800"),
+        _beam("C", "C2", "FREE", (20, 0, 0), (30, 0, 0), "B700"),
+    ]
+    result = analyze_beam_lines(beams, {"C1", "C2"})
+    assert [line.beam_line_id for line in result.lines] == ["F2-PB1"]
+    assert result.lines[0].section == "VARIES"
+    assert [span.span_id for span in result.spans] == ["F2-PB1-S1", "F2-PB1-S2"]
+    assert result.spans[-1].is_cantilever is True
+    assert all(name in result.lines[0].source_objects for name in ("A", "B", "C"))
+
+
+def test_section_changes_on_secondary_line_split_only_at_primary_intersection() -> None:
+    beams = [
+        _beam("P1", "C1", "C2", (0, 0, 0), (10, 0, 0)),
+        _beam("P2", "C3", "C4", (0, 5, 0), (10, 5, 0)),
+        _beam("P3", "C5", "C6", (0, 10, 0), (10, 10, 0)),
+        _beam("S1", "Q1", "Q2", (5, 0, 0), (5, 5, 0), "B600"),
+        _beam("S2", "Q2", "Q3", (5, 5, 0), (5, 10, 0), "B800"),
+    ]
+    result = analyze_beam_lines(beams, {"C1", "C2", "C3", "C4", "C5", "C6"})
+    secondary = [span for span in result.spans if span.beam_type == "SB"]
+    assert len([line for line in result.lines if line.beam_type == "SB"]) == 1
+    assert [span.span_id for span in secondary] == ["F2-SB1-S1", "F2-SB1-S2"]
+    assert [span.source_objects for span in secondary] == [("S1",), ("S2",)]
+
+
+def test_dxf_midpoint_uses_path_length_not_middle_vertex() -> None:
+    assert _midpoint(((0, 0, 0), (1, 0, 0), (1, 9, 0))) == (1, 4.0, 0.0)
 
 
 def test_primary_line_splits_at_columns_and_keeps_cantilever() -> None:

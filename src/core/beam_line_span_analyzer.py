@@ -131,11 +131,12 @@ def _analyze_story(
         for beam in beams
     }
     merge_result = BeamMerger(angle_limit_deg=settings.merge_angle_deg).merge(beams, designs)
-    candidates = merge_result.beams
+    candidates, stitch_records = _stitch_candidates(merge_result.beams, settings)
     records = [
         f"{record.severity}/{record.category}: {record.message} [{record.beam_names}]"
         for record in merge_result.records
     ]
+    records.extend(stitch_records)
     source_by_name = {beam.name: beam for beam in beams}
     primary_candidates = [
         beam for beam in candidates
@@ -151,6 +152,187 @@ def _analyze_story(
         secondary_candidates, "SB", (), primary_index, source_by_name, settings,
     )
     return primary_lines + secondary_lines, records
+
+
+def _stitch_candidates(
+    candidates: list[BeamGeometry], settings: BeamLineSpanSettings
+) -> tuple[list[BeamGeometry], list[str]]:
+    """Join candidate paths that are one geometric Beam Line across a support.
+
+    ``BeamMerger`` intentionally keeps section changes separate because design
+    data is section-sensitive. Drawing identity is different: a continuous
+    primary/secondary line may change section at a column or other support and
+    must still receive one PB/SB number with multiple spans. This second-stage
+    graph uses endpoint proximity and local tangent continuity, while refusing
+    to join a curved candidate to a straight candidate (curved primary lines
+    have an independent drawing identity).
+    """
+    if len(candidates) < 2:
+        return candidates, []
+
+    endpoint_links: dict[tuple[int, int], tuple[int, int]] = {}
+    pair_candidates: list[tuple[float, float, int, int, int, int]] = []
+    for left_index, left in enumerate(candidates):
+        for right_index in range(left_index + 1, len(candidates)):
+            right = candidates[right_index]
+            if left.story != right.story:
+                continue
+            if _candidate_curvature(left, settings) != _candidate_curvature(right, settings):
+                continue
+            for left_endpoint in (0, 1):
+                for right_endpoint in (0, 1):
+                    gap = distance(_candidate_endpoint(left, left_endpoint), _candidate_endpoint(right, right_endpoint))
+                    if gap > settings.coordinate_tolerance_mm:
+                        continue
+                    angle = plan_angle_deg(
+                        *_candidate_tangent(left, left_endpoint),
+                        *_candidate_tangent(right, right_endpoint),
+                    )
+                    if angle <= settings.merge_angle_deg:
+                        pair_candidates.append(
+                            (angle, gap, left_index, left_endpoint, right_index, right_endpoint)
+                        )
+
+    # At a support there can be several objects meeting at one point. Consume
+    # each physical endpoint once and select the most collinear continuation.
+    pair_candidates.sort()
+    for _, _, left_index, left_endpoint, right_index, right_endpoint in pair_candidates:
+        left_key = (left_index, left_endpoint)
+        right_key = (right_index, right_endpoint)
+        if left_key in endpoint_links or right_key in endpoint_links:
+            continue
+        endpoint_links[left_key] = right_key
+        endpoint_links[right_key] = left_key
+
+    components: list[list[tuple[int, bool]]] = []
+    visited: set[int] = set()
+    for index, candidate in enumerate(candidates):
+        if index in visited:
+            continue
+        component_indices = _candidate_component(index, endpoint_links)
+        visited.update(component_indices)
+        if len(component_indices) == 1:
+            components.append([(index, False)])
+            continue
+        ordered = _order_candidate_component(component_indices, endpoint_links)
+        if ordered is None:
+            # A cycle is not a drawable open Beam Line. Preserve its candidates
+            # and let the existing merge records expose the topology for review.
+            components.extend([[(member, False)] for member in component_indices])
+        else:
+            components.append(ordered)
+
+    stitched: list[BeamGeometry] = []
+    records: list[str] = []
+    for ordered in components:
+        if len(ordered) == 1:
+            stitched.append(candidates[ordered[0][0]])
+            continue
+        merged = _stitch_geometry([candidates[index] for index, _ in ordered], [reverse for _, reverse in ordered])
+        stitched.append(merged)
+        sections = tuple(dict.fromkeys(candidate.section for candidate, _ in zip(
+            [candidates[index] for index, _ in ordered], ordered
+        )))
+        if len(sections) > 1:
+            records.append(
+                "信息/梁线串接：{} [{}]；跨截面变化保留为同一 Beam Line。".format(
+                    ",".join(merged.source_names), " / ".join(sections)
+                )
+            )
+    return stitched, records
+
+
+def _candidate_component(index: int, links: dict[tuple[int, int], tuple[int, int]]) -> list[int]:
+    component: list[int] = []
+    stack = [index]
+    while stack:
+        current = stack.pop()
+        if current in component:
+            continue
+        component.append(current)
+        for endpoint in (0, 1):
+            link = links.get((current, endpoint))
+            if link is not None and link[0] not in component:
+                stack.append(link[0])
+    return component
+
+
+def _order_candidate_component(
+    component: list[int], links: dict[tuple[int, int], tuple[int, int]]
+) -> list[tuple[int, bool]] | None:
+    endpoints = [
+        (index, endpoint)
+        for index in component
+        for endpoint in (0, 1)
+        if (index, endpoint) not in links
+    ]
+    if len(endpoints) != 2:
+        return None
+    start_index, start_endpoint = endpoints[0]
+    ordered: list[tuple[int, bool]] = []
+    previous: tuple[int, int] | None = None
+    current_index, incoming_endpoint = start_index, start_endpoint
+    while True:
+        reverse = incoming_endpoint == 1
+        ordered.append((current_index, reverse))
+        outgoing_endpoint = 1 - incoming_endpoint
+        link = links.get((current_index, outgoing_endpoint))
+        if link is None:
+            break
+        if previous == link or link[0] in {index for index, _ in ordered}:
+            return None
+        previous = (current_index, outgoing_endpoint)
+        current_index, incoming_endpoint = link
+    return ordered if len(ordered) == len(component) else None
+
+
+def _candidate_endpoint(candidate: BeamGeometry, endpoint: int) -> Point3D:
+    path = candidate.path_points or (candidate.start, candidate.end)
+    return path[0] if endpoint == 0 else path[-1]
+
+
+def _candidate_tangent(candidate: BeamGeometry, endpoint: int) -> tuple[Point3D, Point3D]:
+    path = candidate.path_points or (candidate.start, candidate.end)
+    if len(path) < 2:
+        return candidate.start, candidate.end
+    return (path[0], path[1]) if endpoint == 0 else (path[-1], path[-2])
+
+
+def _candidate_curvature(candidate: BeamGeometry, settings: BeamLineSpanSettings) -> bool:
+    return _is_curved(candidate.path_points or (candidate.start, candidate.end), settings)
+
+
+def _stitch_geometry(candidates: list[BeamGeometry], reverses: list[bool]) -> BeamGeometry:
+    points: list[Point3D] = []
+    source_names: list[str] = []
+    for candidate, reverse in zip(candidates, reverses):
+        path = candidate.path_points or (candidate.start, candidate.end)
+        segment = tuple(reversed(path)) if reverse else path
+        if not points:
+            points.extend(segment)
+        else:
+            points.extend(segment[1:])
+        source_names.extend(candidate.source_names or (candidate.name,))
+    first_path = candidates[0].path_points or (candidates[0].start, candidates[0].end)
+    last_path = candidates[-1].path_points or (candidates[-1].start, candidates[-1].end)
+    first_path = tuple(reversed(first_path)) if reverses[0] else first_path
+    last_path = tuple(reversed(last_path)) if reverses[-1] else last_path
+    sections = tuple(dict.fromkeys(candidate.section for candidate in candidates))
+    depths = [candidate.depth for candidate in candidates if candidate.depth is not None]
+    depth = depths[0] if depths and all(abs(value - depths[0]) <= 1.0 for value in depths) else None
+    return BeamGeometry(
+        name="STITCHED[" + "+".join(source_names) + "]",
+        label="STITCHED[" + "+".join(source_names) + "]",
+        story=candidates[0].story,
+        point_i=candidates[0].point_j if reverses[0] else candidates[0].point_i,
+        point_j=candidates[-1].point_i if reverses[-1] else candidates[-1].point_j,
+        start=first_path[0],
+        end=last_path[-1],
+        section=sections[0] if len(sections) == 1 else "VARIES",
+        depth=depth,
+        source_names=tuple(source_names),
+        path_points=tuple(points),
+    )
 
 
 def _column_coordinates(beams: list[BeamGeometry], names: set[str], tolerance: float) -> tuple[Point3D, ...]:
@@ -193,10 +375,21 @@ def _split_candidates(
         path = _oriented_path(candidate.path_points or (candidate.start, candidate.end))
         markers = column_points if beam_type == "PB" else _path_intersections(path, primary_index, settings)
         parts = _split_path(path, markers, settings.coordinate_tolerance_mm)
-        for line_parts in _group_parts(parts, settings, beam_type):
+        groups = _group_parts(parts, settings, beam_type)
+        all_span_paths = tuple(part for group in groups for part in group)
+        all_span_sources = _source_names_by_paths(
+            candidate,
+            _join_paths(all_span_paths),
+            all_span_paths,
+            source_by_name,
+            settings,
+        )
+        source_offset = 0
+        for line_parts in groups:
             span_paths = tuple(line_parts)
             line_path = _join_paths(span_paths)
-            span_sources = _source_names_by_paths(candidate, line_path, span_paths, source_by_name, settings)
+            span_sources = all_span_sources[source_offset:source_offset + len(span_paths)]
+            source_offset += len(span_paths)
             lines.append(
                 _UnnumberedLine(
                     candidate.story,
@@ -221,8 +414,6 @@ def _source_names_by_paths(
     settings: BeamLineSpanSettings,
 ) -> tuple[tuple[str, ...], ...]:
     names = candidate.source_names or (candidate.name,)
-    if len(span_paths) == 1:
-        return (names,)
     boundaries = [_path_length(path) for path in span_paths]
     starts: list[float] = []
     ends: list[float] = []
@@ -243,6 +434,11 @@ def _source_names_by_paths(
         )
         position = _path_position(line_path, midpoint, settings.coordinate_tolerance_mm * 5)
         if position is None:
+            # A source Object may cross a support point or carry a small
+            # modelling gap. Assign it to the nearest span rather than
+            # duplicating the whole candidate into every split line.
+            position = _path_position(line_path, midpoint, float("inf"))
+        if position is None:
             continue
         index = next(
             (i for i, (start, end) in enumerate(zip(starts, ends))
@@ -250,8 +446,6 @@ def _source_names_by_paths(
             len(selected) - 1,
         )
         selected[index].append(name)
-    if not any(selected):
-        return (names,) + tuple(() for _ in span_paths[1:])
     return tuple(tuple(group) for group in selected)
 
 

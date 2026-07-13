@@ -14,7 +14,7 @@ from typing import Iterable
 
 from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.merge_comparison import MergeAngleDifference
-from src.utils.geometry import Point3D
+from src.utils.geometry import Point3D, distance
 
 
 _LAYERS = (
@@ -40,13 +40,18 @@ def _safe_text(value: str) -> str:
 def _midpoint(points: tuple[Point3D, ...]) -> Point3D:
     if not points:
         return (0.0, 0.0, 0.0)
-    return points[len(points) // 2]
+    if len(points) == 1:
+        return points[0]
+    total = sum(distance(left, right) for left, right in _pairwise(points))
+    if total <= 0.0:
+        return points[0]
+    return _point_at_distance(points, total / 2.0)
 
 
 def _text_angle(points: tuple[Point3D, ...]) -> float:
     if len(points) < 2:
         return 0.0
-    start, end = points[0], points[-1]
+    start, end = _midpoint_segment(points)
     angle = degrees(atan2(end[1] - start[1], end[0] - start[0]))
     # Keep labels readable rather than upside down.
     if angle > 90.0:
@@ -54,6 +59,42 @@ def _text_angle(points: tuple[Point3D, ...]) -> float:
     elif angle <= -90.0:
         angle += 180.0
     return angle
+
+
+def _point_at_distance(points: tuple[Point3D, ...], target: float) -> Point3D:
+    remaining = max(0.0, target)
+    for left, right in _pairwise(points):
+        segment_length = distance(left, right)
+        if segment_length <= 0.0:
+            continue
+        if remaining <= segment_length:
+            ratio = remaining / segment_length
+            return tuple(
+                left[index] + (right[index] - left[index]) * ratio for index in range(3)
+            )  # type: ignore[return-value]
+        remaining -= segment_length
+    return points[-1]
+
+
+def _midpoint_segment(points: tuple[Point3D, ...]) -> tuple[Point3D, Point3D]:
+    """Return the segment containing the true path-length midpoint."""
+    if len(points) < 2:
+        point = points[0] if points else (0.0, 0.0, 0.0)
+        return point, point
+    total = sum(distance(left, right) for left, right in _pairwise(points))
+    if total <= 0.0:
+        return points[0], points[0]
+    remaining = total / 2.0
+    last_nonzero = (points[0], points[-1])
+    for left, right in _pairwise(points):
+        segment_length = distance(left, right)
+        if segment_length <= 0.0:
+            continue
+        last_nonzero = (left, right)
+        if remaining <= segment_length:
+            return left, right
+        remaining -= segment_length
+    return last_nonzero
 
 
 def _line(layer: str, color: int, start: Point3D, end: Point3D) -> list[str]:
