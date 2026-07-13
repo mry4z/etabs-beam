@@ -24,6 +24,9 @@ etabs beam/
 │   │   ├── beam_merger.py                     # 已实现：同截面过度分割梁段合并与特殊情况记录
 │   │   ├── merge_comparison.py                 # 已实现：不同归并夹角的逻辑梁差异比较
 │   │   └── continuity_analyzer.py             # 已实现：连续梁分组
+│   ├── drawing/
+│   │   ├── __init__.py
+│   │   └── dxf_export.py                       # 已实现：归并差异的 CAD/DXF 图形化复核
 │   ├── design/
 │   │   ├── __init__.py
 │   │   ├── provider.py                        # 已实现：统一设计结果数据模型/协议
@@ -61,7 +64,7 @@ etabs beam/
 │
 ├── build/output/
 │   ├── reports/                               # 生成的 .xlsx 梁表（不入库）
-│   ├── drawing_data/                           # 远期：逻辑梁编号与 CAD 中间数据（不入库）
+│   ├── drawing_data/                           # 归并差异 DXF 与远期 CAD 中间数据（不入库）
 │   ├── model_archives/                        # 远期：ETABS SQLite 数据本地只读归档（不入库）
 │   └── logs/                                  # 工作流日志（不入库）
 │

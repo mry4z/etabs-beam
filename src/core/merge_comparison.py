@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from src.core.beam_merger import BeamMerger
 from src.core.geometry_extractor import BeamGeometry
 from src.design.provider import BeamDesignResult, DesignResultStatus
+from src.utils.geometry import Point3D
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,8 @@ class MergeAngleDifference:
     source_objects: tuple[str, ...]
     lower_angle_groups: tuple[tuple[str, ...], ...]
     logical_length_mm: float
+    path_points: tuple[Point3D, ...] = ()
+    lower_paths: tuple[tuple[Point3D, ...], ...] = ()
 
 
 def compare_merge_angles(
@@ -35,6 +38,11 @@ def compare_merge_angles(
         for beam in lower.beams
         for source in _source_names(beam)
     }
+    lower_path_by_source = {
+        source: (beam.path_points or (beam.start, beam.end))
+        for beam in lower.beams
+        for source in _source_names(beam)
+    }
 
     differences: list[MergeAngleDifference] = []
     for beam in higher.beams:
@@ -42,7 +50,15 @@ def compare_merge_angles(
         lower_groups = tuple(sorted({lower_by_source[source] for source in sources}))
         if len(lower_groups) > 1:
             differences.append(
-                MergeAngleDifference(beam.story, beam.section, sources, lower_groups, beam.length)
+                MergeAngleDifference(
+                    beam.story,
+                    beam.section,
+                    sources,
+                    lower_groups,
+                    beam.length,
+                    beam.path_points or (beam.start, beam.end),
+                    tuple(lower_path_by_source[group[0]] for group in lower_groups),
+                )
             )
     return differences
 

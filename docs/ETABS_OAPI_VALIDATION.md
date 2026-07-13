@@ -216,6 +216,8 @@ after  = N_mm_C
 
 在相同模型、相同混凝土梁筛选规则下，`15°` 导出读取 4,166 根混凝土梁，得到 1,651 根逻辑梁，报告为 `build/output/reports/beam_schedule_20260713_131722.xlsx`。同时生成 `build/output/reports/merge_angle_3_vs_15_20260713_131921.csv`：其中列出相对 `3°` 新增的 51 个合并组。该清单需要按柱、支座和实际折线意图人工抽查；在确认前，15°是待审查参数而非最终工程规则。
 
+为支持全量图形核对，新增无第三方 CAD 依赖的 ASCII DXF 导出器 `src/drawing/dxf_export.py`。它直接使用每个梁对象的 ETABS 点坐标：红色图层 `MERGE15_NEW` 绘制仅在 15° 下连接的梁段，蓝色图层 `MERGE3_GROUP` 绘制对应的 3° 原逻辑梁组，黄色/青色图层标注两级逻辑梁中点和映射编号。当前模型已生成 `build/output/drawing_data/merge_angle_3_vs_15_20260713_150825.dxf`（514 条线段、169 个文字/标记实体）及同名 `.csv` 坐标映射文件，可直接载入 AutoCAD/BricsCAD 进行全面复核；DXF 使用毫米平面坐标，不修改模型。
+
 ---
 
 ## 7. 当前限制与后续验证
