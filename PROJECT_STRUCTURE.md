@@ -56,6 +56,7 @@ etabs beam/
 │   ├── DEVELOPMENT.md                          # 已实现：开发与质量检查说明
 │   ├── USER_GUIDE.md                           # 已实现：用户操作说明
 │   ├── DRAWING_NUMBERING_INTERCHANGE.md        # 远期：逻辑梁编号、局部坐标与 CAD 中间数据规范
+│   ├── BEAM_LINE_SPAN_RULES.md                  # 已确认：梁线、主次梁支承与结构分跨可执行规范
 │   ├── API.md                                  # 已实现：当前代码 API 概览
 │   └── api/design_results.md                   # 已实现：设计摘要字段映射
 │
