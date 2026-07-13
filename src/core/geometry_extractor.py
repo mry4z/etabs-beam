@@ -64,6 +64,39 @@ class GeometryExtractor:
         _, names = values
         return [str(name) for name in list(names) if self._is_beam(str(name))]
 
+    def column_point_names(self) -> set[str]:
+        """Return point names touched by frame objects designed as columns.
+
+        This is intentionally a separate read-only query used by drawing
+        classification. Rigid-end helper members are not included as beams, so
+        a beam touching a real column joint is classified as a primary beam.
+        """
+        from ETABSv1 import eFrameDesignOrientation
+
+        values = api_values(self.sap.FrameObj.GetNameList(0, None), "FrameObj.GetNameList")
+        if len(values) != 2:
+            raise EtabsApiError("FrameObj.GetNameList: 返回参数数量异常。")
+        points: set[str] = set()
+        for name in list(values[1]):
+            object_name = str(name)
+            orientation = api_values(
+                self.sap.FrameObj.GetDesignOrientation(object_name, eFrameDesignOrientation.Column),
+                f"GetDesignOrientation({object_name})",
+            )
+            if not orientation or int(orientation[0]) != 1:
+                continue
+            try:
+                point_i, point_j = api_values(
+                    self.sap.FrameObj.GetPoints(object_name, None, None),
+                    f"GetPoints({object_name})",
+                )
+            except EtabsApiError:
+                # A stale/deleted helper object must not prevent drawing the
+                # remaining model; it simply cannot establish a column joint.
+                continue
+            points.update((str(point_i), str(point_j)))
+        return points
+
     def extract(self, selection_mode: str = "all") -> list[BeamGeometry]:
         if selection_mode not in {"all", "selected"}:
             raise ValueError("selection_mode 必须是 all 或 selected。")

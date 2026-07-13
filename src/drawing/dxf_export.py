@@ -17,6 +17,8 @@ from src.utils.geometry import Point3D
 
 
 _LAYERS = (
+    ("BEAM_PRIMARY", 2),       # yellow: beam touching a column joint
+    ("BEAM_SECONDARY", 3),     # green: beam not touching a column joint
     ("MERGE15_NEW", 1),       # red: newly connected at 15 degrees
     ("MERGE3_GROUP", 5),      # blue: original 3-degree groups
     ("MERGE15_MID", 2),       # yellow: 15-degree logical midpoint
@@ -59,6 +61,20 @@ def _line(layer: str, color: int, start: Point3D, end: Point3D) -> list[str]:
         "10", f"{start[0]:.3f}", "20", f"{start[1]:.3f}", "30", f"{start[2]:.3f}",
         "11", f"{end[0]:.3f}", "21", f"{end[1]:.3f}", "31", f"{end[2]:.3f}",
     ]
+
+
+def _polyline(layer: str, color: int, points: tuple[Point3D, ...]) -> list[str]:
+    """Write one classic POLYLINE entity so all fragments remain one CAD object."""
+    if len(points) < 2:
+        return []
+    values = ["0", "POLYLINE", "8", layer, "62", str(color), "66", "1", "70", "0"]
+    for point in points:
+        values.extend([
+            "0", "VERTEX", "8", layer, "10", f"{point[0]:.3f}",
+            "20", f"{point[1]:.3f}", "30", f"{point[2]:.3f}",
+        ])
+    values.extend(["0", "SEQEND", "8", layer])
+    return values
 
 
 def _circle(layer: str, color: int, center: Point3D, radius: float) -> list[str]:
@@ -179,6 +195,131 @@ def export_merge_angle_csv(
                 "+".join(difference.source_objects), groups, points,
             ])
     return path
+
+
+def export_beam_groups_dxf(
+    logical_beams: Iterable[object],
+    source_beams: Iterable[object],
+    column_point_names: set[str],
+    output_path: str | Path,
+    *,
+    model_name: str = "",
+    text_height: float = 150.0,
+) -> Path:
+    """Export every logical beam as one polyline with primary/secondary labels.
+
+    Primary classification is explicit and auditable: if any source Object's I
+    or J point is touched by a column frame, the logical beam is primary (yellow);
+    otherwise it is secondary (green). IDs use ``[story]-PB/SB<n>-S1`` and are
+    deterministic within each story/category for downstream CAD checks.
+    """
+    logical_beams = list(logical_beams)
+    source_by_name = {beam.name: beam for beam in source_beams}
+    enriched: list[tuple[object, bool]] = []
+    for beam in logical_beams:
+        source_names = beam.source_names or (beam.name,)
+        primary = any(
+            source_by_name[name].point_i in column_point_names
+            or source_by_name[name].point_j in column_point_names
+            for name in source_names
+            if name in source_by_name
+        )
+        enriched.append((beam, primary))
+    counters: dict[tuple[str, bool], int] = {}
+    ordered = sorted(
+        enriched,
+        key=lambda item: (
+            str(item[0].story), not item[1],
+            min(point[0] for point in (item[0].path_points or (item[0].start, item[0].end))),
+            min(point[1] for point in (item[0].path_points or (item[0].start, item[0].end))),
+            item[0].name,
+        ),
+    )
+    entities: list[str] = []
+    for beam, primary in ordered:
+        key = (str(beam.story), primary)
+        counters[key] = counters.get(key, 0) + 1
+        prefix = "PB" if primary else "SB"
+        number = counters[key]
+        beam_id = f"{beam.story}-{prefix}{number}-S1"
+        points = beam.path_points or (beam.start, beam.end)
+        color = 2 if primary else 3
+        layer = "BEAM_PRIMARY" if primary else "BEAM_SECONDARY"
+        entities.extend(_polyline(layer, color, points))
+        entities.extend(_text(layer, color, _midpoint(points), beam_id, text_height, _text_angle(points)))
+
+    legend_x, legend_y = _legend_origin([  # type: ignore[arg-type]
+        _as_difference_stub(beam) for beam, _ in ordered
+    ])
+    legend = [
+        f"FULL BEAM GROUPS | total={len(ordered)} primary={sum(primary for _, primary in ordered)}",
+        "YELLOW BEAM_PRIMARY = source beam touches a column joint",
+        "GREEN BEAM_SECONDARY = no column joint at source endpoints",
+        "ID format STORY-PB/SB-number-S1; each logical path is one polyline",
+    ]
+    for offset, value in enumerate(legend):
+        entities.extend(
+            _text(
+                "MERGE_LEGEND", 7,
+                (legend_x, legend_y - offset * text_height * 1.3, 0.0),
+                value, text_height,
+            )
+        )
+    if model_name:
+        entities.extend(
+            _text(
+                "MERGE_LEGEND", 7,
+                (legend_x, legend_y - len(legend) * text_height * 1.3, 0.0),
+                f"MODEL {_safe_text(model_name)}", text_height * 0.8,
+            )
+        )
+    values = _header() + _tables() + ["0", "SECTION", "2", "ENTITIES"] + entities + ["0", "ENDSEC", "0", "EOF"]
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(values) + "\n", encoding="ascii")
+    return path
+
+
+def export_beam_groups_csv(
+    logical_beams: Iterable[object],
+    source_beams: Iterable[object],
+    column_point_names: set[str],
+    output_path: str | Path,
+) -> Path:
+    """Write the generated PB/SB IDs and source/coordinate mapping beside DXF."""
+    logical_beams = list(logical_beams)
+    source_by_name = {beam.name: beam for beam in source_beams}
+    enriched: list[tuple[object, bool]] = []
+    for beam in logical_beams:
+        names = beam.source_names or (beam.name,)
+        primary = any(
+            source_by_name[name].point_i in column_point_names
+            or source_by_name[name].point_j in column_point_names
+            for name in names if name in source_by_name
+        )
+        enriched.append((beam, primary))
+    ordered = sorted(enriched, key=lambda item: (str(item[0].story), not item[1], item[0].name))
+    counters: dict[tuple[str, bool], int] = {}
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["梁编号", "楼层", "主次梁", "源对象", "路径点坐标"])
+        for beam, primary in ordered:
+            key = (str(beam.story), primary)
+            counters[key] = counters.get(key, 0) + 1
+            prefix = "PB" if primary else "SB"
+            beam_id = f"{beam.story}-{prefix}{counters[key]}-S1"
+            points = beam.path_points or (beam.start, beam.end)
+            serialized = ";".join(f"{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}" for p in points)
+            writer.writerow([beam_id, beam.story, prefix, "+".join(beam.source_names or (beam.name,)), serialized])
+    return path
+
+
+def _as_difference_stub(beam: object) -> MergeAngleDifference:
+    """Adapt a BeamGeometry for the shared legend-origin helper."""
+    points = beam.path_points or (beam.start, beam.end)
+    return MergeAngleDifference(str(beam.story), str(beam.section), (), (), beam.length, points, ())
 
 
 def _legend_origin(differences: list[MergeAngleDifference]) -> tuple[float, float]:

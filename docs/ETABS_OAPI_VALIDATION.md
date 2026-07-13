@@ -218,6 +218,12 @@ after  = N_mm_C
 
 为支持全量图形核对，新增无第三方 CAD 依赖的 ASCII DXF 导出器 `src/drawing/dxf_export.py`。它直接使用每个梁对象的 ETABS 点坐标：红色图层 `MERGE15_NEW` 绘制仅在 15° 下连接的梁段，蓝色图层 `MERGE3_GROUP` 绘制对应的 3° 原逻辑梁组，黄色/青色图层标注两级逻辑梁中点和映射编号。当前模型已生成 `build/output/drawing_data/merge_angle_3_vs_15_20260713_150825.dxf`（514 条线段、169 个文字/标记实体）及同名 `.csv` 坐标映射文件，可直接载入 AutoCAD/BricsCAD 进行全面复核；DXF 使用毫米平面坐标，不修改模型。
 
+### 全部逻辑梁 CAD 复核（2026-07-13）
+
+新增 `export_beam_groups_dxf`：对当前 `15°` 逻辑梁结果逐梁输出一个经典 `POLYLINE`，不再只显示夹角差异。主梁判定为源 Beam Object 的 I/J 点与柱对象共享节点，图层 `BEAM_PRIMARY` 使用黄色；未触及柱节点的逻辑梁判为次梁，图层 `BEAM_SECONDARY` 使用绿色。每条多段线中点标注确定性编号 `楼层-PB/SB序号-S1`，文字颜色与梁线一致；同名 CSV 保存源对象和路径点坐标，便于 CAD 全量核对。
+
+当前连接到的模型为 `E:\051 SAP_ETABS MODEL\IRAQ-HOSPITAL\20260606\EMHS-0606-P4700-GF.v6.3.edb`，读取 4,165 根混凝土梁并归并为 1,652 根逻辑梁，其中主梁 760、次梁 892；输出为 `build/output/drawing_data/beam_groups_full_15deg_20260713_160709.dxf` 及同名 `.csv`。此前 `beam` 目录下的 v6.2 模型与本次当前 ETABS 窗口路径不同，审核时应以 DXF 文件记录的 MODEL 图例为准。
+
 ---
 
 ## 7. 当前限制与后续验证

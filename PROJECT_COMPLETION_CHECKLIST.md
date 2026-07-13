@@ -75,6 +75,7 @@
 | `build/output/reports/beam_schedule_20260713_131722.xlsx` | 15°归并验证：4,166 根混凝土梁、1,651 根逻辑梁；梁表含设计结果状态 |
 | `build/output/reports/merge_angle_3_vs_15_20260713_131921.csv` | 15°相对3°新增的51个逻辑合并组，供人工抽查 |
 | `build/output/drawing_data/merge_angle_3_vs_15_20260713_150825.dxf` + `.csv` | 51个差异组的全量 CAD 图形复核及坐标映射：红=15°新增连接、蓝=3°原分组、黄/青=中点映射 |
+| `build/output/drawing_data/beam_groups_full_15deg_20260713_160709.dxf` + `.csv` | 当前 ETABS v6.3 模型的全部 1,652 个逻辑梁多段线；黄色主梁760、绿色次梁892，编号与坐标映射同名 CSV |
 | `build/output/logs/etabs_beam_20260712_232349.log` | 对应工作流日志（记录原始、导出与恢复单位） |
 | `build/output/reports/integration_geometry_20260712_030650.xlsx` | 早期三根梁几何联调结果（来自另一份模型，仅作连接调试留档） |
 
