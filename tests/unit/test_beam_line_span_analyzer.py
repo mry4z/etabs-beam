@@ -36,6 +36,23 @@ def test_section_changes_on_secondary_line_split_only_at_primary_intersection() 
     assert [span.source_objects for span in secondary] == [("S1",), ("S2",)]
 
 
+def test_column_connected_line_changes_to_secondary_after_first_primary_intersection() -> None:
+    beams = [
+        _beam("P", "C1", "C2", (20, 0, 0), (20, 10, 0)),
+        _beam("L", "FREE", "C3", (-20, 5, 0), (30, 5, 0)),
+    ]
+    result = analyze_beam_lines(beams, {"C1", "C2", "C3"})
+    primary = [line for line in result.lines if line.beam_type == "PB"]
+    secondary = [line for line in result.lines if line.beam_type == "SB"]
+    assert len(primary) == 2  # the anchor PB and the PB portion of L
+    assert len(secondary) == 1
+    line_primary_part = next(line for line in primary if line.source_objects == ("L",))
+    assert line_primary_part.source_objects == ("L",)
+    assert secondary[0].source_objects == ("L",)
+    assert line_primary_part.path_points == ((20.0, 5.0, 0.0), (30, 5, 0))
+    assert secondary[0].path_points == ((-20, 5, 0), (20.0, 5.0, 0.0))
+
+
 def test_dxf_midpoint_uses_path_length_not_middle_vertex() -> None:
     assert _midpoint(((0, 0, 0), (1, 0, 0), (1, 9, 0))) == (1, 4.0, 0.0)
 

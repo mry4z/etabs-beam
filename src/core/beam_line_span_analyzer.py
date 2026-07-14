@@ -138,20 +138,48 @@ def _analyze_story(
     ]
     records.extend(stitch_records)
     source_by_name = {beam.name: beam for beam in beams}
-    primary_candidates = [
-        beam for beam in candidates
-        if _candidate_is_primary(beam, source_by_name, column_point_names, column_points, settings)
-    ]
-    primary_lines = _split_candidates(
-        primary_candidates, "PB", column_points, {}, source_by_name, settings,
+    seed_primary_indices = {
+        index
+        for index, candidate in enumerate(candidates)
+        if _candidate_is_primary(candidate, source_by_name, column_point_names, column_points, settings)
+    }
+    anchor_primary_indices = {
+        index
+        for index in seed_primary_indices
+        if _candidate_column_count(candidates[index], column_points, settings) >= 2
+    }
+    if not anchor_primary_indices:
+        anchor_primary_indices = set(seed_primary_indices)
+    primary_paths = tuple(
+        candidates[index].path_points or (candidates[index].start, candidates[index].end)
+        for index in sorted(anchor_primary_indices)
     )
-    primary_paths = tuple(line.path_points for line in primary_lines)
     primary_index = _build_segment_index(primary_paths, settings.intersection_grid_mm)
-    secondary_candidates = [beam for beam in candidates if beam not in primary_candidates]
-    secondary_lines = _split_candidates(
-        secondary_candidates, "SB", (), primary_index, source_by_name, settings,
+    preliminary_lines = _split_candidates_by_role(
+        candidates,
+        seed_primary_indices,
+        anchor_primary_indices,
+        column_points,
+        primary_index,
+        source_by_name,
+        settings,
     )
-    return primary_lines + secondary_lines, records
+    # A one-column candidate can contribute a PB portion before it changes to
+    # SB. That PB portion is itself a valid support for other secondary beams,
+    # so make a second pass with all preliminary PB paths in the support index.
+    expanded_primary_paths = tuple(line.path_points for line in preliminary_lines if line.beam_type == "PB")
+    expanded_index = _build_segment_index(expanded_primary_paths, settings.intersection_grid_mm)
+    if expanded_primary_paths == primary_paths:
+        return preliminary_lines, records
+    return _split_candidates_by_role(
+        candidates,
+        seed_primary_indices,
+        anchor_primary_indices,
+        column_points,
+        expanded_index,
+        source_by_name,
+        settings,
+    ), records
 
 
 def _stitch_candidates(
@@ -335,6 +363,103 @@ def _stitch_geometry(candidates: list[BeamGeometry], reverses: list[bool]) -> Be
     )
 
 
+def _split_candidates_by_role(
+    candidates: list[BeamGeometry],
+    seed_primary_indices: set[int],
+    anchor_primary_indices: set[int],
+    column_points: tuple[Point3D, ...],
+    primary_index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]],
+    source_by_name: dict[str, BeamGeometry],
+    settings: BeamLineSpanSettings,
+) -> list[_UnnumberedLine]:
+    """Split continuous paths and classify each support interval as PB or SB.
+
+    A candidate that reaches a column is only primary from that column to the
+    first main-beam intersection. Once it passes a primary intersection, any
+    following interval without a column is a secondary-beam interval. This is
+    required for real models where one geometrically continuous line contains
+    both a column-connected main-beam segment and a beam-supported segment.
+    """
+    lines: list[_UnnumberedLine] = []
+    for candidate_index, candidate in enumerate(candidates):
+        path = _oriented_path(candidate.path_points or (candidate.start, candidate.end))
+        self_segments = {
+            _segment_key(left, right) for left, right in zip(path, path[1:])
+        }
+        intersections = (
+            ()
+            if candidate_index in anchor_primary_indices
+            else _path_intersections(path, primary_index, settings, self_segments)
+        )
+        markers = _unique_points((*column_points, *intersections), settings.coordinate_tolerance_mm)
+        parts = _split_path(path, markers, settings.coordinate_tolerance_mm)
+        if not parts:
+            continue
+        is_seed_primary = candidate_index in seed_primary_indices
+        roles = [
+            "PB"
+            if is_seed_primary and any(
+                distance(part[0], point) <= settings.coordinate_tolerance_mm
+                or distance(part[-1], point) <= settings.coordinate_tolerance_mm
+                for point in column_points
+            )
+            else "SB"
+            for part in parts
+        ]
+        all_span_sources = _source_names_by_paths(
+            candidate,
+            _join_paths(tuple(parts)),
+            tuple(parts),
+            source_by_name,
+            settings,
+        )
+        source_offset = 0
+        grouped = _group_parts_by_role(parts, roles, settings)
+        for beam_type, line_parts in grouped:
+            span_paths = tuple(line_parts)
+            line_path = _join_paths(span_paths)
+            span_sources = all_span_sources[source_offset:source_offset + len(span_paths)]
+            source_offset += len(span_paths)
+            support_points = (
+                _unique_points((*column_points, *intersections), settings.coordinate_tolerance_mm)
+                if beam_type == "PB"
+                else intersections
+            )
+            lines.append(
+                _UnnumberedLine(
+                    candidate.story,
+                    beam_type,
+                    candidate.section,
+                    tuple(name for group in span_sources for name in group),
+                    span_sources,
+                    line_path,
+                    span_paths,
+                    support_points,
+                    any(_is_curved(part, settings) for part in span_paths),
+                )
+            )
+    return lines
+
+
+def _group_parts_by_role(
+    parts: list[tuple[Point3D, ...]], roles: list[str], settings: BeamLineSpanSettings
+) -> list[tuple[str, list[tuple[Point3D, ...]]]]:
+    grouped: list[tuple[str, list[tuple[Point3D, ...]]]] = []
+    for part, role in zip(parts, roles):
+        if not grouped:
+            grouped.append((role, [part]))
+            continue
+        current_role, current_parts = grouped[-1]
+        previous = current_parts[-1]
+        turn = plan_angle_deg(previous[-2], previous[-1], part[0], part[1]) if len(previous) > 1 else 180.0
+        curved_change = _is_curved(previous, settings) != _is_curved(part, settings)
+        if role == current_role and turn <= settings.through_support_angle_deg and not curved_change:
+            current_parts.append(part)
+        else:
+            grouped.append((role, [part]))
+    return grouped
+
+
 def _column_coordinates(beams: list[BeamGeometry], names: set[str], tolerance: float) -> tuple[Point3D, ...]:
     coordinates: list[Point3D] = []
     for beam in beams:
@@ -360,6 +485,16 @@ def _candidate_is_primary(
         return True
     path = candidate.path_points or (candidate.start, candidate.end)
     return any(_path_position(path, point, settings.coordinate_tolerance_mm) is not None for point in column_points)
+
+
+def _candidate_column_count(
+    candidate: BeamGeometry, column_points: tuple[Point3D, ...], settings: BeamLineSpanSettings
+) -> int:
+    path = candidate.path_points or (candidate.start, candidate.end)
+    return sum(
+        _path_position(path, point, settings.coordinate_tolerance_mm) is not None
+        for point in column_points
+    )
 
 
 def _split_candidates(
@@ -642,14 +777,21 @@ def _path_intersections(
     path: tuple[Point3D, ...],
     primary_index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]],
     settings: BeamLineSpanSettings,
+    excluded_segments: set[frozenset[Point3D]] | None = None,
 ) -> tuple[Point3D, ...]:
     intersections: list[Point3D] = []
     for left, right in zip(path, path[1:]):
         for p_left, p_right in _indexed_candidates(left, right, primary_index, settings.intersection_grid_mm):
+            if excluded_segments and _segment_key(p_left, p_right) in excluded_segments:
+                continue
             point = _segment_intersection(left, right, p_left, p_right, settings.coordinate_tolerance_mm)
             if point is not None:
                 intersections.append(point)
     return _unique_points(intersections, settings.coordinate_tolerance_mm)
+
+
+def _segment_key(left: Point3D, right: Point3D) -> frozenset[Point3D]:
+    return frozenset((left, right))
 
 
 def _build_segment_index(
