@@ -242,6 +242,20 @@ API ID `278156` 当前附着模型为 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P47
 
 离线回归测试为 `36 passed, 1 skipped`，覆盖率 `81.93%`。上述输出尚待用户进行 CAD 全量复核，复核通过后再接入正式 Excel 和模型方向整理流程。
 
+### PB/SB 混合连续路径修正验证（2026-07-14）
+
+针对 `GF-GRD-F-PB17` 的复核发现，单个连续候选路径可能同时包含柱支承的 PB 核心段和越过主梁交点后的 SB 延伸段。修正后的规则以路径累计位置计算首末柱支承核心区：核心区及其外侧至最近主梁交点保留 PB，越过该交点且无柱支承的区间转为 SB；角色边界不再依赖 ETABS 源 Object 的分段边界。该规则同时覆盖多柱连续路径、单柱连接路径和次梁只在主梁交点处分跨的场景。
+
+使用 API ID `526520` 重新附着同一 v6.2 模型，原始/导出/恢复单位均为 `N_mm_C`。本次读取 4,166 根混凝土梁、1,421 个柱支承点，识别 1,203 条 Beam Line、3,068 个 Span：PB 1,616 跨、SB 1,452 跨；CSV 中 4,166 个源 Object 全部覆盖，records 共 1,124 条且无警告/错误。`GF-GRD-F-PB17` 的 PB 跨从 `(15272.900,58563.400)` 主梁交点开始，左侧至 `(-23727.100,58563.400)` 的区间转入 `GF-GRD-F-SB18`，与示意规则一致。
+
+输出文件为：
+
+- `build/output/drawing_data/beam_spans_structural_roles_20260714_221827.dxf`
+- `build/output/drawing_data/beam_spans_structural_roles_20260714_221827.csv`
+- `build/output/drawing_data/beam_spans_structural_roles_20260714_221827.records.txt`
+
+离线回归测试为 `38 passed`，覆盖率 `80.47%`；DXF 仍待用户进行 CAD 全量复核，复核通过后再接入正式 Excel 和模型方向整理流程。
+
 ---
 
 ## 7. 当前限制与后续验证

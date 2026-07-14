@@ -53,6 +53,25 @@ def test_column_connected_line_changes_to_secondary_after_first_primary_intersec
     assert secondary[0].path_points == ((-20, 5, 0), (20.0, 5.0, 0.0))
 
 
+def test_multi_column_line_still_changes_to_secondary_before_first_main_beam_intersection() -> None:
+    beams = [
+        _beam("P", "C1", "C2", (20, 0, 0), (20, 10, 0)),
+        _beam("L1", "FREE", "C3", (-20, 5, 0), (30, 5, 0)),
+        _beam("L2", "C3", "C4", (30, 5, 0), (40, 5, 0)),
+    ]
+    result = analyze_beam_lines(beams, {"C1", "C2", "C3", "C4"})
+    l_parts = [
+        line for line in result.lines if any(name in line.source_objects for name in ("L1", "L2"))
+    ]
+    assert {line.beam_type for line in l_parts} == {"PB", "SB"}
+    assert next(line for line in l_parts if line.beam_type == "PB").path_points == (
+        (20.0, 5.0, 0.0), (30, 5, 0), (40, 5, 0)
+    )
+    assert next(line for line in l_parts if line.beam_type == "SB").path_points == (
+        (-20, 5, 0), (20.0, 5.0, 0.0)
+    )
+
+
 def test_dxf_midpoint_uses_path_length_not_middle_vertex() -> None:
     assert _midpoint(((0, 0, 0), (1, 0, 0), (1, 9, 0))) == (1, 4.0, 0.0)
 

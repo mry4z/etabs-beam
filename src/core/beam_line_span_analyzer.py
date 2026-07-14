@@ -150,9 +150,13 @@ def _analyze_story(
     }
     if not anchor_primary_indices:
         anchor_primary_indices = set(seed_primary_indices)
+    # Every column-connected candidate is a potential main-beam support for a
+    # neighboring path.  Do not restrict this index to multi-column anchors:
+    # a long candidate itself may need to change from PB to SB at an interior
+    # main-beam intersection (for example GF-GRD-F-PB17).
     primary_paths = tuple(
         candidates[index].path_points or (candidates[index].start, candidates[index].end)
-        for index in sorted(anchor_primary_indices)
+        for index in sorted(seed_primary_indices)
     )
     primary_index = _build_segment_index(primary_paths, settings.intersection_grid_mm)
     preliminary_lines = _split_candidates_by_role(
@@ -179,6 +183,7 @@ def _analyze_story(
         expanded_index,
         source_by_name,
         settings,
+        seed_intersection_index=primary_index,
     ), records
 
 
@@ -371,6 +376,7 @@ def _split_candidates_by_role(
     primary_index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]],
     source_by_name: dict[str, BeamGeometry],
     settings: BeamLineSpanSettings,
+    seed_intersection_index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]] | None = None,
 ) -> list[_UnnumberedLine]:
     """Split continuous paths and classify each support interval as PB or SB.
 
@@ -386,26 +392,34 @@ def _split_candidates_by_role(
         self_segments = {
             _segment_key(left, right) for left, right in zip(path, path[1:])
         }
-        intersections = (
-            ()
-            if candidate_index in anchor_primary_indices
-            else _path_intersections(path, primary_index, settings, self_segments)
+        # Intersections are needed for seeded primary paths as well: a path can
+        # have a column-supported core and continue past the first main-beam
+        # intersection as a secondary extension.  Intersections inside the
+        # column-to-column core do not create an extra PB span because adjacent
+        # parts are merged again when their role remains PB.
+        intersections = _path_intersections(
+            path,
+            (
+                seed_intersection_index
+                if candidate_index in seed_primary_indices and seed_intersection_index is not None
+                else primary_index
+            ),
+            settings,
+            self_segments,
         )
         markers = _unique_points((*column_points, *intersections), settings.coordinate_tolerance_mm)
         parts = _split_path(path, markers, settings.coordinate_tolerance_mm)
         if not parts:
             continue
         is_seed_primary = candidate_index in seed_primary_indices
-        roles = [
-            "PB"
-            if is_seed_primary and any(
-                distance(part[0], point) <= settings.coordinate_tolerance_mm
-                or distance(part[-1], point) <= settings.coordinate_tolerance_mm
-                for point in column_points
-            )
-            else "SB"
-            for part in parts
-        ]
+        roles = _classify_part_roles(
+            path,
+            parts,
+            is_seed_primary,
+            column_points,
+            intersections,
+            settings,
+        )
         all_span_sources = _source_names_by_paths(
             candidate,
             _join_paths(tuple(parts)),
@@ -458,6 +472,59 @@ def _group_parts_by_role(
         else:
             grouped.append((role, [part]))
     return grouped
+
+
+def _classify_part_roles(
+    path: tuple[Point3D, ...],
+    parts: list[tuple[Point3D, ...]],
+    is_seed_primary: bool,
+    column_points: tuple[Point3D, ...],
+    intersections: tuple[Point3D, ...],
+    settings: BeamLineSpanSettings,
+) -> list[str]:
+    """Classify elementary path intervals without using source-object boundaries.
+
+    For a primary candidate, the interval between its first and last column
+    supports is the PB core.  On either side, the nearest primary-beam
+    intersection is the role boundary: the interval from the extreme column to
+    that intersection remains PB, while anything farther out is SB.  This
+    captures a one-column main-beam extension and the GF-PB17 pattern where a
+    long object path contains both a column-supported PB portion and a
+    beam-supported SB portion.
+    """
+    if not is_seed_primary:
+        return ["SB"] * len(parts)
+
+    column_positions = [
+        position
+        for point in column_points
+        if (position := _path_position(path, point, settings.coordinate_tolerance_mm)) is not None
+    ]
+    if not column_positions:
+        return ["SB"] * len(parts)
+    min_column, max_column = min(column_positions), max(column_positions)
+    intersection_positions = [
+        position
+        for point in intersections
+        if (position := _path_position(path, point, settings.coordinate_tolerance_mm)) is not None
+    ]
+    left_intersections = [position for position in intersection_positions if position < min_column]
+    right_intersections = [position for position in intersection_positions if position > max_column]
+    left_boundary = max(left_intersections) if left_intersections else None
+    right_boundary = min(right_intersections) if right_intersections else None
+
+    roles: list[str] = []
+    for part in parts:
+        start = _path_position(path, part[0], settings.coordinate_tolerance_mm) or 0.0
+        end = _path_position(path, part[-1], settings.coordinate_tolerance_mm) or start
+        midpoint = (start + end) / 2.0
+        if min_column <= midpoint <= max_column:
+            roles.append("PB")
+        elif midpoint < min_column:
+            roles.append("PB" if left_boundary is None or midpoint >= left_boundary else "SB")
+        else:
+            roles.append("PB" if right_boundary is None or midpoint <= right_boundary else "SB")
+    return roles
 
 
 def _column_coordinates(beams: list[BeamGeometry], names: set[str], tolerance: float) -> tuple[Point3D, ...]:
