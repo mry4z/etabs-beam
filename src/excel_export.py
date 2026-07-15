@@ -14,6 +14,7 @@ from src.core.continuity_analyzer import ContinuityGroup
 from src.core.geometry_extractor import BeamGeometry
 from src.design.key_positions import key_positions
 from src.design.provider import BeamDesignResult
+from src.excel_span_adapter import SpanScheduleMapping
 from src.utils.io import available_output_path
 
 
@@ -24,8 +25,13 @@ def export_beam_schedule(
     reports_dir: Path,
     filename_pattern: str = "beam_schedule_{timestamp}.xlsx",
     special_records: list[MergeRecord] | None = None,
+    span_schedule: SpanScheduleMapping | None = None,
 ) -> Path:
-    """Write one row per beam plus a station-detail worksheet."""
+    """Write the legacy beam schedule and, optionally, structural span rows.
+
+    ``span_schedule`` is an adapter boundary: future numbering rules can
+    replace it without changing the established 梁表/设计站点 columns.
+    """
     reports_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = available_output_path(reports_dir, filename_pattern.format(timestamp=timestamp))
@@ -72,6 +78,20 @@ def export_beam_schedule(
             "最大受扭纵筋面积（仅受扭需求）": design.max_torsion_longitudinal_area,
             "最大扭转横向筋 At/s": design.max_torsion_trans_area,
         }
+        if span_schedule is not None:
+            source_names = beam.source_names or (beam.name,)
+            line_ids = [
+                line_id
+                for name in source_names
+                for line_id in span_schedule.source_to_line_ids.get(name, ())
+            ]
+            span_ids = [
+                span_id
+                for name in source_names
+                for span_id in span_schedule.source_to_span_ids.get(name, ())
+            ]
+            row["结构梁线编号"] = "；".join(dict.fromkeys(line_ids))
+            row["结构跨号"] = "；".join(dict.fromkeys(span_ids))
         positions = key_positions(beam, design)
         if positions:
             row.update(_key_position_values(positions))
@@ -100,6 +120,10 @@ def export_beam_schedule(
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="梁表")
         pd.DataFrame(station_rows).to_excel(writer, index=False, sheet_name="设计站点")
+        if span_schedule is not None:
+            pd.DataFrame([_span_row(record) for record in span_schedule.records]).to_excel(
+                writer, index=False, sheet_name="梁分跨"
+            )
         pd.DataFrame(
             [
                 {"项目": "导出单位", "说明": "N_mm_C；工作流在导出后恢复 ETABS 原始当前单位。"},
@@ -127,6 +151,48 @@ def export_beam_schedule(
         for sheet in writer.book.worksheets:
             _format_sheet(sheet)
     return output_path
+
+
+def _span_row(record: object) -> dict[str, object]:
+    span = record.span
+    beam = record.geometry
+    design = record.design
+    row: dict[str, object] = {
+        "梁编号": span.span_id,
+        "梁线编号": span.beam_line_id,
+        "楼层": span.story,
+        "主次梁": span.beam_type,
+        "跨号": span.span_index,
+        "弧形": "是" if span.is_curved else "否",
+        "悬挑": "是" if span.is_cantilever else "否",
+        "源对象": "+".join(span.source_objects),
+        "截面": beam.section,
+        "梁高 D (mm)": beam.depth,
+        "长度 (mm)": beam.length,
+        "I端 X (mm)": span.i_point[0],
+        "I端 Y (mm)": span.i_point[1],
+        "I端 Z (mm)": span.i_point[2],
+        "J端 X (mm)": span.j_point[0],
+        "J端 Y (mm)": span.j_point[1],
+        "J端 Z (mm)": span.j_point[2],
+        "设计结果状态": design.status.value,
+        "设计结果说明": design.status_message,
+        "设计站点数": len(design.stations),
+    }
+    positions = key_positions(beam, design)
+    if positions:
+        row.update(_key_position_values(positions))
+    else:
+        row.update({name: None for name in _key_position_headers()})
+    return row
+
+
+def _key_position_headers() -> tuple[str, ...]:
+    return (
+        "左端顶部弯矩纵筋面积（2D 内）", "跨中顶部弯矩纵筋面积", "右端顶部弯矩纵筋面积（2D 内）",
+        "左端底部弯矩纵筋面积（2D 内）", "跨中底部弯矩纵筋面积", "右端底部弯矩纵筋面积（2D 内）",
+        "左端抗剪筋 Av/s（2D 内）", "跨中抗剪筋 Av/s", "右端抗剪筋 Av/s（2D 内）",
+    )
 
 
 def _key_position_values(positions: object) -> dict[str, float]:

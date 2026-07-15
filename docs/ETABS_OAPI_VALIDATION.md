@@ -256,6 +256,16 @@ API ID `278156` 当前附着模型为 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P47
 
 离线回归测试为 `38 passed`，覆盖率 `80.47%`；DXF 仍待用户进行 CAD 全量复核，复核通过后再接入正式 Excel 和模型方向整理流程。
 
+### 结构分跨接入 Excel 工作流（2026-07-16）
+
+已将 `BeamLineSpanResult` 接入正式工作流。`excel_span_adapter.py` 负责把源 Object 的设计站点按完整梁线位置裁剪到每个 Span，Excel 导出器仅通过可选 `SpanScheduleMapping` 消费结果，因此后续编号原则变化不需要改动既有梁表列定义。原 `梁表` 新增“结构梁线编号”和“结构跨号”映射列，并新增“梁分跨”工作表；原 `设计站点` 工作表保持兼容。
+
+使用 API ID `526520` 运行 `python -m src.workflow --selection all`，模型为 `E:\051 SAP_ETABS MODEL\beam\EMHS-0606-P4700-GF.v6.2.EDB`，原始和导出单位均为 `N_mm_C`。工作流读取 4,166 根混凝土梁和设计站点，结构分跨识别 1,203 条 Beam Line、3,068 跨（PB 1,616，SB 1,452），并输出 1,651 行既有梁表、50,720 行设计站点和 3,068 行梁分跨记录。实模 Excel 为：
+
+- `build/output/reports/beam_schedule_20260716_000814.xlsx`
+
+`GF-GRD-F-PB17`/`GF-GRD-F-SB18` 的 PB/SB 边界及左、中、右关键配筋字段已写入“梁分跨”表，后续可直接按跨核查。离线回归测试为 `39 passed`，覆盖率 `80.98%`。
+
 ---
 
 ## 7. 当前限制与后续验证

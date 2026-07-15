@@ -160,7 +160,7 @@ docs/ETABS_OAPI_VALIDATION.md         本次新增的实测记录
 
 17. [x] **代码质量门槛**：已配置 Black、Flake8、严格 pytest marker 与 60% 覆盖率基线；完整 CI/CD 仍属远景。
 
-18. [ ] **逻辑梁编号、支承分跨、局部坐标与图纸中间数据（远期模型功能）**：业务规则已确认并固化在 `docs/BEAM_LINE_SPAN_RULES.md`：先识别 Beam Line，再按支承分 Span；主梁按柱分跨，次梁按主梁分跨，次梁—次梁相交不增加跨数，弧形主梁独立编号，悬挑段单独成跨。已新增 `src/core/beam_line_span_analyzer.py` 初版及离线测试：覆盖柱分跨、主梁分跨、次梁交点不分跨、弧形主梁独立编号和悬挑识别；DXF 已新增每跨一个多段线、Arial 标注及同色文字输出接口。已用 API ID 278156 的真实模型输出 `beam_spans_structural_20260713_194933.dxf/.csv` 并完成首轮 CAD 图形复核，但因第 7 项跨截面 Beam Line 拆号缺陷，当前实模验收未通过；应先完成第 7 项并重新全模型复核，再接入正式工作流/Excel，随后完善局部坐标整理和 JSON 中间数据。图纸编号采用 `[楼层]-[PB/SB]-[跨编号]`，如 `F1-PB5-S3`；中间数据接口详见 `docs/DRAWING_NUMBERING_INTERCHANGE.md`。模型方向整理必须预览、备份和显式确认，不能随导出自动执行。
+18. [ ] **逻辑梁编号、支承分跨、局部坐标与图纸中间数据（远期模型功能）**：业务规则已确认并固化在 `docs/BEAM_LINE_SPAN_RULES.md`：先识别 Beam Line，再按支承分 Span；主梁按柱分跨，次梁按主梁分跨，次梁—次梁相交不增加跨数，弧形主梁独立编号，悬挑段单独成跨。`src/core/beam_line_span_analyzer.py` 已接入正式 Excel 工作流，新增 `src/excel_span_adapter.py` 作为可替换编号适配层；“梁表”保留原格式并增加结构梁线/跨号映射，新增“梁分跨”工作表。API ID `526520` 已生成 `build/output/reports/beam_schedule_20260716_000814.xlsx`，包含 1,203 条梁线、3,068 跨及按跨裁剪的设计站点。剩余工作是第 7 项 CAD 全量验收、局部坐标整理和 JSON 中间数据；模型方向整理必须预览、备份和显式确认，不能随导出自动执行。
 
 19. [ ] **ETABS SQLite 数据本地归档（版本能力就绪后）**：待目标 ETABS 版本正式提供可用的 SQLite 数据访问或导出能力后，在每次梁表导出时将对应 SQLite 数据副本存放到本地归档目录，并写入模型路径、ETABS 版本、导出时间、单位和文件校验值。归档必须只读、不得替代当前 OAPI 读取主路径，也不得修改正在打开的模型。
 

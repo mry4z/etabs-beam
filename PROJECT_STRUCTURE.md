@@ -1,6 +1,6 @@
 # ETABS Beam Generator — 项目结构与文件管理规范
 
-**更新日期**：2026-07-12  
+**更新日期**：2026-07-16
 **项目根目录**：`F:\2026\Research Study\etabs beam\`  
 **当前状态**：MVP 已实现并完成 `bm.EDB` 真实模型验证
 
@@ -16,7 +16,8 @@ etabs beam/
 │   ├── __init__.py
 │   ├── config.py                              # 已实现：YAML 配置与路径解析
 │   ├── workflow.py                            # 已实现：CLI 工作流编排
-│   ├── excel_export.py                        # 已实现：梁表、设计站点、说明和异常记录导出
+│   ├── excel_export.py                        # 已实现：兼容梁表、设计站点、梁分跨、说明和异常记录导出
+│   ├── excel_span_adapter.py                  # 已实现：结构分跨到 Excel 的可替换适配层
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── etabs_connector.py                 # 已实现：附着、API 错误处理和临时单位恢复
@@ -45,7 +46,8 @@ etabs beam/
 │   ├── unit/
 │   │   ├── test_geometry.py                   # 已实现：几何工具测试
 │   │   ├── test_continuity.py                 # 已实现：连续梁判据测试
-│   │   └── test_excel_export.py               # 已实现：Excel 文件可读性测试
+│   │   ├── test_excel_export.py               # 已实现：Excel 文件可读性测试
+│   │   └── test_excel_span_adapter.py         # 已实现：分跨映射与梁分跨工作表测试
 │   │   └── test_connector.py                  # 已实现：临时单位恢复测试
 │   └── integration/
 │       ├── __init__.py
@@ -94,6 +96,8 @@ EtabsConnector ──→ GeometryExtractor ──→ ContinuityAnalyzer
 SapModel          BeamGeometry[] → BeamMerger → 逻辑梁[]
                           ↓                       ↓
                     原始设计结果           ContinuityGroup[]
+                          ↓
+                 BeamLineSpanAnalyzer → SpanScheduleAdapter
   ↓
 EtabsResultProvider ──→ BeamDesignResult[] ──→ ExcelExport
                                                     ↓
@@ -107,7 +111,9 @@ EtabsResultProvider ──→ BeamDesignResult[] ──→ ExcelExport
 | `ContinuityAnalyzer` | `BeamGeometry` 列表 | `ContinuityGroup` 列表 | 已实现 |
 | `EtabsResultProvider` | `SapModel`、梁对象名 | `BeamDesignResult` | 已实现 |
 | `key_positions` | 梁几何、设计站点 | 左/中/右弯矩筋与抗剪筋控制值 | 已实现 |
-| `ExcelExport` | 几何、连续性、设计结果 | `.xlsx` | 已实现 |
+| `BeamLineSpanAnalyzer` | 原始梁几何、柱支承点 | `BeamLineSpanResult` | 已实现：工作流已接入 |
+| `SpanScheduleAdapter` | `BeamLineSpanResult`、源设计结果 | `SpanScheduleMapping` | 已实现：编号规则可替换 |
+| `ExcelExport` | 几何、连续性、设计结果、可选分跨映射 | `.xlsx` | 已实现 |
 | `ACI318Provider` | 待定义 | 自研设计结果 | 远景 |
 
 ### 关键数据模型

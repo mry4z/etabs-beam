@@ -10,9 +10,11 @@ from src.core.beam_merger import BeamMerger, MergeRecord
 from src.core.continuity_analyzer import ContinuityAnalyzer
 from src.core.etabs_connector import EtabsConnector
 from src.core.geometry_extractor import GeometryExtractor
+from src.core.beam_line_span_analyzer import BeamLineSpanSettings, analyze_beam_lines
 from src.design.etabs_result import EtabsResultProvider
 from src.design.provider import BeamDesignResult, DesignResultStatus
 from src.excel_export import export_beam_schedule
+from src.excel_span_adapter import build_span_schedule
 from src.utils.logger import configure_logger
 
 
@@ -32,6 +34,8 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
         extractor = GeometryExtractor(sap)
         mode = selection_mode or config.beam_selection_mode
         beams = extractor.extract(mode)
+        raw_beams = list(beams)
+        column_point_names = extractor.column_point_names()
         logger.info("已读取 %s 根梁（模式：%s）。", len(beams), mode)
 
         provider = EtabsResultProvider(sap)
@@ -68,6 +72,32 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
                 )
                 special_records.append(MergeRecord("警告", "设计结果", beam.name, str(exc)))
 
+        structural_result = analyze_beam_lines(
+            raw_beams,
+            column_point_names,
+            BeamLineSpanSettings(
+                coordinate_tolerance_mm=config.geometry.coordinate_tolerance_mm,
+                merge_angle_deg=config.geometry.merge_angle_limit_deg,
+                story_workers=4,
+            ),
+        )
+        span_schedule = build_span_schedule(
+            structural_result,
+            raw_beams,
+            raw_designs,
+            config.geometry.coordinate_tolerance_mm,
+        )
+        special_records.extend(
+            MergeRecord("信息", "结构分跨", "", message) for message in structural_result.records
+        )
+        logger.info(
+            "结构分跨分析完成：%s 条梁线、%s 跨（PB=%s，SB=%s）。",
+            len(structural_result.lines),
+            len(structural_result.spans),
+            sum(span.beam_type == "PB" for span in structural_result.spans),
+            sum(span.beam_type == "SB" for span in structural_result.spans),
+        )
+
         merge_result = BeamMerger(
             config.geometry.coordinate_tolerance_mm,
             config.geometry.merge_angle_limit_deg,
@@ -84,7 +114,13 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
         logger.info("已识别 %s 个连续梁组。", len(groups))
 
         output = export_beam_schedule(
-            beams, groups, designs, config.output.reports_dir, config.output.report_filename, special_records
+            beams,
+            groups,
+            designs,
+            config.output.reports_dir,
+            config.output.report_filename,
+            special_records,
+            span_schedule,
         )
 
     logger.info("ETABS 当前单位已恢复为：%s", _unit_name(connector.present_units()))

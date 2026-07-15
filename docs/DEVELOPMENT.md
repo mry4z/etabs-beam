@@ -19,12 +19,19 @@ python -m pytest tests/integration -q
 - `core/`：仅负责 ETABS 连接、几何提取和连续性分析；
 - `design/`：将 ETABS 原始设计数组映射为稳定数据模型；
 - `excel_export.py`：只消费数据模型，不直接访问 ETABS；
+- `excel_span_adapter.py`：将可变化的 Beam Line/Span 编号投影为稳定的 Excel 行接口；编号原则变化时优先替换该适配层，不修改工作簿列定义；
 - `workflow.py`：编排流程，不堆积业务算法；
 - `utils/`：可复用的日志、文件路径和纯计算工具。
 
 ## 单位约束
 
 当前 MVP 固定在 `N_mm_C` 下导出。工作流使用 `temporary_present_units()` 在 `try/finally` 中恢复 ETABS 原单位。任何新增 OAPI 读取方法都必须在这一上下文内执行，或明确说明其单位来源。
+
+## 梁线分跨与 Excel 接口
+
+工作流先读取源梁和设计站点，再调用 `analyze_beam_lines()` 生成 `BeamLineSpanResult`，随后由 `build_span_schedule()` 将源 Object 的设计站点按完整梁线位置裁剪到每个结构 Span。Excel 导出器通过可选的 `SpanScheduleMapping` 增加“梁分跨”工作表，并在原“梁表”增加结构梁线/跨号映射；原有梁表和设计站点字段保持兼容。
+
+未来若调整梁编号、主次梁判定或分跨边界，只要继续输出等价的 Span 记录，优先修改分析器或适配器，不直接改动 Excel 工作簿格式。源 Object 跨越支承时允许一对多映射，不能为适应表格而丢弃设计站点。
 
 ## 验证要求
 
