@@ -14,14 +14,14 @@
 
 ```text
 [楼层]-[主次梁]-[跨编号]
-F1-PB5-S3
-RF-SB10-S1
+F1-PB5-3
+RF-SB10-1
 ```
 
 - `PB`：主梁；`SB`：次梁；主次梁判定以柱/刚域节点和逻辑梁拓扑为基础，必须允许人工复核。
-- `S<n>`：该主梁或次梁序列内的跨编号。
+- 最后一字段为纯数字跨编号，例如 `3`；不得添加 `S` 前缀。
 - 一个逻辑跨若由多个 ETABS Beam Object 组成，图纸仍只使用一个逻辑梁编号。
-- 若后续需要重命名 ETABS Object Unique Name，则使用 `F1-PB5-S3.1`、`F1-PB5-S3.2` 等段号；段号只区分模型对象，不改变图纸逻辑梁编号。
+- 若后续需要重命名 ETABS Object Unique Name，则使用 `F1-PB5-3.1`、`F1-PB5-3.2` 等段号；段号只区分模型对象，不改变图纸逻辑梁编号。
 
 ## 2. ETABS 局部坐标整理（必须保留）
 
@@ -40,11 +40,11 @@ RF-SB10-S1
 
 ```json
 {
-  "logical_beam_id": "RF-SB10-S1",
+  "logical_beam_id": "RF-SB10-1",
   "story": "RF",
   "beam_type": "SB",
   "span_index": 1,
-  "source_objects": ["RF-SB10-S1.1", "RF-SB10-S1.2"],
+  "source_objects": ["RF-SB10-1.1", "RF-SB10-1.2"],
   "i_point": [0.0, 0.0, 0.0],
   "j_point": [6000.0, 0.0, 0.0],
   "path_points": [[0.0, 0.0, 0.0], [3000.0, 0.0, 0.0], [6000.0, 0.0, 0.0]],
