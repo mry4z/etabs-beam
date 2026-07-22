@@ -32,8 +32,17 @@ def test_export_all_beam_groups_uses_one_polyline_and_primary_colors(tmp_path: P
         BeamGeometry("B2", "B2", "F1", "P2", "P3", (10, 0, 0), (20, 1, 0), "B", 600),
     ]
     logical = BeamGeometry(
-        "M", "M", "F1", "C1", "P3", (0, 0, 0), (20, 1, 0), "B", 600,
-        source_names=("B1", "B2"), path_points=((0, 0, 0), (10, 0, 0), (20, 1, 0)),
+        "M",
+        "M",
+        "F1",
+        "C1",
+        "P3",
+        (0, 0, 0),
+        (20, 1, 0),
+        "B",
+        600,
+        source_names=("B1", "B2"),
+        path_points=((0, 0, 0), (10, 0, 0), (20, 1, 0)),
     )
     path = export_beam_groups_dxf([logical], source, {"C1"}, tmp_path / "all.dxf")
     content = path.read_text(encoding="ascii")

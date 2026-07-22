@@ -1,158 +1,200 @@
-# ETABS Beam Generator — 技术路径与实现方法规划
+# ETABS Beam Generator 技术路线图
 
-## Context（背景）
+> 更新基线：2026-07-22
+>
+> 当前阶段：P0 已关闭；进入 P1 配筋工程闭环、稳定编号和 CAD 中间数据
+>
+> 当前主环境：ETABS 22.7.0 / 23.3.1、Python 3.11、公开 `ETABSv1` OAPI、ACI 318-14
 
-本项目为课题申报（`README.md` 标注目标：*基于视频素材进行 ETABS 梁结构建模与分析*）。素材 `beam gennerator.mp4` 演示了一款商用工具 **Quick Beam Design (P&T Group)** 的完整工作流：连接 ETABS → 选梁 → 提取几何/设计结果 → 连续梁链分析 → 剪扭配筋计算 → 导出 Excel 梁表。
+## 1. 项目目标与当前边界
 
-`extracted_frames/` 下已沉淀四份分析资料（**本规划的输入依据，不含图片**）：
-- `BEAM_GENERATOR_FEATURE_DOCUMENTATION.md` — 功能拆解（四阶段工作流、命名规范、输出格式）
-- `ETABS_Beam_Generator_Code.py` — 从代码帧复现的**草图级**脚本
-- `CODE_ANALYSIS_AND_RECONSTRUCTION.md` — 模块/算法/设计模式解析
-- `QUICK_REFERENCE_AND_EXAMPLES.md` — API 用法与场景示例
+项目目标是把 ETABS 混凝土梁从模型读取、结构语义识别、编号、设计结果整理、工程配筋到 CAD/Excel 交付串成可审计的工作流。核心关系必须始终一致：
 
-**本规划要解决的问题**：把这些"逆向理解"转化为一条**工程可落地、技术可行**的实现路线，供课题申报与后续开发遵循。本次仅交付路线图文档，不编写实现代码。
-
-### 关键环境事实（已核实）
-| 项 | 状态 |
-|----|------|
-| ETABS 22 OAPI | ✅ `E:\Program Files\Computers and Structures\ETABS 22\ETABSv1.dll` + `CSI API ETABS v1.chm` 存在 |
-| Python | ✅ 3.11.7；pywin32 / pandas / openpyxl 已装；`comtypes` 未装 |
-| 复现脚本可运行性 | ❌ 草图级：`sys`/`math`/`n_legs`/`beams_by_story` 未定义，COM ProgID 写错（`CSI.ETABS.API.x64` 非法），仅表意不可执行 |
-| 版本一致性 | ⚠️ README 路径 `F:\2026\课题申报` 与实际 `F:\2026\Research Study` 不符，需同步 |
-
-### 已确认的方向决策
-- **交付目标**：仅技术路线图文档（本文件）
-- **API 绑定**：`pythonnet`（`clr` 加载 `ETABSv1.dll`）——CSI 官方 v22 推荐、类型安全、CHM 文档齐全
-- **设计计算**：**优先读取 ETABS 自带混凝土梁设计结果**导出；自研 ACI 318-14/318-19 配筋工具作为**远景**，仅预留扩展接口
-
----
-
-## 技术架构总览
-
-采用**分层 + 策略预留**架构，将"读结果"与"自研算法"解耦，使远景 ACI 工具可无侵入接入。
-
-```
-┌──────────────────────────────────────────────┐
-│  表现层 (可选远景)  CLI / Tkinter GUI          │
-├──────────────────────────────────────────────┤
-│  编排层  BeamWorkflow                          │
-│    连接→选梁→提取→(链分析)→设计→导出            │
-├───────────────┬──────────────────┬────────────┤
-│ 连接层        │ 提取层            │ 导出层      │
-│ EtabsConnector│ GeometryExtractor │ ExcelExport │
-│ (pythonnet)   │ DesignResultReader│             │
-├───────────────┴──────────────────┴────────────┤
-│  设计策略层 (Strategy, 预留)                    │
-│    IDesignProvider ← 接口                       │
-│      ├─ EtabsResultProvider  ← 阶段1 落地       │
-│      └─ ACI318Provider       ← 远景扩展         │
-└──────────────────────────────────────────────┘
+```text
+ETABS Frame Object/GUID
+        ↓
+Beam Line（同一根结构梁）
+        ↓
+Span（按真实支承划分的结构跨）
+        ↓
+模型 Unique Name / DXF 文字 / Excel 梁号
+        ↓
+ETABS I→J = 图纸文字方向 = 梁表左→右
 ```
 
-**对应现有资料**：编排层≈复现脚本 `__main__`；连接层≈`ETABSBeamAutomation.connect_to_etabs`；提取层≈`get_frame_points`/`get_point_coord`；链分析≈`build_chain_top_story`；导出层≈`export_beam_schedule`。规划在此基础上**修正 API 细节 + 抽出设计策略接口**。
+当前已经打通只读提取、Beam Line/Span、DXF、模型副本写回、ETABS 设计结果、ACI 318-14 配筋原型和三表 Excel。项目尚未达到“无人工复核即可修改生产模型”的交付状态；拓扑冻结、事务强化和配筋引擎生产化仍是正式交付前的门禁。
 
----
+## 2. 已验证的技术基线
 
-## 分阶段技术路径
+| 项目 | 当前结论 |
+|---|---|
+| ETABS | 正式支持 22.7.0 / 23.3.1；DLL 必须取自对应宿主安装目录，禁止跨主版本加载 |
+| API 绑定 | Python 通过 pythonnet 加载公开 `ETABSv1` OAPI；不调用 ETABS 内部程序集 |
+| 连接方式 | 当前正式连接器附着到已运行实例；操作前必须同时核对进程 ID 和 `GetModelFilename()` |
+| 权限 | ETABS 与 Python 进程必须具有相同权限级别；最终 ETABS 内加载插件可消除跨进程权限不一致问题 |
+| 单位 | 读取前记录显示单位，临时切换为 `N_mm_C`，结束后恢复原单位 |
+| 设计规范 | 当前配筋主路径为 ACI 318-14；规范版本和钢筋直径候选保留策略接口 |
+| 数据身份 | GUID 是稳定身份；Unique Name 是可变交付名称，不能作为内部永久主键 |
+| 修改原则 | 只在模型副本执行；方向整理与编号改名是两个独立、显式事务 |
 
-### 阶段 0 — 环境与项目基线（0.5 天）
-- `pip install pythonnet comtypes`（comtypes 仅作降级备选）
-- 初始化 git 仓库（当前目录非 repo），建立 `src/`、`docs/`、`tests/` 结构
-- 修正 `README.md` 路径不一致（`课题申报`→`Research Study`）
-- 建 `config.py`：集中管理 DLL 路径 `ETABS_DLL = r"E:\Program Files\Computers and Structures\ETABS 22\ETABSv1.dll"`
+## 3. 当前架构
 
-### 阶段 1 — ETABS 连接层（pythonnet）★核心可行性
-**目标**：稳定 attach 到运行中的 ETABS 22 实例并取得 `SapModel`。
-**技术方法**（替换复现脚本中错误的 `win32.GetActiveObject("CSI.ETABS.API.x64")`）：
+```text
+src/core
+  etabs_connector        连接、单位上下文
+  geometry_extractor     几何、截面、混凝土梁/柱支承筛选
+  beam_line_span_analyzer
+                         Beam Line、PB/SB、Span、悬挑、弧形梁
+  model_writeback        工作副本、I/J 计划、两阶段改名、写后验证
+
+src/design
+  etabs_result           ETABS 设计站点与剪扭纵筋结果
+  key_positions          左 2D / 跨中 / 右 2D
+  detailing              ACI 318-14 工程配筋与排布策略
+
+src/drawing              DXF、CSV 和源 Object/坐标映射
+src/excel_export.py      正式只读 CLI 的标准梁表
+src/excel_span_adapter.py
+                         Span 数据到既有 Excel 的稳定适配边界
+build/output/reports     当前模型专用的端到端验证脚本（尚非正式 CLI）
 ```
-import clr
-clr.AddReference(ETABS_DLL)          # 加载 ETABSv1.dll
-from ETABSv1 import cOAPI, cSapModel, cHelper, Helper
-helper = cHelper(Helper())
-etabs  = helper.GetObject("CSI.ETABS.API.ETABSObject")  # 正确 ProgID
-sap    = etabs.SapModel
+
+设计原则是“上游可替换、下游少改动”：编号规则、分跨算法和设计提供者通过稳定数据对象进入 DXF/Excel；导出模块不直接重新推导结构拓扑。
+
+## 4. 阶段进度
+
+### 阶段 0 — 项目与验证基线：基础完成
+
+- Git、`src/`、`tests/`、`docs/` 和输出目录已经建立。
+- 单元测试覆盖几何、分跨、设计站点、配筋、DXF、Excel 和写回计划。
+- 依赖和配置契约已收敛：`openpyxl` 使用受支持的 `<4` 版本范围，主路径统一为 Python 3.11、ETABS 22/23 和 ACI 318-14；当前配置加载器会拒绝其他配筋规范。
+- 仍需清理未跟踪的大体积检查文件、Flake8 问题和输出目录策略。
+
+### 阶段 1 — ETABS 连接与安全单位上下文：基础完成
+
+- 可附着已运行 ETABS，读取实际模型路径、显示单位和锁定状态。
+- 可在 `try/finally` 语义下临时切换 `N_mm_C` 并恢复原始单位。
+- 已确认普通终端无法附着提升权限 ETABS 属于 Windows 权限边界，而不是 OAPI 数据错误。
+- 待生产化：插件内多实例/PID 选择接口及 ETABS 22/23 错误信息和连接诊断报告。
+
+### 阶段 2 — 几何、材料与设计对象筛选：基础完成
+
+- 已读取楼层、端点、三维坐标、截面、材料、GUID 和 Frame 设计方向。
+- 仅混凝土设计梁进入梁表；`None` 截面、非混凝土梁和截面名含 `rigid` 的辅助杆件被排除。
+- 待加强：把 `rigid` 柱端刚域的支承语义传递到真实梁端，而不只是排除该杆件。
+
+### 阶段 3 — Beam Line / Span 拓扑：基础完成，尚未冻结
+
+已经实现：
+
+- 同楼层、端点相接且局部切线转角不超过 15° 的梁段组成候选路径；截面变化不作为 Beam Line 编号边界；
+- 主梁 PB、次梁 SB、悬挑跨和弧形主梁识别；
+- PB 按柱支承分跨，SB 按 PB 支承分跨，SB-SB 相交不增加跨数；
+- 一根结构梁内部多个 ETABS Object 的源映射；
+- 楼层间并行分析。
+
+2026-07-18 已修复 Object `302` 被错误同时划入 `T1-F1-PB9-3/4` 的问题。最新只读重算为 3010 跨，仍有 24 个 `REQUIRES_SPLIT` Object 需要逐项核查，因此这一阶段尚不能宣告规则冻结。
+
+### 阶段 4 — ETABS 设计结果与关键位置：基础完成
+
+- 可读取 `GetSummaryResultsBeam_2` 的组合、Station、受弯纵筋、`VMajorArea`、`TTArea`、`TLArea` 和 provided area。
+- 已确认：`VMajorArea=Av/s`，`TTArea=At/s`（单腿抗扭箍筋），`TLArea=Al`（总抗扭纵筋）。
+- 左、右区域取两端 `2D` 范围；无直接 Station 时取最近 Station；跨中取中部控制值。
+- 当前纵筋拆分采用 `AsFlex = AsTotal - Al/2`，并保留实配面积供性能计算和后续非线性扩展。
+
+### 阶段 5 — DXF、映射数据与 Excel：基础完成
+
+- 可按楼层导出完整结构跨 DXF：PB 黄色、SB 绿色，一跨一条多段线，文字位于跨中。
+- 可输出 CSV/源 Object/坐标映射，作为 CAD 中间数据雏形。
+- 正式只读 CLI 可输出标准梁表、设计站点、梁分跨、说明和异常记录。
+- 已生成“原始分跨数据、配筋调整复核、整理后的梁表”三表 Excel 验证件；其构建脚本仍位于 `build/`，尚未迁入正式 CLI。
+
+### 阶段 6 — 模型副本写回原型：基础完成
+
+- 已实现 `plan_orientation()`、`plan_rename()`、显式 `apply_*()` 和写后验证。
+- I/J 反向使用 `EditFrame.ChangeConnectivity`；Unique Name 使用“旧名→临时唯一名→最终名”两阶段改名。
+- 最终对象名采用 `楼层-PB/SB梁号-跨号.段号`，例如 `F1-PB5-3.1`。
+- 已在 ETABS 23 模型副本验证批量方向整理、编号写回、保存、重新分析和混凝土设计。
+- 当前原型允许验证脚本过滤阻塞项后部分写回；正式事务必须改为默认 fail-closed。
+
+## 5. 后续阶段与 TODO
+
+### 阶段 7 — 拓扑冻结（P0-1 自动门禁已完成）
+
+目标：冻结 Beam Line/Span 和编号规则，使同一输入模型在不同导出通道获得完全一致的结果。
+
+1. 已实现 `rigid` 刚域支承传递和批量三维坐标读取：刚域一端为柱、另一端为真实梁时，将柱支承投影到真实梁端。
+2. 已完成梁交点 Z 高程校验、Frame Object 内部柱支承和按楼层 Z 包络过滤。
+3. 已按模型版本输出 `REQUIRES_SPLIT` JSON/CSV/DXF；v6.4.1 为 24 个，当前 v6.4.3 为 29 个。
+4. 已生成当前 3,020 跨完整 DXF，并把 Object 302、PB17、连续 SB、悬挑、弧形和 SB—SB 相交固化为回归；最终图形验收由用户在该成果上确认。
+5. 建立统一编号策略接口；DXF、Excel、JSON 和写回只能消费同一编号结果，不能各自删改 `S`。
+6. 建立 GUID + 空间指纹的编号稳定映射，控制新增梁导致的编号整体漂移。
+7. 两轮人工拓扑 override 的 GUID 数据契约、开链排序、I→J 和支承冲突二级确认已实现；ETABS 内选择、局部重排预览和第二次写回 UI 留在阶段 10 插件。
+
+**自动退出条件结果（2026-07-21）**：源 Object 覆盖 4,110/4,110，PB/SB 内部支承门禁通过，15°/角色收敛 BLOCKED 为 0，默认测试及 Flake8 通过；当前 DXF 已交付图形复核。真实跨 Span Object 继续以明确 `REQUIRES_SPLIT` 状态存在，不等同于未解释拓扑错误。
+
+### 阶段 8 — 正式写回事务（P0）
+
+目标：把模型专用验证脚本收敛为可审计、可拒绝危险输入的正式命令。
+
+1. 将准备副本、分析设计、写回、验证和成果导出迁入 `src/` 编排层。
+2. 固定流程：原模型哈希→工作副本→自动拓扑/编号→第一次方向/改名事务→验证→人工 Line/Span Group 确认→局部重编号差异预览→第二次方向/改名事务→验证→分析设计→成果比较。
+3. 默认只要存在 `BLOCKED/REQUIRES_SPLIT` 就拒绝执行；仅显式 `allow_partial_writeback` 才允许部分写回，并在成果首页标红。
+4. 写前/写后比较 GUID、数量、连接、截面、荷载、释放、端部偏移、组、铰、弹簧、设计覆盖项和变换矩阵。
+5. [已完成] 生成 manifest：原模型/副本 SHA-256、ETABS/API 版本、PID、规范、单位、Git 状态、算法版本、动作统计、异常统计和交付文件哈希；通过确定性 input fingerprint 管理 `CURRENT/SUPERSEDED/INVALID`。
+6. 失败时回滚已执行动作；禁止覆盖原始 EDB 和既有工作副本。
+
+**退出条件**：同一正式命令可在副本上重复执行并得到可追溯、通过写后校验的成果包。
+
+### 阶段 9 — 配筋引擎生产化（P1）
+
+目标：把已验证的 ACI 318-14 工程策略转成稳定、可配置、可人工调整复核的梁表流程。
+
+1. 分离 ETABS 纵筋保护层与箍筋外缘净保护层；复核 147 个 `B 200X400` 的 `NO_ALLOWED_SPACING`。
+2. 修复或排除假碎跨；分跨重算后重新核对无设计结果记录。
+3. 完成相邻跨配筋协调：option 1 两侧根数一致；option 2 直径连续、仅以根数增减吸收差异。
+4. 延续既定工程策略：先确定箍筋 legs，再约束纵筋最少可固定根数；第二排不得只有 1 根；超过两排时把抗扭需求转移到 face bar，但受弯筋仍可进入第三排。
+5. 任一左/中/右位置触发 face 模式后整跨统一；梁高 `<800 mm` 且未触发抗扭 face 模式时输出 `N.A.`。
+6. 混合截面、`Program Determined` 抗震类型和混合 Frame Type 必须 fail-closed，禁止静默采用首截面或默认非 SMF。
+7. 钢筋候选、优先直径、规范版本和配筋协调 option 全部进入配置接口。
+8. 将三表 Excel 构建器迁入正式导出模块，保留配筋文本→实配面积公式，仅用于与计算需求对比复核。
+
+**退出条件**：异常跨都有可解释状态；相邻跨连续性和 Excel 公式通过自动测试与工程抽查。
+
+### 阶段 10 — CAD、SQLite 与 ETABS 插件（P2）
+
+1. 定义版本化 CAD JSON：楼层、Beam Line、Span、GUID、源 Object、路径、文字插入点、I→J 方向和样式。
+2. CAD 插件按梁中点放置编号，并把文字中下插入点吸附到文字上方一侧梁线；禁止为“可读性”擅自反转 180°，文字方向必须严格跟随 I→J。
+3. 使用公开 OAPI 批量表读取建立本地 SQLite 只读快照；ETABS 未来公开原生 SQLite OAPI 后，通过数据源接口替换实现。
+4. 最终插件在 ETABS 进程内加载，提供模型/PID确认、预览、事务执行、验证和成果导出界面。
+
+## 6. 成果有效性和版本失效规则
+
+任何影响支承、PB/SB、分跨、编号、方向或设计区域的算法改动，都必须使旧成果自动失效。成果 manifest 至少比较：
+
+- 源 EDB SHA-256；
+- 拓扑/编号/配筋算法版本或 Git commit；
+- ETABS 主版本、设计规范和显示单位；
+- Beam Line、Span、阻塞对象和排除对象数量；
+- 写回动作以及 DXF/Excel/JSON 文件哈希。
+
+当前以下成果只能用于历史追溯，不能作为最终验收件：
+
+- v6.4.1 基于旧算法的 3070 跨 EDB、DXF 和 Excel；
+- v6.4.3 基于旧算法的 3074 跨配筋成果。
+
+2026-07-21 当前 v6.4.3 只读拓扑基线为 3,020 跨、29 个 `REQUIRES_SPLIT`、拓扑 BLOCKED=0，成果位于 `build/output/topology_p01_20260721_final3/`。该 EDB 与旧 v6.4.3 验证副本哈希不同，统计只能在同一模型哈希和算法版本内比较。
+
+## 7. 当前执行顺序
+
+```text
+当前 DXF 用户图形复核
+    → P0-2 配筋三表迁入正式 CLI（已完成）
+    → P0-3 manifest 与失效注册表（已完成）
+    → P0-4 写回事务全属性验证
+    → 从原始模型重新生成全链路成果
+    → 配筋异常与相邻跨协调收尾
+    → CAD JSON / SQLite / ETABS 插件
 ```
-**验证点**：打印 `sap.GetModelFilename()`、`sap.GetPresentUnits()` 确认 attach 成功。
-**风险**：pythonnet 与 .NET Framework/Core 运行时匹配；attach 失败时回退 `helper.CreateObject` 或 comtypes。
 
-### 阶段 2 — 选择与几何提取层
-**沿用**复现脚本中已基本正确的 OAPI 调用族，修正签名（OAPI 返回 `(ret, ...)` 元组）：
-- 取当前选择：`sap.SelectObj.GetSelected()` → 过滤 `ObjectType==2`(Frame)
-- 楼层标签：`sap.FrameObj.GetLabelFromName(name)` → `(label, story, ret)`
-- 端点：`sap.FrameObj.GetPoints(name)` → `(p1, p2, ret)`
-- 坐标：`sap.PointObj.GetCoordCartesian(pt)` → `(x, y, z, ret)`（注意：复现里的 `Point.GetCoordinates` 名称不准）
-**复用**：`unique_keep_order()`、按 story 分组字典结构——现有资料中这两处逻辑正确，可直接采纳。
-
-### 阶段 3 — 连续梁链分析
-**采纳**现有 `build_chain_top_story` 的算法骨架（processed 集合 + 前向扩展），**补全**被留空的 `find_continuous_frame`：
-- 判据（现有资料已列出，正确）：端点共点(容差~1mm) + 共线(斜率≤`plan_slope_limit`) + 同 story
-- 复用现有 `is_beams_continuous` 片段的距离容差思路
-- 产出 `build_neighbor_continuity_map_for_frames` 的左右邻接映射（数据结构已在资料中定义好）
-
-### 阶段 4 — 设计结果读取层（★阶段1配筋主路径）
-**技术方法**：调用 ETABS 混凝土框架设计结果 API，而非自研公式：
-- `sap.DesignConcrete.GetSummaryResultsBeam(name, ...)` → 取 top/bot 纵筋面积、箍筋 Av/s、剪力等
-- 需先确保模型已 `RunAnalysis` + `StartDesign`；否则提示用户先在 ETABS 内完成设计
-**这一步直接替代**复现脚本第 5 节 `ConcreteBeamDesign` 的手算逻辑（其 `calculate_req`/`combine_shear_torsion_leg_areas_per_station` 保留为远景 ACI 策略的雏形，不在阶段1启用）。
-
-### 阶段 5 — 设计策略接口（为远景预留）
-定义抽象接口，使读结果与自研算法可切换：
-```
-class IDesignProvider(Protocol):
-    def get_beam_design(self, sap, beam_name) -> BeamDesignResult: ...
-
-class EtabsResultProvider(IDesignProvider):   # 阶段1落地
-    # 内部调用 DesignConcrete.GetSummaryResultsBeam
-
-class ACI318Provider(IDesignProvider):        # 远景，仅留空壳+TODO
-    # 迁移 ConcreteBeamDesign 手算逻辑；支持 318-14 / 318-19 切换
-```
-`BeamDesignResult` 为统一 dataclass（纵筋、箍筋、剪扭、跨度、混凝土等级），下游导出层只认它，与来源无关。
-
-### 阶段 6 — Excel 导出层
-**采纳**现有 `export_beam_schedule` 结构（pandas + openpyxl），改进：
-- 输出文件名对齐视频：`Concrete_Beam_Design_ACI318_19.xlsx`（现有资料中误写为 `AC319`，需修正）
-- 增列：连续性(左/右邻接)、跨度、支座反力
-- 文件被占用时回退加时间戳文件名（现有资料已有此容错思路，采纳）
-
----
-
-## 关键文件规划（未来实现时）
-
-| 文件 | 职责 | 来源/复用 |
-|------|------|-----------|
-| `src/config.py` | DLL 路径、单位、规范开关 | 新增 |
-| `src/etabs_connector.py` | pythonnet attach（阶段1） | 修正复现 `connect_to_etabs` |
-| `src/geometry_extractor.py` | 选择/楼层/端点/坐标 | 复用阶段2 OAPI 族 |
-| `src/continuity.py` | 梁链+邻接映射 | 复用 `build_chain_top_story` 骨架 |
-| `src/design/provider.py` | `IDesignProvider` 接口 + 两实现 | 阶段5新增 |
-| `src/excel_export.py` | 梁表导出 | 复用 `export_beam_schedule` |
-| `src/workflow.py` | 编排 | 复用 `__main__` 流程 |
-
----
-
-## 验证方法（端到端）
-
-1. **连接冒烟测试**：ETABS 22 打开任一含梁模型 → 运行连接层 → 断言取到 `SapModel` 且 `GetModelFilename()` 非空。
-2. **提取正确性**：人工在 ETABS 选 3 根梁 → 脚本读到的 story/端点/坐标与 ETABS 界面逐一核对。
-3. **链分析**：构造一排 3 跨连续梁 → 断言输出为单链 `[B-1,B-2,B-3]`；构造孤立梁 → 断言单元素链。
-4. **设计结果**：模型完成设计后读取某梁 → 与 ETABS `Display > Design results` 数值比对。
-5. **导出**：生成 `.xlsx` → 打开确认列齐全、编码正常（中文/单位符号）。
-6. **回归**：无 ETABS 运行时，连接层应给出清晰错误提示而非崩溃。
-
----
-
-## 范围与风险
-
-**本次交付**：仅本路线图文档。**不含**任何实现代码编写、依赖安装或文件改动。
-
-**主要风险**：
-- pythonnet 运行时匹配问题 → 阶段1优先验证，备选 comtypes。
-- 设计结果 API 要求模型预先完成分析+设计 → 编排层需前置检查并提示。
-- CHM 中 v22 方法签名可能与旧版差异 → 以 `CSI API ETABS v1.chm` 为准，不照搬网络旧例。
-
-**远景扩展**：ACI 318-14/318-19 自研配筋（`ACI318Provider`），届时迁移现有 `ConcreteBeamDesign` 手算逻辑并补全规范系数。
-
-**图纸协同远景**：先将逻辑梁编号、源 Object、路径坐标、中点和局部 1 轴方向输出为 CAD 无关的 JSON/CSV 中间数据，再由 CAD 插件负责文字放置。逻辑编号采用 `[楼层]-[PB/SB]-[跨编号]`，跨编号为不带 `S` 前缀的纯数字；局部坐标整理仍是模型侧前置步骤，必须使 ETABS I→J、梁表左/中/右和图纸文字方向统一。具体规则见 `DRAWING_NUMBERING_INTERCHANGE.md`。
-
-另预留 **ETABS SQLite 数据本地归档**：待目标 ETABS 版本提供稳定、可授权使用的 SQLite 数据访问或导出能力后，导出流程可将模型对应的 SQLite 数据副本保存至本地，并记录模型路径、软件版本、时间、单位和校验值。该能力只读归档，不替代 OAPI 主读取路径，也不得写入或改变正在打开的 ETABS 模型。
+任务状态和逐项验收证据以项目根目录的 `PROJECT_COMPLETION_CHECKLIST.md` 为唯一执行清单；本路线图负责阶段目标、依赖关系和退出门禁。

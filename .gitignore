@@ -78,6 +78,9 @@ extracted_frames/frame_*.jpg
 # ============================================================================
 # 构建输出（生成文件）
 # ============================================================================
+# 根目录 outputs/ 是本地验收产物，不进入源码提交。
+/outputs/
+*.inspect.ndjson
 # 生成的梁表
 build/output/reports/*.xlsx
 build/output/reports/beam_schedule_*.xlsx

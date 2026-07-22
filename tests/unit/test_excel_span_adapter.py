@@ -25,9 +25,7 @@ def test_span_adapter_clips_design_and_preserves_source_mapping(tmp_path) -> Non
     assert [station.location for station in record.design.stations] == [0, 5, 10]
     assert mapping.source_to_span_ids["B1"] == ("F1-PB1-S1",)
 
-    output = export_beam_schedule(
-        [beam], [], {"B1": design}, tmp_path, span_schedule=mapping
-    )
+    output = export_beam_schedule([beam], [], {"B1": design}, tmp_path, span_schedule=mapping)
     workbook = load_workbook(output, read_only=True, data_only=True)
     assert "梁分跨" in workbook.sheetnames
     headers = [cell.value for cell in workbook["梁分跨"][1]]

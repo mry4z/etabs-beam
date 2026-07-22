@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from src.core.beam_merger import BeamMerger
 from src.core.geometry_extractor import BeamGeometry
@@ -21,10 +21,28 @@ from src.utils.geometry import Point3D, distance, plan_angle_deg
 @dataclass(frozen=True)
 class BeamLineSpanSettings:
     coordinate_tolerance_mm: float = 1.0
+    source_span_overlap_tolerance_mm: float = 2.0
     merge_angle_deg: float = 15.0
     through_support_angle_deg: float = 3.0
     intersection_grid_mm: float = 5000.0
+    intersection_z_tolerance_mm: float = 1.0
     story_workers: int = 1
+
+
+@dataclass(frozen=True)
+class TopologyDiagnostic:
+    """Machine-readable explanation of a non-trivial topology decision."""
+
+    code: str
+    severity: str
+    story: str
+    source_objects: tuple[str, ...]
+    message: str
+    candidates: tuple[tuple[str, ...], ...] = ()
+
+    def as_record(self) -> str:
+        objects = ",".join(self.source_objects)
+        return f"{self.severity}/{self.code}: {self.message} [{objects}]"
 
 
 @dataclass(frozen=True)
@@ -75,6 +93,7 @@ class BeamLineSpanResult:
     lines: tuple[BeamLine, ...]
     spans: tuple[BeamSpan, ...]
     records: tuple[str, ...]
+    diagnostics: tuple[TopologyDiagnostic, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,6 +113,7 @@ def analyze_beam_lines(
     beams: list[BeamGeometry],
     column_point_names: set[str] | None = None,
     settings: BeamLineSpanSettings | None = None,
+    column_support_coordinates: Mapping[str, Point3D] | None = None,
 ) -> BeamLineSpanResult:
     """Return numbered Beam Lines and support-defined Spans.
 
@@ -104,34 +124,48 @@ def analyze_beam_lines(
     """
     settings = settings or BeamLineSpanSettings()
     column_point_names = column_point_names or set()
+    column_support_coordinates = column_support_coordinates or {}
     by_story: dict[str, list[BeamGeometry]] = {}
     for beam in beams:
         by_story.setdefault(beam.story, []).append(beam)
-    story_inputs = [(story_beams, column_point_names, settings) for story_beams in by_story.values()]
+    story_inputs = [
+        (story_beams, column_point_names, column_support_coordinates, settings) for story_beams in by_story.values()
+    ]
     if settings.story_workers > 1 and len(story_inputs) > 1:
         with ThreadPoolExecutor(max_workers=settings.story_workers) as executor:
             story_results = list(executor.map(_analyze_story, story_inputs))
     else:
         story_results = [_analyze_story(item) for item in story_inputs]
-    unnumbered_lines = [line for lines, _ in story_results for line in lines]
-    records = [record for _, story_records in story_results for record in story_records]
+    unnumbered_lines = [line for lines, _, _ in story_results for line in lines]
+    records = [record for _, story_records, _ in story_results for record in story_records]
+    diagnostics = [item for _, _, story_diagnostics in story_results for item in story_diagnostics]
     numbered_lines, spans = _number_lines(unnumbered_lines, settings)
+    coverage_diagnostics = _source_coverage_diagnostics(beams, spans)
+    diagnostics.extend(coverage_diagnostics)
+    records.extend(item.as_record() for item in coverage_diagnostics)
     records.extend(_validation_records(numbered_lines, spans, settings))
-    return BeamLineSpanResult(tuple(numbered_lines), tuple(spans), tuple(records))
+    return BeamLineSpanResult(tuple(numbered_lines), tuple(spans), tuple(records), tuple(diagnostics))
 
 
 def _analyze_story(
-    input_data: tuple[list[BeamGeometry], set[str], BeamLineSpanSettings]
-) -> tuple[list[_UnnumberedLine], list[str]]:
+    input_data: tuple[
+        list[BeamGeometry],
+        set[str],
+        Mapping[str, Point3D],
+        BeamLineSpanSettings,
+    ],
+) -> tuple[list[_UnnumberedLine], list[str], list[TopologyDiagnostic]]:
     """Analyze one story; this function is isolated so stories can run in parallel."""
-    beams, column_point_names, settings = input_data
-    column_points = _column_coordinates(beams, column_point_names, settings.coordinate_tolerance_mm)
-    designs = {
-        beam.name: BeamDesignResult(beam.name, status=DesignResultStatus.SKIPPED)
-        for beam in beams
-    }
+    beams, column_point_names, column_support_coordinates, settings = input_data
+    column_points = _column_coordinates(
+        beams,
+        column_point_names,
+        settings.coordinate_tolerance_mm,
+        column_support_coordinates,
+    )
+    designs = {beam.name: BeamDesignResult(beam.name, status=DesignResultStatus.SKIPPED) for beam in beams}
     merge_result = BeamMerger(angle_limit_deg=settings.merge_angle_deg).merge(beams, designs)
-    candidates, stitch_records = _stitch_candidates(merge_result.beams, settings)
+    candidates, stitch_records, stitch_diagnostics = _stitch_candidates(merge_result.beams, settings)
     records = [
         f"{record.severity}/{record.category}: {record.message} [{record.beam_names}]"
         for record in merge_result.records
@@ -155,11 +189,11 @@ def _analyze_story(
     # a long candidate itself may need to change from PB to SB at an interior
     # main-beam intersection (for example GF-GRD-F-PB17).
     primary_paths = tuple(
-        candidates[index].path_points or (candidates[index].start, candidates[index].end)
+        _oriented_path(candidates[index].path_points or (candidates[index].start, candidates[index].end))
         for index in sorted(seed_primary_indices)
     )
     primary_index = _build_segment_index(primary_paths, settings.intersection_grid_mm)
-    preliminary_lines = _split_candidates_by_role(
+    final_lines = _split_candidates_by_role(
         candidates,
         seed_primary_indices,
         anchor_primary_indices,
@@ -169,27 +203,86 @@ def _analyze_story(
         settings,
     )
     # A one-column candidate can contribute a PB portion before it changes to
-    # SB. That PB portion is itself a valid support for other secondary beams,
-    # so make a second pass with all preliminary PB paths in the support index.
-    expanded_primary_paths = tuple(line.path_points for line in preliminary_lines if line.beam_type == "PB")
-    expanded_index = _build_segment_index(expanded_primary_paths, settings.intersection_grid_mm)
-    if expanded_primary_paths == primary_paths:
-        return preliminary_lines, records
-    return _split_candidates_by_role(
-        candidates,
-        seed_primary_indices,
-        anchor_primary_indices,
+    # SB. That PB portion is itself a valid support for other secondary beams.
+    # Refine to a fixed point: a single second pass can leave an SB split at a
+    # preliminary PB path that disappeared during role reclassification.
+    support_paths = primary_paths
+    support_signature = _support_path_signature(support_paths, settings.coordinate_tolerance_mm)
+    seen_support_signatures: set[tuple[tuple[tuple[int, int, int], ...], ...]] = set()
+    refinement_diagnostics: list[TopologyDiagnostic] = []
+    for refinement in range(1, 7):
+        resolved_primary_paths = tuple(line.path_points for line in final_lines if line.beam_type == "PB")
+        resolved_signature = _support_path_signature(resolved_primary_paths, settings.coordinate_tolerance_mm)
+        if resolved_signature == support_signature:
+            if refinement > 1:
+                refinement_diagnostics.append(
+                    TopologyDiagnostic(
+                        "ROLE_REFINEMENT_CONVERGED",
+                        "INFO",
+                        candidates[0].story if candidates else "",
+                        tuple(
+                            name for candidate in candidates for name in (candidate.source_names or (candidate.name,))
+                        ),
+                        f"PB/SB 支承角色在第 {refinement} 轮达到稳定。",
+                    )
+                )
+            break
+        if resolved_signature in seen_support_signatures:
+            refinement_diagnostics.append(
+                TopologyDiagnostic(
+                    "ROLE_REFINEMENT_NOT_CONVERGED",
+                    "BLOCKED",
+                    candidates[0].story if candidates else "",
+                    tuple(name for candidate in candidates for name in (candidate.source_names or (candidate.name,))),
+                    "PB/SB 支承角色出现循环，未达到唯一稳定拓扑。",
+                )
+            )
+            break
+        seen_support_signatures.add(support_signature)
+        support_paths = resolved_primary_paths
+        support_signature = resolved_signature
+        expanded_index = _build_segment_index(support_paths, settings.intersection_grid_mm)
+        final_lines = _split_candidates_by_role(
+            candidates,
+            seed_primary_indices,
+            anchor_primary_indices,
+            column_points,
+            expanded_index,
+            source_by_name,
+            settings,
+            seed_intersection_index=primary_index,
+        )
+    else:
+        refinement_diagnostics.append(
+            TopologyDiagnostic(
+                "ROLE_REFINEMENT_NOT_CONVERGED",
+                "BLOCKED",
+                candidates[0].story if candidates else "",
+                tuple(name for candidate in candidates for name in (candidate.source_names or (candidate.name,))),
+                "PB/SB 支承角色在 6 轮内未达到唯一稳定拓扑。",
+            )
+        )
+    support_diagnostics = _support_boundary_diagnostics(
+        final_lines,
         column_points,
-        expanded_index,
-        source_by_name,
+        tuple(line.path_points for line in final_lines if line.beam_type == "PB"),
         settings,
-        seed_intersection_index=primary_index,
-    ), records
+    )
+    records.extend(item.as_record() for item in (*refinement_diagnostics, *support_diagnostics))
+    return (
+        final_lines,
+        records,
+        [
+            *stitch_diagnostics,
+            *refinement_diagnostics,
+            *support_diagnostics,
+        ],
+    )
 
 
 def _stitch_candidates(
     candidates: list[BeamGeometry], settings: BeamLineSpanSettings
-) -> tuple[list[BeamGeometry], list[str]]:
+) -> tuple[list[BeamGeometry], list[str], list[TopologyDiagnostic]]:
     """Join candidate paths that are one geometric Beam Line across a support.
 
     ``BeamMerger`` intentionally keeps section changes separate because design
@@ -201,7 +294,7 @@ def _stitch_candidates(
     have an independent drawing identity).
     """
     if len(candidates) < 2:
-        return candidates, []
+        return candidates, [], []
 
     endpoint_links: dict[tuple[int, int], tuple[int, int]] = {}
     pair_candidates: list[tuple[float, float, int, int, int, int]] = []
@@ -222,16 +315,50 @@ def _stitch_candidates(
                         *_candidate_tangent(right, right_endpoint),
                     )
                     if angle <= settings.merge_angle_deg:
-                        pair_candidates.append(
-                            (angle, gap, left_index, left_endpoint, right_index, right_endpoint)
-                        )
+                        pair_candidates.append((angle, gap, left_index, left_endpoint, right_index, right_endpoint))
+
+    diagnostics: list[TopologyDiagnostic] = []
+    alternatives_by_endpoint: dict[tuple[int, int], list[tuple[float, float, int, int]]] = {}
+    for angle, gap, left_index, left_endpoint, right_index, right_endpoint in pair_candidates:
+        alternatives_by_endpoint.setdefault((left_index, left_endpoint), []).append(
+            (angle, gap, right_index, right_endpoint)
+        )
+        alternatives_by_endpoint.setdefault((right_index, right_endpoint), []).append(
+            (angle, gap, left_index, left_endpoint)
+        )
+    ambiguous_endpoints = {
+        endpoint
+        for endpoint, alternatives in alternatives_by_endpoint.items()
+        if len({(item[2], item[3]) for item in alternatives}) > 1
+    }
+    for candidate_index, endpoint in sorted(ambiguous_endpoints):
+        candidate = candidates[candidate_index]
+        alternatives = sorted(alternatives_by_endpoint[(candidate_index, endpoint)])
+        candidate_groups = tuple(
+            tuple(candidates[other_index].source_names or (candidates[other_index].name,))
+            for _, _, other_index, _ in alternatives
+        )
+        diagnostics.append(
+            TopologyDiagnostic(
+                code="STITCH_MULTIPLE_CANDIDATES",
+                severity="BLOCKED",
+                story=candidate.story,
+                source_objects=tuple(candidate.source_names or (candidate.name,)),
+                message=("15° 梁线串接端点存在多个近似共线候选；已 fail-closed，" "不自动选择延续路径。"),
+                candidates=candidate_groups,
+            )
+        )
 
     # At a support there can be several objects meeting at one point. Consume
-    # each physical endpoint once and select the most collinear continuation.
+    # each physical endpoint once. Ambiguous endpoints are deliberately left
+    # unlinked; selecting the smallest angle there would silently choose one
+    # branch and make later numbering look authoritative when it is not.
     pair_candidates.sort()
     for _, _, left_index, left_endpoint, right_index, right_endpoint in pair_candidates:
         left_key = (left_index, left_endpoint)
         right_key = (right_index, right_endpoint)
+        if left_key in ambiguous_endpoints or right_key in ambiguous_endpoints:
+            continue
         if left_key in endpoint_links or right_key in endpoint_links:
             continue
         endpoint_links[left_key] = right_key
@@ -250,7 +377,21 @@ def _stitch_candidates(
         ordered = _order_candidate_component(component_indices, endpoint_links)
         if ordered is None:
             # A cycle is not a drawable open Beam Line. Preserve its candidates
-            # and let the existing merge records expose the topology for review.
+            # and emit an explicit machine-readable blocking diagnostic.
+            member_names = tuple(
+                name
+                for member in component_indices
+                for name in (candidates[member].source_names or (candidates[member].name,))
+            )
+            diagnostics.append(
+                TopologyDiagnostic(
+                    code="STITCH_CYCLE_OR_BRANCH",
+                    severity="BLOCKED",
+                    story=candidates[component_indices[0]].story,
+                    source_objects=member_names,
+                    message="梁线串接图不是唯一开链（闭环或分叉）；已保留独立候选。",
+                )
+            )
             components.extend([[(member, False)] for member in component_indices])
         else:
             components.append(ordered)
@@ -263,16 +404,29 @@ def _stitch_candidates(
             continue
         merged = _stitch_geometry([candidates[index] for index, _ in ordered], [reverse for _, reverse in ordered])
         stitched.append(merged)
-        sections = tuple(dict.fromkeys(candidate.section for candidate, _ in zip(
-            [candidates[index] for index, _ in ordered], ordered
-        )))
+        if len(ordered) >= 4:
+            diagnostics.append(
+                TopologyDiagnostic(
+                    code="STITCH_LONG_CHAIN",
+                    severity="INFO",
+                    story=merged.story,
+                    source_objects=tuple(merged.source_names),
+                    message=f"15° 梁线由 {len(ordered)} 个候选路径串接，已保留完整审计链。",
+                )
+            )
+        sections = tuple(
+            dict.fromkeys(
+                candidate.section for candidate, _ in zip([candidates[index] for index, _ in ordered], ordered)
+            )
+        )
         if len(sections) > 1:
             records.append(
                 "信息/梁线串接：{} [{}]；跨截面变化保留为同一 Beam Line。".format(
                     ",".join(merged.source_names), " / ".join(sections)
                 )
             )
-    return stitched, records
+    records.extend(diagnostic.as_record() for diagnostic in diagnostics)
+    return stitched, records, diagnostics
 
 
 def _candidate_component(index: int, links: dict[tuple[int, int], tuple[int, int]]) -> list[int]:
@@ -293,12 +447,7 @@ def _candidate_component(index: int, links: dict[tuple[int, int], tuple[int, int
 def _order_candidate_component(
     component: list[int], links: dict[tuple[int, int], tuple[int, int]]
 ) -> list[tuple[int, bool]] | None:
-    endpoints = [
-        (index, endpoint)
-        for index in component
-        for endpoint in (0, 1)
-        if (index, endpoint) not in links
-    ]
+    endpoints = [(index, endpoint) for index in component for endpoint in (0, 1) if (index, endpoint) not in links]
     if len(endpoints) != 2:
         return None
     start_index, start_endpoint = endpoints[0]
@@ -389,56 +538,100 @@ def _split_candidates_by_role(
     lines: list[_UnnumberedLine] = []
     for candidate_index, candidate in enumerate(candidates):
         path = _oriented_path(candidate.path_points or (candidate.start, candidate.end))
-        self_segments = {
-            _segment_key(left, right) for left, right in zip(path, path[1:])
-        }
+        self_segments = {_segment_key(left, right) for left, right in zip(path, path[1:])}
         # Intersections are needed for seeded primary paths as well: a path can
         # have a column-supported core and continue past the first main-beam
         # intersection as a secondary extension.  Intersections inside the
         # column-to-column core do not create an extra PB span because adjacent
         # parts are merged again when their role remains PB.
-        intersections = _path_intersections(
+        support_intersections = _path_intersections(
             path,
-            (
-                seed_intersection_index
-                if candidate_index in seed_primary_indices and seed_intersection_index is not None
-                else primary_index
-            ),
+            primary_index,
             settings,
             self_segments,
         )
-        markers = _unique_points((*column_points, *intersections), settings.coordinate_tolerance_mm)
+        role_intersections = support_intersections
+        if candidate_index in seed_primary_indices and seed_intersection_index is not None:
+            role_intersections = _path_intersections(
+                path,
+                seed_intersection_index,
+                settings,
+                self_segments,
+            )
+        is_seed_primary = candidate_index in seed_primary_indices
+        # A primary Beam Line is divided into structural spans by columns.  A
+        # crossing with another beam is only a role boundary when the path is
+        # outside its column-supported core (for example a one-column
+        # extension that continues as a secondary beam).  Do not turn an
+        # interior PB/SB crossing into an extra PB span: an object such as
+        # ``302`` can run from column to column while a secondary beam meets
+        # it at an intermediate point.
+        if is_seed_primary:
+            column_positions = [
+                position
+                for point in column_points
+                if (position := _path_position(path, point, settings.coordinate_tolerance_mm)) is not None
+            ]
+            if column_positions:
+                min_column, max_column = min(column_positions), max(column_positions)
+                role_boundary_intersections = tuple(
+                    point
+                    for point in role_intersections
+                    if (position := _path_position(path, point, settings.coordinate_tolerance_mm)) is not None
+                    and (position < min_column or position > max_column)
+                )
+                support_boundary_intersections = tuple(
+                    point
+                    for point in support_intersections
+                    if (position := _path_position(path, point, settings.coordinate_tolerance_mm)) is not None
+                    and (position < min_column or position > max_column)
+                )
+            else:
+                role_boundary_intersections = role_intersections
+                support_boundary_intersections = support_intersections
+            marker_points = (
+                *column_points,
+                *role_boundary_intersections,
+                *support_boundary_intersections,
+            )
+        else:
+            marker_points = (*column_points, *support_intersections)
+        markers = _unique_points(marker_points, settings.coordinate_tolerance_mm)
         parts = _split_path(path, markers, settings.coordinate_tolerance_mm)
         if not parts:
             continue
-        is_seed_primary = candidate_index in seed_primary_indices
         roles = _classify_part_roles(
             path,
             parts,
             is_seed_primary,
             column_points,
-            intersections,
+            role_intersections,
             settings,
         )
+        grouped = _group_parts_by_role(parts, roles, settings)
+        grouped_spans: list[tuple[str, tuple[tuple[Point3D, ...], ...]]] = []
+        for beam_type, line_parts in grouped:
+            valid_internal_supports = column_points if beam_type == "PB" else support_intersections
+            span_paths = _coalesce_parts_without_support(
+                line_parts,
+                valid_internal_supports,
+                settings.coordinate_tolerance_mm,
+            )
+            grouped_spans.append((beam_type, span_paths))
+        all_span_paths = tuple(span_path for _, span_paths in grouped_spans for span_path in span_paths)
         all_span_sources = _source_names_by_paths(
             candidate,
-            _join_paths(tuple(parts)),
-            tuple(parts),
+            _join_paths(all_span_paths),
+            all_span_paths,
             source_by_name,
             settings,
         )
         source_offset = 0
-        grouped = _group_parts_by_role(parts, roles, settings)
-        for beam_type, line_parts in grouped:
-            span_paths = tuple(line_parts)
+        for beam_type, span_paths in grouped_spans:
             line_path = _join_paths(span_paths)
-            span_sources = all_span_sources[source_offset:source_offset + len(span_paths)]
+            span_sources = all_span_sources[source_offset : source_offset + len(span_paths)]
             source_offset += len(span_paths)
-            support_points = (
-                _unique_points((*column_points, *intersections), settings.coordinate_tolerance_mm)
-                if beam_type == "PB"
-                else intersections
-            )
+            support_points = column_points if beam_type == "PB" else support_intersections
             lines.append(
                 _UnnumberedLine(
                     candidate.story,
@@ -472,6 +665,31 @@ def _group_parts_by_role(
         else:
             grouped.append((role, [part]))
     return grouped
+
+
+def _coalesce_parts_without_support(
+    parts: list[tuple[Point3D, ...]],
+    support_points: Iterable[Point3D],
+    tolerance: float,
+) -> tuple[tuple[Point3D, ...], ...]:
+    """Keep only structural supports as internal Span boundaries.
+
+    Role-classification markers may come from an earlier PB support hypothesis.
+    If that hypothesis disappears after refinement, adjacent parts of the same
+    role must become one Span rather than retaining a stale boundary.
+    """
+
+    if not parts:
+        return ()
+    supports = tuple(support_points)
+    spans: list[tuple[Point3D, ...]] = [parts[0]]
+    for part in parts[1:]:
+        boundary = spans[-1][-1]
+        if any(distance(boundary, point) <= tolerance for point in supports):
+            spans.append(part)
+        else:
+            spans[-1] = _join_paths((spans[-1], part))
+    return tuple(spans)
 
 
 def _classify_part_roles(
@@ -527,8 +745,34 @@ def _classify_part_roles(
     return roles
 
 
-def _column_coordinates(beams: list[BeamGeometry], names: set[str], tolerance: float) -> tuple[Point3D, ...]:
-    coordinates: list[Point3D] = []
+def _column_coordinates(
+    beams: list[BeamGeometry],
+    names: set[str],
+    tolerance: float,
+    explicit_coordinates: Mapping[str, Point3D] | None = None,
+) -> tuple[Point3D, ...]:
+    """Resolve every known column/equivalent-column point to coordinates.
+
+    Historically only support names that happened to be Beam Object endpoints
+    could be resolved here. A real column point lying inside a long Beam Object
+    was therefore lost before path splitting. The explicit mapping comes from
+    ``GeometryExtractor.column_supports`` and is authoritative; endpoint lookup
+    remains as a backwards-compatible fallback for existing pure-geometry use.
+    """
+    if beams:
+        story_z_min = min(min(beam.start[2], beam.end[2]) for beam in beams) - tolerance
+        story_z_max = max(max(beam.start[2], beam.end[2]) for beam in beams) + tolerance
+    else:
+        story_z_min, story_z_max = float("-inf"), float("inf")
+    # ``explicit_coordinates`` contains supports from every storey.  Filter by
+    # the current story's three-dimensional envelope before point-on-path
+    # projection; otherwise each story repeatedly scans every column endpoint
+    # in the whole model and a 4,000-beam run becomes needlessly quadratic.
+    coordinates: list[Point3D] = [
+        (float(point[0]), float(point[1]), float(point[2]))
+        for name, point in (explicit_coordinates or {}).items()
+        if name in names and story_z_min <= float(point[2]) <= story_z_max
+    ]
     for beam in beams:
         if beam.point_i in names:
             coordinates.append(beam.start)
@@ -547,7 +791,8 @@ def _candidate_is_primary(
     source_names = candidate.source_names or (candidate.name,)
     if any(
         source_by_name[name].point_i in column_names or source_by_name[name].point_j in column_names
-        for name in source_names if name in source_by_name
+        for name in source_names
+        if name in source_by_name
     ):
         return True
     path = candidate.path_points or (candidate.start, candidate.end)
@@ -558,10 +803,7 @@ def _candidate_column_count(
     candidate: BeamGeometry, column_points: tuple[Point3D, ...], settings: BeamLineSpanSettings
 ) -> int:
     path = candidate.path_points or (candidate.start, candidate.end)
-    return sum(
-        _path_position(path, point, settings.coordinate_tolerance_mm) is not None
-        for point in column_points
-    )
+    return sum(_path_position(path, point, settings.coordinate_tolerance_mm) is not None for point in column_points)
 
 
 def _split_candidates(
@@ -590,7 +832,7 @@ def _split_candidates(
         for line_parts in groups:
             span_paths = tuple(line_parts)
             line_path = _join_paths(span_paths)
-            span_sources = all_span_sources[source_offset:source_offset + len(span_paths)]
+            span_sources = all_span_sources[source_offset : source_offset + len(span_paths)]
             source_offset += len(span_paths)
             lines.append(
                 _UnnumberedLine(
@@ -646,7 +888,17 @@ def _source_names_by_paths(
             assigned = False
             for index, (start, end) in enumerate(zip(starts, ends)):
                 overlap = min(source_high, end) - max(source_low, start)
-                if overlap > settings.coordinate_tolerance_mm * 0.5:
+                # A support centreline can fall a millimetre or two beyond an
+                # existing Object endpoint because of modelling offsets or a
+                # slightly skew support.  Do not make the whole Object belong
+                # to two Spans for such a negligible end sliver; otherwise a
+                # harmless offset blocks Unique Name writeback as
+                # REQUIRES_SPLIT.  Material overlap still maps to every Span.
+                overlap_tolerance = max(
+                    settings.source_span_overlap_tolerance_mm,
+                    settings.coordinate_tolerance_mm * 0.5,
+                )
+                if overlap > overlap_tolerance:
                     selected[index].append(name)
                     assigned = True
             if assigned:
@@ -655,8 +907,11 @@ def _source_names_by_paths(
         if position is None:
             continue
         index = next(
-            (i for i, (start, end) in enumerate(zip(starts, ends))
-             if start - settings.coordinate_tolerance_mm <= position <= end + settings.coordinate_tolerance_mm),
+            (
+                i
+                for i, (start, end) in enumerate(zip(starts, ends))
+                if start - settings.coordinate_tolerance_mm <= position <= end + settings.coordinate_tolerance_mm
+            ),
             len(selected) - 1,
         )
         selected[index].append(name)
@@ -694,8 +949,13 @@ def _number_lines(
             story_lines.sort(key=_line_sort_key)
             for line_number, line in enumerate(story_lines, start=1):
                 beam_line = BeamLine(
-                    story, beam_type, line_number, line.section,
-                    line.source_objects, line.path_points, line.is_curved,
+                    story,
+                    beam_type,
+                    line_number,
+                    line.section,
+                    line.source_objects,
+                    line.path_points,
+                    line.is_curved,
                 )
                 numbered.append(beam_line)
                 for span_index, path in enumerate(line.span_paths, start=1):
@@ -730,6 +990,20 @@ def _line_sort_key(line: _UnnumberedLine) -> tuple[float, float, str]:
     )
 
 
+def _support_path_signature(
+    paths: Iterable[tuple[Point3D, ...]], tolerance: float
+) -> tuple[tuple[tuple[int, int, int], ...], ...]:
+    """Canonicalise a PB support set independent of path order and I/J."""
+
+    scale = max(float(tolerance), 1e-6)
+    canonical: list[tuple[tuple[int, int, int], ...]] = []
+    for path in paths:
+        forward = tuple(tuple(int(round(value / scale)) for value in point) for point in path)
+        reverse = tuple(reversed(forward))
+        canonical.append(min(forward, reverse))
+    return tuple(sorted(canonical))
+
+
 def _is_cantilever(
     path: tuple[Point3D, ...], support_points: tuple[Point3D, ...], settings: BeamLineSpanSettings
 ) -> bool:
@@ -738,6 +1012,76 @@ def _is_cantilever(
     start_supported = any(distance(path[0], point) <= settings.coordinate_tolerance_mm for point in support_points)
     end_supported = any(distance(path[-1], point) <= settings.coordinate_tolerance_mm for point in support_points)
     return start_supported != end_supported
+
+
+def _support_boundary_diagnostics(
+    lines: Iterable[_UnnumberedLine],
+    column_points: tuple[Point3D, ...],
+    primary_paths: tuple[tuple[Point3D, ...], ...],
+    settings: BeamLineSpanSettings,
+) -> list[TopologyDiagnostic]:
+    """Verify that every internal Span boundary has its required support."""
+
+    diagnostics: list[TopologyDiagnostic] = []
+    for line in lines:
+        for left, right in zip(line.span_paths, line.span_paths[1:]):
+            boundary = left[-1]
+            if distance(boundary, right[0]) > settings.coordinate_tolerance_mm:
+                diagnostics.append(
+                    TopologyDiagnostic(
+                        "SPAN_PATH_DISCONNECTED",
+                        "BLOCKED",
+                        line.story,
+                        line.source_objects,
+                        "同一 Beam Line 的相邻 Span 路径不连续。",
+                    )
+                )
+                continue
+            if line.beam_type == "PB":
+                supported = any(
+                    distance(boundary, point) <= settings.coordinate_tolerance_mm for point in column_points
+                )
+                code = "PB_INTERNAL_BOUNDARY_WITHOUT_COLUMN"
+                message = "PB 内部分跨边界不是柱或 rigid 等效柱支承。"
+            else:
+                supported = any(
+                    _path_position(path, boundary, settings.coordinate_tolerance_mm) is not None
+                    for path in primary_paths
+                )
+                code = "SB_INTERNAL_BOUNDARY_WITHOUT_PRIMARY"
+                message = "SB 内部分跨边界不在主梁路径上。"
+            if not supported:
+                diagnostics.append(
+                    TopologyDiagnostic(
+                        code,
+                        "BLOCKED",
+                        line.story,
+                        line.source_objects,
+                        message,
+                    )
+                )
+    return diagnostics
+
+
+def _source_coverage_diagnostics(beams: Iterable[BeamGeometry], spans: Iterable[BeamSpan]) -> list[TopologyDiagnostic]:
+    """Fail closed if any eligible source Object disappears from all Spans."""
+
+    beam_list = tuple(beams)
+    covered = {source_name for span in spans for source_name in span.source_objects}
+    by_story: dict[str, list[str]] = {}
+    for beam in beam_list:
+        if beam.name not in covered:
+            by_story.setdefault(beam.story, []).append(beam.name)
+    return [
+        TopologyDiagnostic(
+            "SOURCE_OBJECT_UNCOVERED",
+            "BLOCKED",
+            story,
+            tuple(sorted(names)),
+            f"{len(names)} 个混凝土梁 Object 未映射到任何结构 Span。",
+        )
+        for story, names in sorted(by_story.items())
+    ]
 
 
 def _validation_records(lines: list[BeamLine], spans: list[BeamSpan], settings: BeamLineSpanSettings) -> list[str]:
@@ -790,8 +1134,11 @@ def _split_path(path: tuple[Point3D, ...], markers: Iterable[Point3D], tolerance
 
 
 def _subpath(
-    path: tuple[Point3D, ...], start_distance: float, end_distance: float,
-    start: Point3D, end: Point3D,
+    path: tuple[Point3D, ...],
+    start_distance: float,
+    end_distance: float,
+    start: Point3D,
+    end: Point3D,
 ) -> tuple[Point3D, ...]:
     points = [start]
     distance_so_far = 0.0
@@ -849,9 +1196,29 @@ def _path_intersections(
     intersections: list[Point3D] = []
     for left, right in zip(path, path[1:]):
         for p_left, p_right in _indexed_candidates(left, right, primary_index, settings.intersection_grid_mm):
-            if excluded_segments and _segment_key(p_left, p_right) in excluded_segments:
-                continue
-            point = _segment_intersection(left, right, p_left, p_right, settings.coordinate_tolerance_mm)
+            if excluded_segments:
+                if _segment_key(p_left, p_right) in excluded_segments:
+                    continue
+                # A refined PB support path can contain only a subsegment of
+                # the candidate currently being classified.  Exact segment
+                # keys then differ and the shared vertex of a curved path was
+                # previously mistaken for an external PB intersection.  That
+                # made PB/SB roles depend on whether I/J had already been
+                # normalised.  Exclude every support segment wholly carried
+                # by the current path, not only byte-identical segments.
+                if (
+                    _path_position(path, p_left, settings.coordinate_tolerance_mm) is not None
+                    and _path_position(path, p_right, settings.coordinate_tolerance_mm) is not None
+                ):
+                    continue
+            point = _segment_intersection(
+                left,
+                right,
+                p_left,
+                p_right,
+                settings.coordinate_tolerance_mm,
+                settings.intersection_z_tolerance_mm,
+            )
             if point is not None:
                 intersections.append(point)
     return _unique_points(intersections, settings.coordinate_tolerance_mm)
@@ -898,7 +1265,14 @@ def _grid_index(value: float, grid_size: float) -> int:
     return int(value // grid_size)
 
 
-def _segment_intersection(a: Point3D, b: Point3D, c: Point3D, d: Point3D, tolerance: float) -> Point3D | None:
+def _segment_intersection(
+    a: Point3D,
+    b: Point3D,
+    c: Point3D,
+    d: Point3D,
+    tolerance: float,
+    z_tolerance: float,
+) -> Point3D | None:
     r_x, r_y = b[0] - a[0], b[1] - a[1]
     s_x, s_y = d[0] - c[0], d[1] - c[1]
     denominator = r_x * s_y - r_y * s_x
@@ -908,7 +1282,11 @@ def _segment_intersection(a: Point3D, b: Point3D, c: Point3D, d: Point3D, tolera
     t = (q_x * s_y - q_y * s_x) / denominator
     u = (q_x * r_y - q_y * r_x) / denominator
     if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
-        return (a[0] + t * r_x, a[1] + t * r_y, a[2] + t * (b[2] - a[2]))
+        z_a = a[2] + t * (b[2] - a[2])
+        z_c = c[2] + u * (d[2] - c[2])
+        if abs(z_a - z_c) > z_tolerance:
+            return None
+        return (a[0] + t * r_x, a[1] + t * r_y, z_a)
     return None
 
 

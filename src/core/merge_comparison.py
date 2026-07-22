@@ -27,21 +27,12 @@ def compare_merge_angles(
     """Return higher-angle logical beams that combine multiple lower-angle groups."""
     if higher_angle_deg <= lower_angle_deg:
         raise ValueError("higher_angle_deg 必须大于 lower_angle_deg。")
-    designs = {
-        beam.name: BeamDesignResult(beam.name, status=DesignResultStatus.SKIPPED)
-        for beam in beams
-    }
+    designs = {beam.name: BeamDesignResult(beam.name, status=DesignResultStatus.SKIPPED) for beam in beams}
     lower = BeamMerger(angle_limit_deg=lower_angle_deg).merge(beams, designs)
     higher = BeamMerger(angle_limit_deg=higher_angle_deg).merge(beams, designs)
-    lower_by_source = {
-        source: _source_names(beam)
-        for beam in lower.beams
-        for source in _source_names(beam)
-    }
+    lower_by_source = {source: _source_names(beam) for beam in lower.beams for source in _source_names(beam)}
     lower_path_by_source = {
-        source: (beam.path_points or (beam.start, beam.end))
-        for beam in lower.beams
-        for source in _source_names(beam)
+        source: (beam.path_points or (beam.start, beam.end)) for beam in lower.beams for source in _source_names(beam)
     }
 
     differences: list[MergeAngleDifference] = []

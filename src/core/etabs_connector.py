@@ -1,10 +1,12 @@
-"""Safe pythonnet attachment to an already running ETABS 22 instance."""
+"""Safe pythonnet attachment to supported ETABS 22/23 instances."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+
+SUPPORTED_ETABS_MAJOR_VERSIONS = frozenset({22, 23})
 
 
 class EtabsConnectionError(RuntimeError):
@@ -29,6 +31,48 @@ def api_values(result: Any, context: str) -> tuple[Any, ...]:
     if values[0] != 0:
         raise EtabsApiError(f"{context}: ETABS API 返回错误码 {values[0]}。")
     return values[1:]
+
+
+def etabs_version_info(sap_model: Any) -> dict[str, Any]:
+    """Read and classify the ETABS host version across 22/23 signatures.
+
+    ETABS 22 exposes ``GetVersion(ref string, ref double)`` to pythonnet and
+    therefore needs initial ref values.  Some ETABS 23 builds also accept a
+    no-argument call.  The compatibility boundary tries both without making
+    the rest of the workflow branch on the host version.
+    """
+
+    try:
+        try:
+            result = sap_model.GetVersion()
+        except TypeError:
+            result = sap_model.GetVersion("", 0.0)
+    except Exception as exc:
+        return {
+            "available": False,
+            "supported": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    raw = list(result) if isinstance(result, tuple) else [result]
+    values = [value if isinstance(value, (str, int, float, bool)) or value is None else str(value) for value in raw]
+    version = next((str(value) for value in values if isinstance(value, str)), None)
+    major = _major_version(version)
+    return {
+        "available": True,
+        "supported": major in SUPPORTED_ETABS_MAJOR_VERSIONS,
+        "version": version,
+        "major": major,
+        "raw": values,
+    }
+
+
+def _major_version(version: str | None) -> int | None:
+    if not version:
+        return None
+    try:
+        return int(version.split(".", 1)[0])
+    except ValueError:
+        return None
 
 
 class EtabsConnector:
@@ -61,7 +105,8 @@ class EtabsConnector:
             raise
         except Exception as exc:  # pythonnet translates COM/.NET exceptions
             raise EtabsConnectionError(
-                "无法连接到 ETABS。请确认 ETABS 22 已打开、模型已加载，且 Python 与 ETABS 均为 x64。"
+                "无法连接到 ETABS。请确认受支持的 ETABS 22/23 已打开、模型已加载，"
+                "Python/ETABS 均为 x64，且 DLL 主版本与宿主一致。"
             ) from exc
 
         self.app = app

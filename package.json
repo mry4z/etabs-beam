@@ -1,0 +1,11 @@
+{
+  "name": "etabs-beam-generator-workbook",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build-rebar-workbook": "node src/spreadsheet/build_rebar_workbook.mjs"
+  },
+  "dependencies": {
+    "@oai/artifact-tool": "^2.8.6"
+  }
+}

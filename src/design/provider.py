@@ -32,6 +32,30 @@ class DesignStation:
     torsion_trans_area: float
     error: str = ""
     warning: str = ""
+    # ETABS 22/23 GetSummaryResultsBeam_2 fields.  They are optional so the
+    # existing legacy provider and Excel contract remain backward compatible.
+    top_total_area: float | None = None
+    bottom_total_area: float | None = None
+    top_min_area: float | None = None
+    bottom_min_area: float | None = None
+    top_provided_area: float | None = None
+    bottom_provided_area: float | None = None
+
+    @property
+    def as_total_top_mm2(self) -> float:
+        return self.top_total_area if self.top_total_area is not None else self.top_flexural_area
+
+    @property
+    def as_total_bottom_mm2(self) -> float:
+        return self.bottom_total_area if self.bottom_total_area is not None else self.bottom_flexural_area
+
+    @property
+    def as_flex_top_mm2(self) -> float:
+        return max(0.0, self.as_total_top_mm2 - self.torsion_longitudinal_area / 2.0)
+
+    @property
+    def as_flex_bottom_mm2(self) -> float:
+        return max(0.0, self.as_total_bottom_mm2 - self.torsion_longitudinal_area / 2.0)
 
 
 @dataclass(frozen=True)

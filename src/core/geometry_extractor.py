@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from src.core.etabs_connector import EtabsApiError, api_values
 from src.utils.geometry import Point3D, length
@@ -11,6 +11,29 @@ from src.utils.geometry import Point3D, length
 
 class SelectionError(RuntimeError):
     """Raised when no suitable beam objects are available."""
+
+
+def expand_rigid_support_points(column_points: Iterable[str], rigid_links: Iterable[tuple[str, str]]) -> set[str]:
+    """Propagate real-column support points through anchored rigid links.
+
+    A rigid helper member is a support-transfer edge only when it is connected
+    to a known column point. Unanchored rigid members are deliberately ignored
+    so they cannot silently turn an arbitrary beam endpoint into a primary
+    support.
+    """
+    supports = {str(point) for point in column_points}
+    links = [(str(left), str(right)) for left, right in rigid_links]
+    changed = True
+    while changed:
+        changed = False
+        for left, right in links:
+            if left in supports and right not in supports:
+                supports.add(right)
+                changed = True
+            elif right in supports and left not in supports:
+                supports.add(left)
+                changed = True
+    return supports
 
 
 @dataclass(frozen=True)
@@ -34,12 +57,30 @@ class BeamGeometry:
         return length(self.start, self.end)
 
 
+@dataclass(frozen=True)
+class _FrameSummary:
+    """Fields needed for support discovery from one bulk OAPI row."""
+
+    name: str
+    label: str
+    story: str
+    section: str
+    point_i: str
+    point_j: str
+    start: Point3D
+    end: Point3D
+
+
 class GeometryExtractor:
     FRAME_OBJECT_TYPE = 2
     BEAM_DESIGN_ORIENTATION = 2
 
     def __init__(self, sap_model: Any) -> None:
         self.sap = sap_model
+        self._frame_summaries_cache: tuple[_FrameSummary, ...] | None = None
+        self._design_orientation_cache: dict[str, int] = {}
+        self._concrete_section_cache: dict[str, bool] = {}
+        self._section_depth_cache: dict[str, float | None] = {}
 
     def selected_beam_names(self) -> list[str]:
         values = api_values(self.sap.SelectObj.GetSelected(0, None, None), "SelectObj.GetSelected")
@@ -58,44 +99,140 @@ class GeometryExtractor:
         return names
 
     def all_beam_names(self) -> list[str]:
-        values = api_values(self.sap.FrameObj.GetNameList(0, None), "FrameObj.GetNameList")
-        if len(values) != 2:
-            raise EtabsApiError("FrameObj.GetNameList: 返回参数数量异常。")
-        _, names = values
-        return [str(name) for name in list(names) if self._is_beam(str(name))]
+        return [summary.name for summary in self._all_frame_summaries() if self._is_beam(summary.name, summary.section)]
 
     def column_point_names(self) -> set[str]:
-        """Return point names touched by frame objects designed as columns.
+        """Return real and rigid-transferred column support point names."""
+        return self._column_support_names()
 
-        This is intentionally a separate read-only query used by drawing
-        classification. Rigid-end helper members are not included as beams, so
-        a beam touching a real column joint is classified as a primary beam.
+    def column_supports(self) -> dict[str, Point3D]:
+        """Return every column/equivalent-column point and its global coordinate.
+
+        Rigid helper members are not included as beams, but an anchored rigid
+        member transfers the real column support to its opposite endpoint.
+        Unanchored rigid members remain excluded from support classification.
+
+        Coordinates are read independently of Beam Object endpoints so a
+        column landing inside one long Beam Object is retained for structural
+        span splitting.
+        """
+        support_names, coordinates = self._column_support_data()
+        return {
+            point_name: coordinates[point_name] for point_name in sorted(support_names) if point_name in coordinates
+        }
+
+    def _column_support_names(self) -> set[str]:
+        return self._column_support_data()[0]
+
+    def _column_support_data(self) -> tuple[set[str], dict[str, Point3D]]:
+        """Discover supports with one bulk geometry call plus orientation reads.
+
+        ``GetAllFrames`` returns section, connectivity and endpoint coordinates
+        for the whole model in one COM round trip.  The previous implementation
+        called ``GetPoints`` and ``GetSection`` for every Frame Object and then
+        called ``GetCoordCartesian`` for every support; on a real 7,000-frame
+        model that added tens of thousands of cross-process calls.
         """
         from ETABSv1 import eFrameDesignOrientation
 
+        summaries = self._all_frame_summaries()
+        points: set[str] = set()
+        rigid_links: list[tuple[str, str]] = []
+        coordinates: dict[str, Point3D] = {}
+        for summary in summaries:
+            coordinates.setdefault(summary.point_i, summary.start)
+            coordinates.setdefault(summary.point_j, summary.end)
+            if "rigid" in summary.section.casefold():
+                rigid_links.append((summary.point_i, summary.point_j))
+            orientation = self._design_orientation(summary.name, eFrameDesignOrientation.Column)
+            if orientation == 1:
+                points.update((summary.point_i, summary.point_j))
+        return expand_rigid_support_points(points, rigid_links), coordinates
+
+    def _all_frame_summaries(self) -> tuple[_FrameSummary, ...]:
+        """Read model-wide Frame geometry in one call, with a legacy fallback."""
+
+        if self._frame_summaries_cache is not None:
+            return self._frame_summaries_cache
+
+        get_all = getattr(self.sap.FrameObj, "GetAllFrames", None)
+        if get_all is not None:
+            # NumberNames + 19 by-ref output arrays + the Global coordinate system.
+            values = api_values(
+                get_all(*([0] + [None] * 19 + ["Global"])),
+                "FrameObj.GetAllFrames",
+            )
+            if len(values) != 20:
+                raise EtabsApiError("FrameObj.GetAllFrames: 返回参数数量异常。")
+            count = int(values[0])
+            arrays = [list(value) for value in values[1:12]]
+            if any(len(value) != count for value in arrays):
+                raise EtabsApiError("FrameObj.GetAllFrames: 数组长度不一致。")
+            names, sections, stories, point_i, point_j = arrays[:5]
+            x_i, y_i, z_i, x_j, y_j, z_j = arrays[5:11]
+            labels = self._frame_labels_by_name()
+            result = tuple(
+                _FrameSummary(
+                    str(names[index]),
+                    labels.get(str(names[index]), str(names[index])),
+                    str(stories[index]),
+                    str(sections[index]),
+                    str(point_i[index]),
+                    str(point_j[index]),
+                    (float(x_i[index]), float(y_i[index]), float(z_i[index])),
+                    (float(x_j[index]), float(y_j[index]), float(z_j[index])),
+                )
+                for index in range(count)
+            )
+            self._frame_summaries_cache = result
+            return result
+
+        # ETABS 22/23 expose GetAllFrames.  Keep the older per-object path only
+        # for test doubles and legacy compatible API builds.
         values = api_values(self.sap.FrameObj.GetNameList(0, None), "FrameObj.GetNameList")
         if len(values) != 2:
             raise EtabsApiError("FrameObj.GetNameList: 返回参数数量异常。")
-        points: set[str] = set()
-        for name in list(values[1]):
-            object_name = str(name)
-            orientation = api_values(
-                self.sap.FrameObj.GetDesignOrientation(object_name, eFrameDesignOrientation.Column),
-                f"GetDesignOrientation({object_name})",
-            )
-            if not orientation or int(orientation[0]) != 1:
-                continue
+        summaries: list[_FrameSummary] = []
+        for raw_name in list(values[1]):
+            name = str(raw_name)
             try:
                 point_i, point_j = api_values(
-                    self.sap.FrameObj.GetPoints(object_name, None, None),
-                    f"GetPoints({object_name})",
+                    self.sap.FrameObj.GetPoints(name, None, None),
+                    f"GetPoints({name})",
+                )
+                section, _ = api_values(
+                    self.sap.FrameObj.GetSection(name, None, None),
+                    f"GetSection({name})",
+                )
+                summaries.append(
+                    _FrameSummary(
+                        name,
+                        name,
+                        "",
+                        str(section),
+                        str(point_i),
+                        str(point_j),
+                        self._point_coordinates(str(point_i)),
+                        self._point_coordinates(str(point_j)),
+                    )
                 )
             except EtabsApiError:
-                # A stale/deleted helper object must not prevent drawing the
-                # remaining model; it simply cannot establish a column joint.
                 continue
-            points.update((str(point_i), str(point_j)))
-        return points
+        result = tuple(summaries)
+        self._frame_summaries_cache = result
+        return result
+
+    def _frame_labels_by_name(self) -> dict[str, str]:
+        get_labels = getattr(self.sap.FrameObj, "GetLabelNameList", None)
+        if get_labels is None:
+            return {}
+        values = api_values(get_labels(0, None, None, None), "FrameObj.GetLabelNameList")
+        if len(values) != 4:
+            raise EtabsApiError("FrameObj.GetLabelNameList: 返回参数数量异常。")
+        count, labels, names, _stories = values
+        if int(count) != len(labels) or int(count) != len(names):
+            raise EtabsApiError("FrameObj.GetLabelNameList: 数组长度不一致。")
+        return {str(name): str(label) for name, label in zip(list(names), list(labels))}
 
     def extract(self, selection_mode: str = "all") -> list[BeamGeometry]:
         if selection_mode not in {"all", "selected"}:
@@ -103,19 +240,36 @@ class GeometryExtractor:
         names = self.all_beam_names() if selection_mode == "all" else self.selected_beam_names()
         if not names:
             raise SelectionError("没有可导出的梁。")
-        return [self._extract_one(name) for name in names]
+        summaries = {item.name: item for item in self._all_frame_summaries()}
+        return [
+            self._geometry_from_summary(summaries[name]) if name in summaries else self._extract_one(name)
+            for name in names
+        ]
 
-    def _is_beam(self, name: str) -> bool:
-        from ETABSv1 import eFrameDesignOrientation
-
+    def _design_orientation(self, name: str, default: Any) -> int:
+        cached = self._design_orientation_cache.get(name)
+        if cached is not None:
+            return cached
         values = api_values(
-            self.sap.FrameObj.GetDesignOrientation(name, eFrameDesignOrientation.Beam),
+            self.sap.FrameObj.GetDesignOrientation(name, default),
             f"GetDesignOrientation({name})",
         )
-        if not values or int(values[0]) != self.BEAM_DESIGN_ORIENTATION:
+        orientation = int(values[0]) if values else 0
+        self._design_orientation_cache[name] = orientation
+        return orientation
+
+    def _is_beam(self, name: str, section_name: str | None = None) -> bool:
+        from ETABSv1 import eFrameDesignOrientation
+
+        if self._design_orientation(name, eFrameDesignOrientation.Beam) != self.BEAM_DESIGN_ORIENTATION:
             return False
-        section, _ = api_values(self.sap.FrameObj.GetSection(name, None, None), f"GetSection({name})")
-        return self._is_concrete_section(str(section))
+        if section_name is None:
+            section, _ = api_values(
+                self.sap.FrameObj.GetSection(name, None, None),
+                f"GetSection({name})",
+            )
+            section_name = str(section)
+        return self._is_concrete_section(section_name)
 
     def _is_concrete_section(self, section_name: str) -> bool:
         """Return whether a frame property is eligible for concrete beam design.
@@ -125,6 +279,14 @@ class GeometryExtractor:
         ``PropFrame.GetNameInPropFile`` and ``PropMaterial.GetTypeOAPI``. The
         supported-shape fallback keeps compatibility with older OAPI builds.
         """
+        cached = self._concrete_section_cache.get(section_name)
+        if cached is not None:
+            return cached
+        result = self._compute_is_concrete_section(section_name)
+        self._concrete_section_cache[section_name] = result
+        return result
+
+    def _compute_is_concrete_section(self, section_name: str) -> bool:
         if not section_name.strip() or section_name.strip().casefold() in {"none", "null"}:
             return False
         if "rigid" in section_name.casefold():
@@ -146,6 +308,19 @@ class GeometryExtractor:
         except Exception:
             pass
         return self._section_depth(section_name) is not None
+
+    def _geometry_from_summary(self, summary: _FrameSummary) -> BeamGeometry:
+        return BeamGeometry(
+            name=summary.name,
+            label=summary.label,
+            story=summary.story,
+            point_i=summary.point_i,
+            point_j=summary.point_j,
+            start=summary.start,
+            end=summary.end,
+            section=summary.section,
+            depth=self._section_depth(summary.section),
+        )
 
     def _extract_one(self, name: str) -> BeamGeometry:
         label, story = api_values(self.sap.FrameObj.GetLabelFromName(name, None, None), f"GetLabelFromName({name})")
@@ -177,6 +352,13 @@ class GeometryExtractor:
 
     def _section_depth(self, section_name: str) -> float | None:
         """Return the section total height T3 when its OAPI type is supported."""
+        if section_name in self._section_depth_cache:
+            return self._section_depth_cache[section_name]
+        result = self._read_section_depth(section_name)
+        self._section_depth_cache[section_name] = result
+        return result
+
+    def _read_section_depth(self, section_name: str) -> float | None:
         from ETABSv1 import eFramePropType
 
         values = api_values(

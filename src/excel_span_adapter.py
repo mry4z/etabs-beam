@@ -166,6 +166,12 @@ def _offset_station(station: DesignStation, location: float) -> DesignStation:
         station.torsion_trans_area,
         station.error,
         station.warning,
+        station.top_total_area,
+        station.bottom_total_area,
+        station.top_min_area,
+        station.bottom_min_area,
+        station.top_provided_area,
+        station.bottom_provided_area,
     )
 
 

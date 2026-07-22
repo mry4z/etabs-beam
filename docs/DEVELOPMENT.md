@@ -1,5 +1,8 @@
 # ETABS Beam Generator 开发指南
 
+**更新日期**：2026-07-18
+**当前阶段**：ETABS 22/23 P0 基线已关闭；进入 ACI 318-14 配筋工程闭环和 CAD/插件数据契约
+
 ## 本地环境
 
 ```powershell
@@ -7,7 +10,7 @@ python -m pip install -r requirements.txt
 python -m pytest tests/unit -q
 ```
 
-ETABS 集成测试不会默认运行。打开目标模型后，以与 ETABS 相同权限级别执行：
+ETABS 集成测试不会默认运行。正式支持 ETABS 22.7.0 / 23.3.1 和 Python 3.11；加载对应主版本 DLL，并以与 ETABS 相同权限级别执行：
 
 ```powershell
 $env:ETABS_INTEGRATION='1'
@@ -16,22 +19,35 @@ python -m pytest tests/integration -q
 
 ## 代码边界
 
-- `core/`：仅负责 ETABS 连接、几何提取和连续性分析；
-- `design/`：将 ETABS 原始设计数组映射为稳定数据模型；
+- `core/`：负责 ETABS 连接、几何/拓扑提取、Beam Line/Span 和显式模型写回事务；
+- `design/`：将 ETABS 原始设计数组映射为稳定数据模型，并实现规范/项目隔离的配筋排布；
+- `drawing/`：只消费有向 Beam Line/Span 和中间数据，不直接读取或修改 ETABS；
 - `excel_export.py`：只消费数据模型，不直接访问 ETABS；
 - `excel_span_adapter.py`：将可变化的 Beam Line/Span 编号投影为稳定的 Excel 行接口；编号原则变化时优先替换该适配层，不修改工作簿列定义；
-- `workflow.py`：编排流程，不堆积业务算法；
+- `workflow.py`：编排流程，不堆积业务算法；当前正式入口仍是早期只读链路，P0 任务是把 `build/` 下验证脚本迁入受跟踪的统一工作流；
 - `utils/`：可复用的日志、文件路径和纯计算工具。
 
 ## 单位约束
 
-当前 MVP 固定在 `N_mm_C` 下导出。工作流使用 `temporary_present_units()` 在 `try/finally` 中恢复 ETABS 原单位。任何新增 OAPI 读取方法都必须在这一上下文内执行，或明确说明其单位来源。
+当前工程基线固定在 `N_mm_C` 下读取、计算和导出。工作流使用 `temporary_present_units()` 在 `try/finally` 中恢复 ETABS 原单位。任何新增 OAPI 读取/写入方法都必须在这一上下文内执行，或明确说明其单位来源；manifest 同时记录原单位和操作单位。
 
 ## 梁线分跨与 Excel 接口
 
 工作流先读取源梁和设计站点，再调用 `analyze_beam_lines()` 生成 `BeamLineSpanResult`，随后由 `build_span_schedule()` 将源 Object 的设计站点按完整梁线位置裁剪到每个结构 Span。Excel 导出器通过可选的 `SpanScheduleMapping` 增加“梁分跨”工作表，并在原“梁表”增加结构梁线/跨号映射；原有梁表和设计站点字段保持兼容。
 
-未来若调整梁编号、主次梁判定或分跨边界，只要继续输出等价的 Span 记录，优先修改分析器或适配器，不直接改动 Excel 工作簿格式。源 Object 跨越支承时允许一对多映射，不能为适应表格而丢弃设计站点。
+未来若调整梁编号、主次梁判定或分跨边界，只要继续输出等价的 Span 记录，优先修改分析器、编号 policy 或适配器，不直接改动 Excel 工作簿格式。源 Object 跨越支承时允许一对多映射，不能为适应表格而丢弃设计站点。正式编号统一使用不带 `S` 的跨号，Excel、DXF、JSON 和模型写回必须调用同一个 formatter。
+
+## 模型写回边界
+
+- 默认只读；所有写回只能在已校验路径和哈希的模型副本上执行。
+- 正式入口必须同时核对 PID 与模型绝对路径，不能用“活动实例”猜测目标模型。
+- 方向整理和改名是两个独立事务；存在 `REQUIRES_SPLIT` 时默认停止，只有显式允许才可部分写回。
+- 写前/写后必须比较 GUID、对象数、连接、变换矩阵、截面、释放、偏移、荷载、组、铰、弹簧和设计覆盖项。
+- 正式 CAD 文字方向等于模型 I→J；禁止为了可读性独立翻转 180°。
+
+## 生成物与可复现性
+
+`build/` 和 `outputs/` 是生成物区域，不得存放唯一一份生产源码。分析设计、写回、数据提取和工作簿生成逻辑必须进入受 Git 跟踪的源码/工具目录。每次真实模型运行需生成 manifest，至少记录模型哈希、ETABS 版本、规范、单位、Git 状态、配置、算法/schema 版本、返回码、计数及各成果哈希。
 
 ## 验证要求
 
@@ -50,7 +66,7 @@ python -m black --check src tests
 python -m flake8 src tests
 ```
 
-当前离线覆盖率门槛为 60%（首个可执行基线）；后续应在补足 ETABS 适配层的 mock 测试后逐步提高。
+当前离线覆盖率门槛仍为 60%；2026-07-21 最近完整结果为 84 passed、1 skipped、79.26%，`flake8 src tests` 为 0。覆盖率总数不能替代关键模块验收：ETABS `_2` 字段、模型写回全属性比较、回滚失败路径和正式三表工作流仍需补足 mock/fixture/实模测试。
 
 ## 设计原则
 
@@ -111,4 +127,4 @@ python -m flake8 src tests
 
 ## Git
 
-历史视频、帧图、逆向资料和生成报告均被忽略。首个基线提交只应包含源码、测试、主文档、`config.example.yaml`、`requirements.txt` 与 `.gitignore`。
+历史视频、帧图、逆向资料和生成报告不进入源码提交。仓库已经建立多个基线提交；当前任务是把尚未跟踪的 `model_writeback.py`、`detailing.py`、测试和生产化工具纳入下一次干净基线。根目录 `outputs/` 及大体积 `.inspect.ndjson` 必须按输出治理规则处理，不能误提交。

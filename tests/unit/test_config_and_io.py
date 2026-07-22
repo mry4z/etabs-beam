@@ -12,7 +12,10 @@ def test_config_normalizes_n_mm_c_export_unit(tmp_path: Path) -> None:
         "etabs:\n  dll_path: test.dll\ngeometry:\n  unit_system: N-mm-C\n",
         encoding="utf-8",
     )
-    assert load_config(config_path).geometry.export_unit == "N_mm_C"
+    config = load_config(config_path)
+    assert config.geometry.export_unit == "N_mm_C"
+    assert config.design.standard == "ACI 318-14"
+    assert config.geometry.source_span_overlap_tolerance_mm == 2.0
 
 
 def test_config_rejects_non_n_mm_c_export_unit(tmp_path: Path) -> None:
@@ -22,6 +25,16 @@ def test_config_rejects_non_n_mm_c_export_unit(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="N_mm_C"):
+        load_config(config_path)
+
+
+def test_config_rejects_unsupported_design_standard(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "etabs:\n  dll_path: test.dll\ndesign:\n  standard: ACI 318-19\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="ACI 318-14"):
         load_config(config_path)
 
 

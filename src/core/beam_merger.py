@@ -138,10 +138,7 @@ class BeamMerger:
     @staticmethod
     def _neighbor_cells(cell: tuple[int, int, int]) -> tuple[tuple[int, int, int], ...]:
         return tuple(
-            (cell[0] + dx, cell[1] + dy, cell[2] + dz)
-            for dx in (-1, 0, 1)
-            for dy in (-1, 0, 1)
-            for dz in (-1, 0, 1)
+            (cell[0] + dx, cell[1] + dy, cell[2] + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
         )
 
     def _compatible(self, left: BeamGeometry, right: BeamGeometry) -> bool:
@@ -299,12 +296,16 @@ def _offset_station(station: DesignStation, location: float) -> DesignStation:
         station.torsion_trans_area,
         station.error,
         station.warning,
+        station.top_total_area,
+        station.bottom_total_area,
+        station.top_min_area,
+        station.bottom_min_area,
+        station.top_provided_area,
+        station.bottom_provided_area,
     )
 
 
-def _merged_status(
-    source_results: list[BeamDesignResult], has_stations: bool
-) -> tuple[DesignResultStatus, str]:
+def _merged_status(source_results: list[BeamDesignResult], has_stations: bool) -> tuple[DesignResultStatus, str]:
     statuses = {result.status for result in source_results}
     messages = [result.status_message for result in source_results if result.status_message]
     if has_stations:

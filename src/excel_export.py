@@ -80,16 +80,8 @@ def export_beam_schedule(
         }
         if span_schedule is not None:
             source_names = beam.source_names or (beam.name,)
-            line_ids = [
-                line_id
-                for name in source_names
-                for line_id in span_schedule.source_to_line_ids.get(name, ())
-            ]
-            span_ids = [
-                span_id
-                for name in source_names
-                for span_id in span_schedule.source_to_span_ids.get(name, ())
-            ]
+            line_ids = [line_id for name in source_names for line_id in span_schedule.source_to_line_ids.get(name, ())]
+            span_ids = [span_id for name in source_names for span_id in span_schedule.source_to_span_ids.get(name, ())]
             row["结构梁线编号"] = "；".join(dict.fromkeys(line_ids))
             row["结构跨号"] = "；".join(dict.fromkeys(span_ids))
         positions = key_positions(beam, design)
@@ -189,9 +181,15 @@ def _span_row(record: object) -> dict[str, object]:
 
 def _key_position_headers() -> tuple[str, ...]:
     return (
-        "左端顶部弯矩纵筋面积（2D 内）", "跨中顶部弯矩纵筋面积", "右端顶部弯矩纵筋面积（2D 内）",
-        "左端底部弯矩纵筋面积（2D 内）", "跨中底部弯矩纵筋面积", "右端底部弯矩纵筋面积（2D 内）",
-        "左端抗剪筋 Av/s（2D 内）", "跨中抗剪筋 Av/s", "右端抗剪筋 Av/s（2D 内）",
+        "左端顶部弯矩纵筋面积（2D 内）",
+        "跨中顶部弯矩纵筋面积",
+        "右端顶部弯矩纵筋面积（2D 内）",
+        "左端底部弯矩纵筋面积（2D 内）",
+        "跨中底部弯矩纵筋面积",
+        "右端底部弯矩纵筋面积（2D 内）",
+        "左端抗剪筋 Av/s（2D 内）",
+        "跨中抗剪筋 Av/s",
+        "右端抗剪筋 Av/s（2D 内）",
     )
 
 

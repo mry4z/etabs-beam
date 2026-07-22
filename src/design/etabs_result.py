@@ -61,3 +61,62 @@ class EtabsResultProvider:
             for index in range(count)
         )
         return BeamDesignResult(beam_name, stations)
+
+    def get_beam_design_total(self, beam_name: str) -> BeamDesignResult:
+        """Read ETABS 22/23 ``GetSummaryResultsBeam_2`` total-rebar fields.
+
+        This is opt-in while the legacy Excel workflow remains on the original
+        API.  The returned stations retain the legacy field names for
+        compatibility and additionally expose ``as_total_*``, minimum and
+        provided areas for the detailing engine.
+        """
+
+        try:
+            from ETABSv1 import eItemType
+
+            item_type = eItemType.Objects
+        except Exception as exc:
+            raise EtabsApiError("ETABSv1 未加载；请先连接 ETABS。") from exc
+
+        values = api_values(
+            self.sap.DesignConcrete.GetSummaryResultsBeam_2(beam_name, 0, *([None] * 23), item_type),
+            f"GetSummaryResultsBeam_2({beam_name})",
+        )
+        if len(values) != 24:
+            raise EtabsApiError(f"GetSummaryResultsBeam_2({beam_name}): 返回参数数量异常。")
+        count = int(values[0])
+        if count == 0:
+            return BeamDesignResult(
+                beam_name,
+                status=DesignResultStatus.NO_RESULTS,
+                status_message="ETABS 未返回混凝土梁设计站点。",
+            )
+        columns = [list(column) for column in values[1:]]
+        if any(len(column) < count for column in columns):
+            raise EtabsApiError(f"GetSummaryResultsBeam_2({beam_name}): 结果数组长度不一致。")
+
+        stations = tuple(
+            DesignStation(
+                location=float(columns[1][index]),
+                top_flexural_combo=str(columns[2][index]),
+                top_flexural_area=float(columns[3][index]),
+                bottom_flexural_combo=str(columns[7][index]),
+                bottom_flexural_area=float(columns[8][index]),
+                shear_combo=str(columns[12][index]),
+                shear_area=float(columns[13][index]),
+                torsion_longitudinal_combo=str(columns[17][index]),
+                torsion_longitudinal_area=float(columns[18][index]),
+                torsion_trans_combo=str(columns[19][index]),
+                torsion_trans_area=float(columns[20][index]),
+                error=str(columns[21][index]),
+                warning=str(columns[22][index]),
+                top_total_area=float(columns[3][index]),
+                bottom_total_area=float(columns[8][index]),
+                top_min_area=float(columns[5][index]),
+                bottom_min_area=float(columns[10][index]),
+                top_provided_area=float(columns[6][index]),
+                bottom_provided_area=float(columns[11][index]),
+            )
+            for index in range(count)
+        )
+        return BeamDesignResult(beam_name, stations)

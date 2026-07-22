@@ -20,9 +20,17 @@ class EtabsSettings:
 @dataclass(frozen=True)
 class GeometrySettings:
     coordinate_tolerance_mm: float = 1.0
+    source_span_overlap_tolerance_mm: float = 2.0
     slope_limit_deg: float = 1.0
     merge_angle_limit_deg: float = 15.0
     export_unit: str = "N_mm_C"
+
+
+@dataclass(frozen=True)
+class DesignSettings:
+    """Design contract for the current production path."""
+
+    standard: str = "ACI 318-14"
 
 
 @dataclass(frozen=True)
@@ -37,6 +45,7 @@ class OutputSettings:
 class AppConfig:
     etabs: EtabsSettings
     geometry: GeometrySettings
+    design: DesignSettings
     output: OutputSettings
     beam_selection_mode: str = "all"
     log_level: str = "INFO"
@@ -61,6 +70,14 @@ def _normalize_unit(value: object) -> str:
     return normalized
 
 
+def _normalize_design_standard(value: object) -> str:
+    normalized = str(value).strip().upper().replace("-", " ")
+    normalized = " ".join(normalized.split())
+    if normalized in {"ACI 318 14", "ACI318 14", "ACI31814"}:
+        return "ACI 318-14"
+    raise ValueError("当前配筋引擎仅支持 ACI 318-14。")
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     """Load ``config.yaml``; fall back to the checked-in example configuration."""
     config_path = Path(path) if path else PROJECT_ROOT / "config.yaml"
@@ -71,6 +88,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     etabs = _section(raw, "etabs")
     geometry = _section(raw, "geometry")
+    design = _section(raw, "design")
     output = _section(raw, "output")
     logging = _section(raw, "logging")
     advanced = _section(raw, "advanced")
@@ -86,9 +104,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ),
         geometry=GeometrySettings(
             coordinate_tolerance_mm=float(geometry.get("coordinate_tolerance_mm", 1.0)),
+            source_span_overlap_tolerance_mm=float(geometry.get("source_span_overlap_tolerance_mm", 2.0)),
             slope_limit_deg=float(geometry.get("slope_limit_deg", 1.0)),
             merge_angle_limit_deg=float(geometry.get("merge_angle_limit_deg", 15.0)),
             export_unit=_normalize_unit(geometry.get("unit_system", "N_mm_C")),
+        ),
+        design=DesignSettings(
+            standard=_normalize_design_standard(design.get("standard", "ACI 318-14")),
         ),
         output=OutputSettings(
             reports_dir=_resolve_path(output.get("reports_dir", "build/output/reports")),

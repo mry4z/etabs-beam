@@ -35,7 +35,7 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
         mode = selection_mode or config.beam_selection_mode
         beams = extractor.extract(mode)
         raw_beams = list(beams)
-        column_point_names = extractor.column_point_names()
+        column_supports = extractor.column_supports()
         logger.info("已读取 %s 根梁（模式：%s）。", len(beams), mode)
 
         provider = EtabsResultProvider(sap)
@@ -74,12 +74,14 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
 
         structural_result = analyze_beam_lines(
             raw_beams,
-            column_point_names,
+            set(column_supports),
             BeamLineSpanSettings(
                 coordinate_tolerance_mm=config.geometry.coordinate_tolerance_mm,
+                source_span_overlap_tolerance_mm=(config.geometry.source_span_overlap_tolerance_mm),
                 merge_angle_deg=config.geometry.merge_angle_limit_deg,
                 story_workers=4,
             ),
+            column_support_coordinates=column_supports,
         )
         span_schedule = build_span_schedule(
             structural_result,
@@ -87,9 +89,7 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
             raw_designs,
             config.geometry.coordinate_tolerance_mm,
         )
-        special_records.extend(
-            MergeRecord("信息", "结构分跨", "", message) for message in structural_result.records
-        )
+        special_records.extend(MergeRecord("信息", "结构分跨", "", message) for message in structural_result.records)
         logger.info(
             "结构分跨分析完成：%s 条梁线、%s 跨（PB=%s，SB=%s）。",
             len(structural_result.lines),

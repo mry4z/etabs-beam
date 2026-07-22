@@ -10,21 +10,20 @@ from __future__ import annotations
 import csv
 from math import atan2, degrees
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.merge_comparison import MergeAngleDifference
 from src.utils.geometry import Point3D, distance
 
-
 _LAYERS = (
-    ("BEAM_PRIMARY", 2),       # yellow: beam touching a column joint
-    ("BEAM_SECONDARY", 3),     # green: beam not touching a column joint
-    ("MERGE15_NEW", 1),       # red: newly connected at 15 degrees
-    ("MERGE3_GROUP", 5),      # blue: original 3-degree groups
-    ("MERGE15_MID", 2),       # yellow: 15-degree logical midpoint
-    ("MERGE3_MID", 4),        # cyan: 3-degree group midpoint
-    ("MERGE_LEGEND", 7),      # white: legend and metadata
+    ("BEAM_PRIMARY", 2),  # yellow: beam touching a column joint
+    ("BEAM_SECONDARY", 3),  # green: beam not touching a column joint
+    ("MERGE15_NEW", 1),  # red: newly connected at 15 degrees
+    ("MERGE3_GROUP", 5),  # blue: original 3-degree groups
+    ("MERGE15_MID", 2),  # yellow: 15-degree logical midpoint
+    ("MERGE3_MID", 4),  # cyan: 3-degree group midpoint
+    ("MERGE_LEGEND", 7),  # white: legend and metadata
 )
 
 
@@ -99,9 +98,24 @@ def _midpoint_segment(points: tuple[Point3D, ...]) -> tuple[Point3D, Point3D]:
 
 def _line(layer: str, color: int, start: Point3D, end: Point3D) -> list[str]:
     return [
-        "0", "LINE", "8", layer, "62", str(color),
-        "10", f"{start[0]:.3f}", "20", f"{start[1]:.3f}", "30", f"{start[2]:.3f}",
-        "11", f"{end[0]:.3f}", "21", f"{end[1]:.3f}", "31", f"{end[2]:.3f}",
+        "0",
+        "LINE",
+        "8",
+        layer,
+        "62",
+        str(color),
+        "10",
+        f"{start[0]:.3f}",
+        "20",
+        f"{start[1]:.3f}",
+        "30",
+        f"{start[2]:.3f}",
+        "11",
+        f"{end[0]:.3f}",
+        "21",
+        f"{end[1]:.3f}",
+        "31",
+        f"{end[2]:.3f}",
     ]
 
 
@@ -111,37 +125,84 @@ def _polyline(layer: str, color: int, points: tuple[Point3D, ...]) -> list[str]:
         return []
     values = ["0", "POLYLINE", "8", layer, "62", str(color), "66", "1", "70", "0"]
     for point in points:
-        values.extend([
-            "0", "VERTEX", "8", layer, "10", f"{point[0]:.3f}",
-            "20", f"{point[1]:.3f}", "30", f"{point[2]:.3f}",
-        ])
+        values.extend(
+            [
+                "0",
+                "VERTEX",
+                "8",
+                layer,
+                "10",
+                f"{point[0]:.3f}",
+                "20",
+                f"{point[1]:.3f}",
+                "30",
+                f"{point[2]:.3f}",
+            ]
+        )
     values.extend(["0", "SEQEND", "8", layer])
     return values
 
 
 def _circle(layer: str, color: int, center: Point3D, radius: float) -> list[str]:
     return [
-        "0", "CIRCLE", "8", layer, "62", str(color),
-        "10", f"{center[0]:.3f}", "20", f"{center[1]:.3f}", "30", f"{center[2]:.3f}",
-        "40", f"{radius:.3f}",
+        "0",
+        "CIRCLE",
+        "8",
+        layer,
+        "62",
+        str(color),
+        "10",
+        f"{center[0]:.3f}",
+        "20",
+        f"{center[1]:.3f}",
+        "30",
+        f"{center[2]:.3f}",
+        "40",
+        f"{radius:.3f}",
     ]
 
 
 def _text(layer: str, color: int, point: Point3D, value: str, height: float, angle: float = 0.0) -> list[str]:
     return [
-        "0", "TEXT", "8", layer, "62", str(color),
-        "10", f"{point[0]:.3f}", "20", f"{point[1]:.3f}", "30", f"{point[2]:.3f}",
-        "40", f"{height:.3f}", "1", _safe_text(value), "50", f"{angle:.3f}",
-        "7", "ARIAL",
+        "0",
+        "TEXT",
+        "8",
+        layer,
+        "62",
+        str(color),
+        "10",
+        f"{point[0]:.3f}",
+        "20",
+        f"{point[1]:.3f}",
+        "30",
+        f"{point[2]:.3f}",
+        "40",
+        f"{height:.3f}",
+        "1",
+        _safe_text(value),
+        "50",
+        f"{angle:.3f}",
+        "7",
+        "ARIAL",
     ]
 
 
 def _header() -> list[str]:
     return [
-        "0", "SECTION", "2", "HEADER",
-        "9", "$ACADVER", "1", "AC1009",
-        "9", "$INSUNITS", "70", "4",  # millimetres
-        "0", "ENDSEC",
+        "0",
+        "SECTION",
+        "2",
+        "HEADER",
+        "9",
+        "$ACADVER",
+        "1",
+        "AC1009",
+        "9",
+        "$INSUNITS",
+        "70",
+        "4",  # millimetres
+        "0",
+        "ENDSEC",
     ]
 
 
@@ -149,13 +210,42 @@ def _tables() -> list[str]:
     values = ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", str(len(_LAYERS))]
     for name, color in _LAYERS:
         values.extend(["0", "LAYER", "2", name, "70", "0", "62", str(color), "6", "CONTINUOUS"])
-    values.extend([
-        "0", "ENDTAB", "0", "TABLE", "2", "STYLE", "70", "1",
-        "0", "STYLE", "2", "ARIAL", "70", "0", "40", "0",
-        "41", "1", "50", "0", "71", "0", "42", "2.5",
-        "3", "arial.ttf", "4", "",
-        "0", "ENDTAB", "0", "ENDSEC",
-    ])
+    values.extend(
+        [
+            "0",
+            "ENDTAB",
+            "0",
+            "TABLE",
+            "2",
+            "STYLE",
+            "70",
+            "1",
+            "0",
+            "STYLE",
+            "2",
+            "ARIAL",
+            "70",
+            "0",
+            "40",
+            "0",
+            "41",
+            "1",
+            "50",
+            "0",
+            "71",
+            "0",
+            "42",
+            "2.5",
+            "3",
+            "arial.ttf",
+            "4",
+            "",
+            "0",
+            "ENDTAB",
+            "0",
+            "ENDSEC",
+        ]
+    )
     return values
 
 
@@ -188,8 +278,12 @@ def export_merge_angle_dxf(
             entities.extend(_circle("MERGE3_MID", 4, low_mid, max(text_height * 0.22, 15.0)))
             entities.extend(
                 _text(
-                    "MERGE3_MID", 4, low_mid, f"3D-{index:03d}-{group_index}",
-                    text_height * 0.7, _text_angle(path),
+                    "MERGE3_MID",
+                    4,
+                    low_mid,
+                    f"3D-{index:03d}-{group_index}",
+                    text_height * 0.7,
+                    _text_angle(path),
                 )
             )
 
@@ -203,17 +297,21 @@ def export_merge_angle_dxf(
     for offset, value in enumerate(legend):
         entities.extend(
             _text(
-                "MERGE_LEGEND", 7,
+                "MERGE_LEGEND",
+                7,
                 (legend_x, legend_y - offset * text_height * 1.3, 0.0),
-                value, text_height,
+                value,
+                text_height,
             )
         )
     if model_name:
         entities.extend(
             _text(
-                "MERGE_LEGEND", 7,
+                "MERGE_LEGEND",
+                7,
                 (legend_x, legend_y - len(legend) * text_height * 1.3, 0.0),
-                f"MODEL {_safe_text(model_name)}", text_height * 0.8,
+                f"MODEL {_safe_text(model_name)}",
+                text_height * 0.8,
             )
         )
 
@@ -224,9 +322,7 @@ def export_merge_angle_dxf(
     return path
 
 
-def export_merge_angle_csv(
-    differences: Iterable[MergeAngleDifference], output_path: str | Path
-) -> Path:
+def export_merge_angle_csv(differences: Iterable[MergeAngleDifference], output_path: str | Path) -> Path:
     """Write the DXF label-to-object/coordinate mapping for audit and CAD plugins."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -234,15 +330,18 @@ def export_merge_angle_csv(
         writer = csv.writer(stream)
         writer.writerow(["差异编号", "楼层", "截面", "15度源对象", "3度梁组", "15度点坐标"])
         for index, difference in enumerate(differences, start=1):
-            points = ";".join(
-                f"{point[0]:.3f},{point[1]:.3f},{point[2]:.3f}"
-                for point in difference.path_points
-            )
+            points = ";".join(f"{point[0]:.3f},{point[1]:.3f},{point[2]:.3f}" for point in difference.path_points)
             groups = " | ".join("+".join(group) for group in difference.lower_angle_groups)
-            writer.writerow([
-                f"15D-{index:03d}", difference.story, difference.section,
-                "+".join(difference.source_objects), groups, points,
-            ])
+            writer.writerow(
+                [
+                    f"15D-{index:03d}",
+                    difference.story,
+                    difference.section,
+                    "+".join(difference.source_objects),
+                    groups,
+                    points,
+                ]
+            )
     return path
 
 
@@ -268,8 +367,7 @@ def export_beam_groups_dxf(
     for beam in logical_beams:
         source_names = beam.source_names or (beam.name,)
         primary = any(
-            source_by_name[name].point_i in column_point_names
-            or source_by_name[name].point_j in column_point_names
+            source_by_name[name].point_i in column_point_names or source_by_name[name].point_j in column_point_names
             for name in source_names
             if name in source_by_name
         )
@@ -278,7 +376,8 @@ def export_beam_groups_dxf(
     ordered = sorted(
         enriched,
         key=lambda item: (
-            str(item[0].story), not item[1],
+            str(item[0].story),
+            not item[1],
             min(point[0] for point in (item[0].path_points or (item[0].start, item[0].end))),
             min(point[1] for point in (item[0].path_points or (item[0].start, item[0].end))),
             item[0].name,
@@ -297,9 +396,7 @@ def export_beam_groups_dxf(
         entities.extend(_polyline(layer, color, points))
         entities.extend(_text(layer, color, _midpoint(points), beam_id, text_height, _text_angle(points)))
 
-    legend_x, legend_y = _legend_origin([  # type: ignore[arg-type]
-        _as_difference_stub(beam) for beam, _ in ordered
-    ])
+    legend_x, legend_y = _legend_origin([_as_difference_stub(beam) for beam, _ in ordered])  # type: ignore[arg-type]
     legend = [
         f"FULL BEAM GROUPS | total={len(ordered)} primary={sum(primary for _, primary in ordered)}",
         "YELLOW BEAM_PRIMARY = source beam touches a column joint",
@@ -309,17 +406,21 @@ def export_beam_groups_dxf(
     for offset, value in enumerate(legend):
         entities.extend(
             _text(
-                "MERGE_LEGEND", 7,
+                "MERGE_LEGEND",
+                7,
                 (legend_x, legend_y - offset * text_height * 1.3, 0.0),
-                value, text_height,
+                value,
+                text_height,
             )
         )
     if model_name:
         entities.extend(
             _text(
-                "MERGE_LEGEND", 7,
+                "MERGE_LEGEND",
+                7,
                 (legend_x, legend_y - len(legend) * text_height * 1.3, 0.0),
-                f"MODEL {_safe_text(model_name)}", text_height * 0.8,
+                f"MODEL {_safe_text(model_name)}",
+                text_height * 0.8,
             )
         )
     values = _header() + _tables() + ["0", "SECTION", "2", "ENTITIES"] + entities + ["0", "ENDSEC", "0", "EOF"]
@@ -342,9 +443,9 @@ def export_beam_groups_csv(
     for beam in logical_beams:
         names = beam.source_names or (beam.name,)
         primary = any(
-            source_by_name[name].point_i in column_point_names
-            or source_by_name[name].point_j in column_point_names
-            for name in names if name in source_by_name
+            source_by_name[name].point_i in column_point_names or source_by_name[name].point_j in column_point_names
+            for name in names
+            if name in source_by_name
         )
         enriched.append((beam, primary))
     ordered = sorted(enriched, key=lambda item: (str(item[0].story), not item[1], item[0].name))
@@ -366,7 +467,12 @@ def export_beam_groups_csv(
 
 
 def export_structural_spans_dxf(
-    spans: Iterable[BeamSpan], output_path: str | Path, *, model_name: str = "", text_height: float = 150.0
+    spans: Iterable[BeamSpan],
+    output_path: str | Path,
+    *,
+    model_name: str = "",
+    text_height: float = 150.0,
+    span_id_resolver: Callable[[BeamSpan], str] | None = None,
 ) -> Path:
     """Export one colored polyline and same-colored Arial label per structural span."""
     spans = list(spans)
@@ -376,8 +482,9 @@ def export_structural_spans_dxf(
         layer = "BEAM_PRIMARY" if primary else "BEAM_SECONDARY"
         color = 2 if primary else 3
         entities.extend(_polyline(layer, color, span.path_points))
+        label = span_id_resolver(span) if span_id_resolver else span.span_id
         entities.extend(
-            _text(layer, color, _midpoint(span.path_points), span.span_id, text_height, _text_angle(span.path_points))
+            _text(layer, color, _midpoint(span.path_points), label, text_height, _text_angle(span.path_points))
         )
     legend_x, legend_y = _legend_origin_from_paths([span.path_points for span in spans])
     legend = [
@@ -388,17 +495,21 @@ def export_structural_spans_dxf(
     for offset, value in enumerate(legend):
         entities.extend(
             _text(
-                "MERGE_LEGEND", 7,
+                "MERGE_LEGEND",
+                7,
                 (legend_x, legend_y - offset * text_height * 1.3, 0.0),
-                value, text_height,
+                value,
+                text_height,
             )
         )
     if model_name:
         entities.extend(
             _text(
-                "MERGE_LEGEND", 7,
+                "MERGE_LEGEND",
+                7,
                 (legend_x, legend_y - len(legend) * text_height * 1.3, 0.0),
-                f"MODEL {_safe_text(model_name)}", text_height * 0.8,
+                f"MODEL {_safe_text(model_name)}",
+                text_height * 0.8,
             )
         )
     values = _header() + _tables() + ["0", "SECTION", "2", "ENTITIES"] + entities + ["0", "ENDSEC", "0", "EOF"]
@@ -408,7 +519,13 @@ def export_structural_spans_dxf(
     return path
 
 
-def export_structural_spans_csv(spans: Iterable[BeamSpan], output_path: str | Path) -> Path:
+def export_structural_spans_csv(
+    spans: Iterable[BeamSpan],
+    output_path: str | Path,
+    *,
+    span_id_resolver: Callable[[BeamSpan], str] | None = None,
+    source_name_resolver: Callable[[str], str] | None = None,
+) -> Path:
     """Write the support-defined span IDs, source Objects and path coordinates."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -417,11 +534,66 @@ def export_structural_spans_csv(spans: Iterable[BeamSpan], output_path: str | Pa
         writer.writerow(["梁编号", "楼层", "主次梁", "弧形", "悬挑", "源对象", "路径点坐标"])
         for span in spans:
             coordinates = ";".join(f"{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}" for p in span.path_points)
-            writer.writerow([
-                span.span_id, span.story, span.beam_type,
-                "是" if span.is_curved else "否", "是" if span.is_cantilever else "否",
-                "+".join(span.source_objects), coordinates,
-            ])
+            label = span_id_resolver(span) if span_id_resolver else span.span_id
+            source_names = (
+                [source_name_resolver(name) for name in span.source_objects]
+                if source_name_resolver
+                else span.source_objects
+            )
+            writer.writerow(
+                [
+                    label,
+                    span.story,
+                    span.beam_type,
+                    "是" if span.is_curved else "否",
+                    "是" if span.is_cantilever else "否",
+                    "+".join(source_names),
+                    coordinates,
+                ]
+            )
+    return path
+
+
+def export_requires_split_dxf(records: Iterable[object], output_path: str | Path, *, model_name: str = "") -> Path:
+    """Draw blocked multi-Span Objects in red for full-model review."""
+
+    records = list(records)
+    entities: list[str] = []
+    for record in records:
+        points = (record.start, record.end)
+        entities.extend(_polyline("AUDIT_REQUIRES_SPLIT", 1, points))
+        label = f"{record.object_name} -> {len(record.span_ids)} spans"
+        entities.extend(_text("AUDIT_REQUIRES_SPLIT", 1, _midpoint(points), label, 150.0, _text_angle(points)))
+    legend_x, legend_y = _legend_origin_from_paths([tuple((r.start, r.end)) for r in records])
+    legend = [
+        f"REQUIRES_SPLIT AUDIT | objects={len(records)}",
+        "RED = one ETABS Object contributes to multiple structural Spans",
+        "Object names and Span counts are placed at path midpoints",
+    ]
+    for offset, value in enumerate(legend):
+        entities.extend(
+            _text(
+                "MERGE_LEGEND",
+                1,
+                (legend_x, legend_y - offset * 195.0, 0.0),
+                value,
+                150.0,
+            )
+        )
+    if model_name:
+        entities.extend(
+            _text(
+                "MERGE_LEGEND",
+                1,
+                (legend_x, legend_y - len(legend) * 195.0, 0.0),
+                f"MODEL {_safe_text(model_name)}",
+                120.0,
+            )
+        )
+    values = _header() + _tables() + ["0", "SECTION", "2", "ENTITIES"] + entities + ["0", "ENDSEC", "0", "EOF"]
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(values) + "\n", encoding="ascii")
     return path
 
 

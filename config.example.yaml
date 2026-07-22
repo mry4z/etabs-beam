@@ -5,12 +5,10 @@
 # ETABS 连接配置
 # ============================================================================
 etabs:
-  # ETABS 22 OAPI DLL 路径
-  # 默认安装位置（x64）
-  dll_path: "E:\\Program Files\\Computers and Structures\\ETABS 22\\ETABSv1.dll"
-
-  # API 版本（必须与 DLL 版本匹配）
-  api_version: "22"
+  # ETABS 22/23 OAPI DLL 路径；必须与当前宿主主版本一致。
+  # 默认示例使用 ETABS 23 x64；ETABS 22 可改为
+  # E:\Program Files\Computers and Structures\ETABS 22\ETABSv1.dll
+  dll_path: "E:\\Program Files\\Computers and Structures\\ETABS 23\\ETABSv1.dll"
 
   # 连接模式
   # "attach" - attach 到已运行的 ETABS 实例（推荐阶段1）
@@ -24,6 +22,10 @@ geometry:
   # 坐标判等容差（mm）
   # 用于判断两个梁端点是否共点（连续梁判据）
   coordinate_tolerance_mm: 1.0
+
+  # 支承交点落在源 Object 端点内侧不超过此值时，忽略该端部微小碎片，
+  # 避免把 Object 误判为跨两个 Span；真实跨越支承仍会阻塞模型改名
+  source_span_overlap_tolerance_mm: 2.0
 
   # 梁斜率限制（度）
   # 超过此值则判为非水平梁（连续梁判据）
@@ -41,28 +43,13 @@ geometry:
 # ============================================================================
 design:
   # 设计规范选择
-  # "ACI318-19" - 美国 ACI 318-19（阶段1 读 ETABS 设计结果）
-  # "GB50010"   - 中国 GB 50010-2010（远景，自研实现）
-  standard: "ACI318-19"
-
-  # 阶段1：读取 ETABS 设计结果（无需自研公式）
-  # 若模型未完成分析+设计，工具会提示用户先在 ETABS 内完成
-  read_etabs_results: true
-
-  # [远景] 自研配筋参数示例（暂未启用）
-  # aci318:
-  #   concrete_grade: "C30"
-  #   rebar_type: "HRB400"
-  #   cover_mm: 40
+  # 当前配筋引擎仅接受 ACI 318-14；其他规范需先实现独立策略。
+  standard: "ACI 318-14"
 
 # ============================================================================
 # 输出配置
 # ============================================================================
 output:
-  # Excel 模板路径（相对于项目根目录）
-  # 包含预设格式、列标题、公式等
-  excel_template: "assets/templates/beam_schedule_template.xlsx"
-
   # 输出报告目录
   # 生成的梁表 Excel 文件将放在此处
   reports_dir: "build/output/reports"
@@ -76,10 +63,6 @@ output:
   report_filename: "beam_schedule_{timestamp}.xlsx"
   log_filename: "etabs_beam_{timestamp}.log"
 
-  # 文件被占用时是否覆盖或使用时间戳规避
-  # "overwrite" - 直接覆盖（不推荐）
-  # "timestamp" - 添加序号或时间戳规避（推荐）
-  if_exists: "timestamp"
 
 # ============================================================================
 # 日志配置
@@ -92,16 +75,6 @@ logging:
   # ERROR   - 错误信息
   level: "INFO"
 
-  # 日志格式
-  # %(asctime)s   - 时间戳
-  # %(name)s      - 模块名称
-  # %(levelname)s - 日志级别
-  # %(message)s   - 日志消息
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-  # 日期格式（strftime）
-  date_format: "%Y-%m-%d %H:%M:%S"
-
 # ============================================================================
 # 高级配置（可选）
 # ============================================================================
@@ -112,24 +85,10 @@ advanced:
   # "byStory"  - 按楼层分别处理
   beam_selection_mode: "all"
 
-  # [阶段3] 连续梁链分析
-  # 是否启用连续梁的支座反力计算（需要完成分析）
-  include_support_reactions: true
-
-  # [阶段4] 设计结果处理
-  # 若模型未完成设计，是否自动启用 ETABS 设计流程
-  auto_run_design: false
-
-  # [调试] 是否生成详细的调试日志
-  debug_mode: false
-
-  # [调试] 是否保留临时文件
-  keep_temp_files: false
-
 # ============================================================================
 # 注意事项
 # ============================================================================
-# 1. DLL 路径：确保使用 ETABS 22 x64 版本
+# 1. DLL 路径：确保使用与 ETABS 22/23 宿主主版本一致的 x64 DLL
 # 2. 单位：工具假设 ETABS 模型使用 "N-mm-C" 单位系统
 # 3. 分析与设计：梁表导出前，模型需完成"Run Analysis"和"Start Design"
 # 4. 文件权限：build/output/ 需要写入权限
