@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Iterable, Sequence
 
+from src.design.bar_layout_capacity import single_layer_max_bars
+
 
 class DetailingError(ValueError):
     """Raised when a beam cannot be detailed with the selected project rules."""
@@ -596,11 +598,13 @@ class BeamDetailingEngine:
         )
 
     def _capacity_per_layer(self, section, stirrup_diameter, main_diameter) -> int:
-        clear_width = section.width_mm - 2.0 * (section.cover_mm + stirrup_diameter + main_diameter / 2.0)
-        spacing = self.code.minimum_clear_spacing(main_diameter, section.aggregate_mm)
-        if clear_width < main_diameter:
-            return 0
-        return max(0, math.floor((clear_width + spacing) / (main_diameter + spacing)))
+        return single_layer_max_bars(
+            section.width_mm,
+            section.cover_mm,
+            stirrup_diameter,
+            section.aggregate_mm,
+            main_diameter,
+        )
 
     def _select_face_rebar(
         self, section: BeamSection, demands: Sequence[BeamRegionDemand], mode: ReinforcementMode
