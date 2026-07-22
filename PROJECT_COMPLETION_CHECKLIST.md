@@ -261,6 +261,10 @@ Object `302` 在本次新拓扑 CSV 中只贡献 `T1-F1-PB9-3`；跨 Span Object
 #### P1-1 完成配筋引擎工程闭环
 
 - [x] 建立 ACI 318-14 单排纵筋最大根数的 720 组合字典，并让配筋引擎统一调用；键使用工程尺寸，保护层明确为混凝土表面至箍筋外缘，非标准组合按同一公式后备计算。720 项逐项公式对照、窄梁边界和引擎接入测试均通过。
+- [x] 固定配筋类别边界并形成 `docs/ORDINARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md`：SB 永久采用普通梁且不使用 Chapter 18；PB 不必然是 SMF，只有显式 `Sway Special` PB 使用 18.6。
+- [ ] 重构设计 profile 解析：`beam_type=SB` 强制进入 `SB_ORDINARY_NO_CH18`；PB 显式区分 Ordinary/OMF/IMF/SMF/18.14（仅明确要求时）/Review Required，禁止继续只靠 `is_smf`。
+- [ ] 修正普通梁剪扭间距：低剪、 高剪和抗扭条件分别启用 `d/2`、`d/4`、`ph/8` 限值；显式消费可追溯的最小 `Av/s` 和剪力 regime，缺输入时 fail-closed。
+- [ ] 将 PB 专属构造策略从 SB 分离：SB 受弯主筋根数不得由 stirrup legs 自动控制；两排后转 face、`h>=800` T10@250、全跨统一 Legs 和相邻跨 option 均须按普通梁评审稿中的待确认项处理。
 - [ ] 明确区分 ETABS `GetRebarBeam` 的纵筋设计 cover 与施工构造使用的箍筋外缘净保护层，不共用含义不清的单一 `cover_mm`。
 - [ ] 复核旧结果中 147 个 `B 200X400`、`NO_ALLOWED_SPACING` 梁跨；确认净保护层后，明确采用 75 mm 间距、调整截面/保护层或人工 override 的项目策略。
 - [ ] 新拓扑重放后确认旧 5 个 127 mm 假碎跨和 `NO_RESULTS` 是否归零。

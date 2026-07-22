@@ -84,6 +84,7 @@ etabs beam/
 │   ├── ETABS_OAPI_VALIDATION.md                # API 签名、权限和真实模型实测记录
 │   ├── ETABS_SQLITE_SNAPSHOT_ROUTE.md          # ETABS 23 SQLite 快照路线
 │   ├── MANUAL_BEAM_TOPOLOGY_OVERRIDE.md        # 人工 Beam Line/Span 分组和 ETABS 插件交互契约
+│   ├── ORDINARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md # SB 普通梁与 PB/SMF 规则对照
 │   ├── PRIMARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md
 │   ├── TECHNICAL_ROADMAP.md
 │   ├── USER_GUIDE.md
