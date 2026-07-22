@@ -85,7 +85,8 @@ function styleHeader(range) {
 }
 
 function rebarAreaFormula(cell) {
-  const token = `LEFT(TRIM(${cell})&" ",FIND(" ",TRIM(${cell})&" ")-1)`;
+  const rawToken = `LEFT(TRIM(${cell})&" ",FIND(" ",TRIM(${cell})&" ")-1)`;
+  const token = `IFERROR(LEFT(${rawToken},FIND("+(",${rawToken})-1),${rawToken})`;
   const first = `IFERROR(VALUE(LEFT(${token},FIND("T",${token})-1))*PI()*VALUE(MID(${token},FIND("T",${token})+1,FIND("+",${token}&"+")-FIND("T",${token})-1))^2/4,0)`;
   const second = `IFERROR(VALUE(MID(${token},FIND("+",${token})+1,FIND("T",${token},FIND("+",${token})+1)-FIND("+",${token})-1))*PI()*VALUE(MID(${token},FIND("T",${token},FIND("+",${token})+1)+1,LEN(${token})))^2/4,0)`;
   return `=IF(OR(TRIM(${cell})="",UPPER(TRIM(${cell}))="N.A."),0,${first}+${second})`;
@@ -114,7 +115,8 @@ const m = payload.metadata;
 const metadataText =
   `模型：${m.model}｜单位：${m.units}｜规范：${m.design_code}` +
   `｜梁 Object：${m.frame_objects}｜梁线：${m.beam_lines}｜结构跨：${m.spans}` +
-  `｜SMF 来源：${m.is_smf_source}｜骨料：${m.aggregate_mm} mm（项目默认）` +
+  `｜Profile 来源：${m.detailing_profile_source ?? m.is_smf_source ?? "未记录"}` +
+  `｜骨料：${m.aggregate_mm} mm（项目默认）` +
   `｜多排纵筋每排≥${m.minimum_bars_per_layer ?? 2}根` +
   `｜保护层来源：${m.cover_source ?? "未记录"}`;
 
@@ -125,7 +127,8 @@ const rawColumns = [
   ["width_mm", "梁宽/mm"], ["depth_mm", "梁高D/mm"], ["length_mm", "跨长/mm"],
   ["cover_mm", "ETABS纵筋设计cover/mm"], ["fc_mpa", "fc'/MPa"],
   ["fy_mpa", "fy/MPa"], ["fyt_mpa", "fyt/MPa"], ["aggregate_mm", "骨料/mm"],
-  ["frame_type", "ETABS FrameType"], ["is_smf", "是否SMF"],
+  ["frame_type", "ETABS FrameType"], ["detailing_profile", "配筋Profile"],
+  ["profile_source", "Profile来源"], ["is_smf", "是否SMF"],
   ["source_objects", "源 Object"], ["design_status", "设计结果状态"],
   ["engine_status", "引擎状态"], ["warnings", "警告"],
   ["top_total_mm2", "顶部AsTotal/mm²"], ["top_total_station_mm", "顶部Total站点/mm"],
@@ -171,7 +174,7 @@ rawSheet.freezePanes.freezeRows(5);
 rawSheet.freezePanes.freezeColumns(6);
 rawSheet.showGridLines = false;
 rawSheet.getRange(`I6:P${rawEndRow}`).format.numberFormat = "0.0";
-rawSheet.getRange(`W6:AV${rawEndRow}`).format.numberFormat = "0.000";
+rawSheet.getRange(`Y6:AX${rawEndRow}`).format.numberFormat = "0.000";
 rawSheet.getRange(`A6:${rawEnd}${rawEndRow}`).format.font = { size: 9 };
 for (const col of ["A", "B", "G"]) rawSheet.getRange(`${col}1:${col}${rawEndRow}`).format.columnWidth = 22;
 for (const col of ["H", "S", "V"]) rawSheet.getRange(`${col}1:${col}${rawEndRow}`).format.columnWidth = 32;
@@ -182,7 +185,8 @@ const reviewColumns = [
   ["beam_no", "梁编号"], ["beam_line", "梁线编号"], ["span_no", "跨号"],
   ["story", "楼层"], ["beam_type", "主次梁"], ["section", "截面"],
   ["width_mm", "梁宽/mm"], ["depth_mm", "梁高/mm"], ["frame_type", "FrameType"],
-  ["is_smf", "SMF"], ["mode", "引擎模式"], ["engine_status", "引擎状态"],
+  ["detailing_profile", "配筋Profile"], ["is_smf", "SMF"],
+  ["mode", "引擎模式"], ["engine_status", "引擎状态"],
   ["warnings", "警告"], ["legs", "Legs（可编辑）"],
   ["face_required_mm2", "Face计算面积/侧"], ["face_text", "Face配筋文本/侧"],
   ["face_actual", "Face实配面积/侧"], ["face_diff", "Face差值"], ["face_status", "Face状态"],
@@ -205,6 +209,7 @@ reviewColumns.push(
   ["s1_status", "中S1状态"],
 );
 const reviewIndex = Object.fromEntries(reviewColumns.map(([key], index) => [key, index]));
+const engineStatusCol = colLetter(reviewIndex.engine_status);
 const reviewEnd = colLetter(reviewColumns.length - 1);
 const reviewStart = 6;
 const reviewEndRow = reviewStart + payload.review_rows.length - 1;
@@ -212,7 +217,7 @@ styleTitle(
   reviewSheet,
   reviewEnd,
   "梁配筋调整与计算面积复核",
-  "黄色单元格可编辑：纵筋如 8T25 6/2 或 2T25+2T20；层数说明写在第一个空格后。面积公式忽略分层后缀。每排至少2根，不允许单根末排。S2 同时校核左右端，S1 校核跨中。",
+  "黄色单元格可编辑：纵筋如 8T25 6/2、2T25+2T20 或 2T16+(2T12)；层数说明写在第一个空格后，括号内为架立筋。受弯面积公式忽略分层后缀及括号架立筋。每排至少2根，不允许单根末排。S2 同时校核左右端，S1 校核跨中。",
   metadataText,
 );
 reviewSheet.getRange(`A5:${reviewEnd}5`).values = [reviewColumns.map(([, header]) => header)];
@@ -242,9 +247,9 @@ for (const group of ["face", "et1", "t1", "et2", "eb1", "b1", "eb2"]) {
     { length: payload.review_rows.length }, (_, i) => {
       const row = reviewStart + i;
       if (group === "face") {
-        return [`=IF($L${row}<>"OK","ENGINE",IF(AND(UPPER(TRIM(${textCol}${row}))="N.A.",${requiredCol}${row}<=0),"N.A.",IF(${actualCol}${row}+0.001>=${requiredCol}${row},"OK","NG")))`];
+        return [`=IF($${engineStatusCol}${row}<>"OK","ENGINE",IF(AND(UPPER(TRIM(${textCol}${row}))="N.A.",${requiredCol}${row}<=0),"N.A.",IF(${actualCol}${row}+0.001>=${requiredCol}${row},"OK","NG")))`];
       }
-      return [`=IF($L${row}<>"OK","ENGINE",IF(${actualCol}${row}+0.001>=${requiredCol}${row},"OK","NG"))`];
+      return [`=IF($${engineStatusCol}${row}<>"OK","ENGINE",IF(${actualCol}${row}+0.001>=${requiredCol}${row},"OK","NG"))`];
     },
   );
 }
@@ -274,7 +279,7 @@ for (const [statusKey, atReqKey, comboReqKey, atActualKey, comboActualKey] of [
   reviewSheet.getRange(`${statusCol}${reviewStart}:${statusCol}${reviewEndRow}`).formulas = Array.from(
     { length: payload.review_rows.length }, (_, i) => {
       const row = reviewStart + i;
-      return [`=IF($L${row}<>"OK","ENGINE",IF(AND(${atActualCol}${row}+0.000001>=${atReqCol}${row},${comboActualCol}${row}+0.000001>=${comboReqCol}${row}),"OK","NG"))`];
+      return [`=IF($${engineStatusCol}${row}<>"OK","ENGINE",IF(AND(${atActualCol}${row}+0.000001>=${atReqCol}${row},${comboActualCol}${row}+0.000001>=${comboReqCol}${row}),"OK","NG"))`];
     },
   );
 }

@@ -11,6 +11,7 @@ from src.design.detailing import (
     ACI318_14_DetailingPolicy,
     BarCatalog,
     BarSpec,
+    BeamDetailingProfile,
     BeamDetailingEngine,
     BeamDetailingInput,
     BeamDetailingResult,
@@ -21,6 +22,7 @@ from src.design.detailing import (
     ProjectDetailingPolicy,
     ReinforcementMode,
     coordinate_adjacent_spans,
+    resolve_detailing_profile,
 )
 
 __all__ = [
@@ -28,6 +30,7 @@ __all__ = [
     "ACI318_14_DetailingPolicy",
     "BarCatalog",
     "BarSpec",
+    "BeamDetailingProfile",
     "BeamDetailingEngine",
     "BeamDetailingInput",
     "BeamDetailingResult",
@@ -41,4 +44,5 @@ __all__ = [
     "coordinate_adjacent_spans",
     "minimum_clear_bar_spacing_mm",
     "single_layer_max_bars",
+    "resolve_detailing_profile",
 ]

@@ -36,6 +36,56 @@ class ContinuityOption(str, Enum):
     OPTION_2_COUNT_ADJUSTMENT = "OPTION_2_COUNT_ADJUSTMENT"
 
 
+class BeamDetailingProfile(str, Enum):
+    """Explicit project/code profile; topology type alone is not a code system."""
+
+    SB_ORDINARY_NO_CH18 = "SB_ORDINARY_NO_CH18"
+    PB_OMF = "PB_OMF"
+    PB_SMF = "PB_SMF"
+    PB_REVIEW_REQUIRED = "PB_REVIEW_REQUIRED"
+
+    @property
+    def is_smf(self) -> bool:
+        return self is BeamDetailingProfile.PB_SMF
+
+    @property
+    def is_secondary(self) -> bool:
+        return self is BeamDetailingProfile.SB_ORDINARY_NO_CH18
+
+
+def resolve_detailing_profile(
+    beam_type: str,
+    frame_types: Iterable[str],
+) -> tuple[BeamDetailingProfile, str]:
+    """Resolve the confirmed project profile without promoting any SB to Ch. 18.
+
+    The user-confirmed project rule treats every non-SMF PB as OMF.  Unknown,
+    mixed, or Program Determined PB inputs remain review-required so an ETABS
+    design option is never silently invented.
+    """
+
+    normalized_type = str(beam_type).strip().upper()
+    normalized_frames = tuple(dict.fromkeys(str(value).strip() or "Unknown" for value in frame_types))
+    if normalized_type == "SB":
+        return (
+            BeamDetailingProfile.SB_ORDINARY_NO_CH18,
+            "beam_type=SB; ETABS FrameType does not enable Chapter 18",
+        )
+    if normalized_type != "PB":
+        return BeamDetailingProfile.PB_REVIEW_REQUIRED, f"unknown beam_type={beam_type!r}"
+    if len(normalized_frames) != 1:
+        return BeamDetailingProfile.PB_REVIEW_REQUIRED, "PB source FrameType is mixed"
+    frame_type = normalized_frames[0]
+    if frame_type in {"Unknown", "Program Determined"}:
+        return BeamDetailingProfile.PB_REVIEW_REQUIRED, f"PB FrameType={frame_type}"
+    if frame_type == "Sway Special":
+        return BeamDetailingProfile.PB_SMF, "PB FrameType=Sway Special"
+    return (
+        BeamDetailingProfile.PB_OMF,
+        f"PB non-SMF project rule; source FrameType={frame_type}",
+    )
+
+
 @dataclass(frozen=True)
 class BarSpec:
     """One bar diameter/count group in one beam face or side."""
@@ -92,6 +142,7 @@ class ProjectDetailingPolicy:
     face_max_spacing_mm: float = 250.0
     max_main_bar_layers: int = 2
     minimum_bars_per_layer: int = 2
+    sb_hanger_diameter_mm: int = 12
     default_continuity_option: ContinuityOption = ContinuityOption.OPTION_1_STRICT_EQUAL
 
     def __post_init__(self) -> None:
@@ -107,6 +158,8 @@ class ProjectDetailingPolicy:
             raise DetailingError("抗扭 face bar 优选直径必须属于项目启用目录。")
         if self.default_face_diameter_mm not in enabled:
             raise DetailingError("默认 face bar 直径必须属于项目启用目录。")
+        if self.sb_hanger_diameter_mm not in enabled:
+            raise DetailingError("SB 架立筋直径必须属于项目启用目录。")
         if not self.allowed_spacings_mm or any(value <= 0 for value in self.allowed_spacings_mm):
             raise DetailingError("项目箍筋间距目录不能为空且必须为正数。")
         if self.max_main_bar_layers < 1:
@@ -236,7 +289,7 @@ class BeamSection:
     fyt_mpa: float
     aggregate_mm: float
     length_mm: float
-    is_smf: bool = False
+    detailing_profile: BeamDetailingProfile = BeamDetailingProfile.PB_OMF
 
     def __post_init__(self) -> None:
         values = (
@@ -251,6 +304,14 @@ class BeamSection:
         )
         if any(value <= 0 for value in values):
             raise DetailingError("梁截面、材料、保护层和长度必须为正数。")
+
+    @property
+    def is_smf(self) -> bool:
+        return self.detailing_profile.is_smf
+
+    @property
+    def is_secondary(self) -> bool:
+        return self.detailing_profile.is_secondary
 
 
 @dataclass(frozen=True)
@@ -286,10 +347,14 @@ class LongitudinalDesign:
     provided_area_mm2: float
     layers: int
     clear_spacing_mm: float
+    hanger_bars: BarSpec | None = None
 
     @property
     def notation(self) -> str:
-        return "+".join(bar.notation for bar in self.bars)
+        flexural = "+".join(bar.notation for bar in self.bars)
+        if self.hanger_bars is None:
+            return flexural
+        return f"{flexural}+({self.hanger_bars.notation})"
 
 
 @dataclass(frozen=True)
@@ -325,6 +390,7 @@ class BeamDetailingResult:
     code_edition: str
     code_policy_version: str
     project_policy_version: str
+    detailing_profile: BeamDetailingProfile
     mode: ReinforcementMode
     regions: tuple[RegionDetailing, ...]
     face_rebar: FaceRebarDesign
@@ -348,6 +414,8 @@ class BeamDetailingEngine:
 
     def design(self, input_data: BeamDetailingInput) -> BeamDetailingResult:
         section = input_data.section
+        if section.detailing_profile is BeamDetailingProfile.PB_REVIEW_REQUIRED:
+            raise DetailingError("DETAILING_PROFILE_REVIEW_REQUIRED")
         max_main = max(self.project.enabled_diameters_mm)
         selected_stirrups = [self._select_stirrup(section, demand, max_main) for demand in input_data.regions]
         # The project梁表 has one ``Legs`` field.  Use the controlling region's
@@ -358,6 +426,7 @@ class BeamDetailingEngine:
         selected_stirrups = [self._with_legs(stirrup, span_legs) for stirrup in selected_stirrups]
         normal_regions: list[RegionDetailing] = []
         normal_fails = False
+        minimum_main_count = 2 if section.is_secondary else None
         for demand, stirrup in zip(input_data.regions, selected_stirrups):
             effective_depth = self.code.effective_depth(section, stirrup.diameter_mm, max_main)
             as_min = self.code.minimum_longitudinal_area(
@@ -366,16 +435,18 @@ class BeamDetailingEngine:
             top = self._select_longitudinal(
                 section,
                 demand.as_top_total_mm2,
-                stirrup.legs,
+                minimum_main_count or stirrup.legs,
                 stirrup.diameter_mm,
                 max_layers=self.project.max_main_bar_layers,
+                hanger_support_count=stirrup.legs if section.is_secondary else None,
             )
             bottom = self._select_longitudinal(
                 section,
                 demand.as_bottom_total_mm2,
-                stirrup.legs,
+                minimum_main_count or stirrup.legs,
                 stirrup.diameter_mm,
                 max_layers=self.project.max_main_bar_layers,
+                hanger_support_count=stirrup.legs if section.is_secondary else None,
             )
             if top is None or bottom is None:
                 normal_fails = True
@@ -413,6 +484,7 @@ class BeamDetailingEngine:
             code_edition=self.code.edition,
             code_policy_version=self.code.version,
             project_policy_version=self.project.version,
+            detailing_profile=section.detailing_profile,
             mode=mode,
             regions=regions,
             face_rebar=face,
@@ -438,8 +510,24 @@ class BeamDetailingEngine:
     ) -> RegionDetailing:
         effective_depth = self.code.effective_depth(section, stirrup.diameter_mm, max_main)
         as_min = self.code.minimum_longitudinal_area(section.width_mm, effective_depth, section.fc_mpa, section.fy_mpa)
-        top = self._select_longitudinal(section, demand.as_flex_top_mm2, stirrup.legs, stirrup.diameter_mm, None)
-        bottom = self._select_longitudinal(section, demand.as_flex_bottom_mm2, stirrup.legs, stirrup.diameter_mm, None)
+        minimum_main_count = 2 if section.is_secondary else stirrup.legs
+        hanger_support_count = stirrup.legs if section.is_secondary else None
+        top = self._select_longitudinal(
+            section,
+            demand.as_flex_top_mm2,
+            minimum_main_count,
+            stirrup.diameter_mm,
+            None,
+            hanger_support_count,
+        )
+        bottom = self._select_longitudinal(
+            section,
+            demand.as_flex_bottom_mm2,
+            minimum_main_count,
+            stirrup.diameter_mm,
+            None,
+            hanger_support_count,
+        )
         if top is None or bottom is None:
             raise DetailingError(f"{section.name}/{demand.name}: AsFlex 无法排布。")
         return RegionDetailing(
@@ -482,6 +570,7 @@ class BeamDetailingEngine:
         minimum_count: int,
         stirrup_diameter_mm: int,
         max_layers: int | None,
+        hanger_support_count: int | None = None,
     ) -> LongitudinalDesign | None:
         if required_area <= 0:
             required_area = 0.0
@@ -492,7 +581,9 @@ class BeamDetailingEngine:
                 section, required_area, minimum_count, stirrup_diameter_mm, diameter, max_layers
             )
             if candidate:
-                candidates.append(candidate)
+                supported = self._with_sb_hangers(candidate, section, stirrup_diameter_mm, hanger_support_count)
+                if supported:
+                    candidates.append(supported)
         # Support the user's option-2 mixed-bar pattern without coupling the
         # Excel layer to a particular diameter combination.
         for first_index, first in enumerate(diameters):
@@ -501,7 +592,9 @@ class BeamDetailingEngine:
                     section, required_area, minimum_count, stirrup_diameter_mm, first, second, max_layers
                 )
                 if candidate:
-                    candidates.append(candidate)
+                    supported = self._with_sb_hangers(candidate, section, stirrup_diameter_mm, hanger_support_count)
+                    if supported:
+                        candidates.append(supported)
         if not candidates:
             return None
         return min(
@@ -514,6 +607,36 @@ class BeamDetailingEngine:
                 candidate.notation,
             ),
         )
+
+    def _with_sb_hangers(
+        self,
+        design: LongitudinalDesign,
+        section: BeamSection,
+        stirrup_diameter_mm: int,
+        support_count: int | None,
+    ) -> LongitudinalDesign | None:
+        if support_count is None:
+            return design
+        flexural_count = sum(bar.count for bar in design.bars)
+        hanger_count = max(0, support_count - flexural_count)
+        if hanger_count == 0:
+            return design
+        hanger_diameter = self.project.sb_hanger_diameter_mm
+        largest_diameter = max(
+            hanger_diameter,
+            *(bar.diameter_mm for bar in design.bars),
+        )
+        capacity = self._capacity_per_layer(section, stirrup_diameter_mm, largest_diameter)
+        if support_count > capacity:
+            return None
+        hanger = BarSpec(
+            hanger_diameter,
+            hanger_count,
+            (hanger_count,),
+            self.project.catalog.area(hanger_diameter),
+            role="hanger",
+        )
+        return replace(design, hanger_bars=hanger)
 
     def _single_diameter_candidate(self, section, required, minimum_count, stirrup_diameter, diameter, max_layers):
         area = self.project.catalog.area(diameter)
@@ -646,10 +769,11 @@ def coordinate_adjacent_spans(
 ) -> tuple[BeamDetailingResult, BeamDetailingResult]:
     """Coordinate top/bottom bars at a shared support without touching ETABS.
 
-    Option 1 uses the larger required area on both sides.  Option 2 keeps a
-    common bar diameter and only increases the count on the more demanding
-    side.  The function is intentionally pure so it can be applied before an
-    Excel export or a future model writeback transaction.
+    Option 1 uses the larger selected layout on both sides.  Option 2 currently
+    shares that local kernel; its distinct Beam-Line-wide baseline/count
+    adjustment remains a tracked TODO.  The function is intentionally pure so
+    it can be applied before an Excel export or a future model writeback
+    transaction.  For SB, only top reinforcement is coordinated.
     """
 
     if len(first.regions) != len(second.regions):
@@ -657,37 +781,82 @@ def coordinate_adjacent_spans(
     first_regions = list(first.regions)
     second_regions = list(second.regions)
     # A shared support is the J end of the first span and I end of the next.
-    for attr in ("top", "bottom"):
+    if first.detailing_profile != second.detailing_profile:
+        raise DetailingError("相邻跨配筋 profile 不一致，不能自动协调。")
+    attrs = ("top",) if first.detailing_profile.is_secondary else ("top", "bottom")
+    for attr in attrs:
         a = getattr(first_regions[2], attr)
         b = getattr(second_regions[0], attr)
         if not a.bars or not b.bars or len(a.bars) != 1 or len(b.bars) != 1:
             continue
         if a.bars[0].diameter_mm != b.bars[0].diameter_mm:
             continue
-        if option is ContinuityOption.OPTION_1_STRICT_EQUAL:
-            count = max(a.bars[0].count, b.bars[0].count)
-            first_regions[2] = replace(first_regions[2], **{attr: _resize_single(a, count)})
-            second_regions[0] = replace(second_regions[0], **{attr: _resize_single(b, count)})
-        elif option is ContinuityOption.OPTION_2_COUNT_ADJUSTMENT:
-            count = max(a.bars[0].count, b.bars[0].count)
-            first_regions[2] = replace(first_regions[2], **{attr: _resize_single(a, count)})
-            second_regions[0] = replace(second_regions[0], **{attr: _resize_single(b, count)})
-        else:
+        if option not in {
+            ContinuityOption.OPTION_1_STRICT_EQUAL,
+            ContinuityOption.OPTION_2_COUNT_ADJUSTMENT,
+        }:
             raise DetailingError(f"未知相邻跨连续性方案：{option}")
+        # OPTION_2 still uses the same count-equalization kernel pending the
+        # Beam-Line-wide baseline/count-adjustment implementation tracked in
+        # PROJECT_COMPLETION_CHECKLIST.md.
+        count = max(a.bars[0].count, b.bars[0].count)
+        template = a if a.bars[0].count >= b.bars[0].count else b
+        first_regions[2] = replace(
+            first_regions[2],
+            **{
+                attr: _resize_single(
+                    a,
+                    count,
+                    first_regions[2].stirrup.legs if first.detailing_profile.is_secondary else None,
+                    template.bars[0].layers,
+                )
+            },
+        )
+        second_regions[0] = replace(
+            second_regions[0],
+            **{
+                attr: _resize_single(
+                    b,
+                    count,
+                    second_regions[0].stirrup.legs if second.detailing_profile.is_secondary else None,
+                    template.bars[0].layers,
+                )
+            },
+        )
     return replace(first, regions=tuple(first_regions)), replace(second, regions=tuple(second_regions))
 
 
-def _resize_single(design: LongitudinalDesign, count: int) -> LongitudinalDesign:
+def _resize_single(
+    design: LongitudinalDesign,
+    count: int,
+    hanger_support_count: int | None = None,
+    layer_template: tuple[int, ...] | None = None,
+) -> LongitudinalDesign:
     bar = design.bars[0]
-    capacity = max(design.layers and max(design.bars[0].layers) or count, 1)
-    practical_count = _minimum_practical_count(count, capacity, 2, None)
-    if practical_count is None:
-        raise DetailingError("相邻跨协调后无法满足每排至少 2 根纵筋。")
-    count = practical_count
-    layers = _split_layers(count, capacity, 2)
+    if layer_template is not None and sum(layer_template) == count:
+        layers = layer_template
+    else:
+        capacity = max(design.layers and max(design.bars[0].layers) or count, 1)
+        practical_count = _minimum_practical_count(count, capacity, 2, None)
+        if practical_count is None:
+            raise DetailingError("相邻跨协调后无法满足每排至少 2 根纵筋。")
+        count = practical_count
+        layers = _split_layers(count, capacity, 2)
     resized = BarSpec(bar.diameter_mm, count, layers, bar.area_mm2, bar.role)
+    hanger = None
+    if hanger_support_count is not None:
+        hanger_count = max(0, hanger_support_count - count)
+        if hanger_count:
+            if design.hanger_bars is None:
+                raise DetailingError("SB 相邻跨协调后缺少可复用的架立筋规格。")
+            hanger = replace(design.hanger_bars, count=hanger_count, layers=(hanger_count,))
     return LongitudinalDesign(
-        (resized,), design.required_area_mm2, resized.total_area_mm2, len(layers), design.clear_spacing_mm
+        (resized,),
+        design.required_area_mm2,
+        resized.total_area_mm2,
+        len(layers),
+        design.clear_spacing_mm,
+        hanger,
     )
 
 

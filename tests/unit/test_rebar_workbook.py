@@ -105,6 +105,7 @@ def test_formal_payload_contains_three_sheet_rows_and_can_redetail(tmp_path: Pat
     assert payload["review_rows"][0]["engine_status"] == "OK"
     assert payload["review_rows"][0]["et1_text"]
     assert payload["final_rows"][0]["beam_no"] == "F1-PB1-1"
+    assert payload["raw_rows"][0]["detailing_profile"] == "PB_OMF"
     assert payload["raw_rows"][0]["left_top_total_combo"] == "TOP-C"
     assert payload["raw_rows"][0]["right_top_total_station_mm"] == 6000.0
 
@@ -112,6 +113,87 @@ def test_formal_payload_contains_three_sheet_rows_and_can_redetail(tmp_path: Pat
     assert destination.is_file()
     redetailed = redetail_payload(payload)
     assert redetailed["review_rows"][0]["engine_status"] == "OK"
+
+
+def test_sb_sway_special_frame_type_stays_ordinary_without_chapter_18() -> None:
+    beam = _beam("SB-A", (0, 0, 0), (6000, 0, 0))
+    span = BeamSpan(
+        "F1",
+        "SB",
+        1,
+        1,
+        ("SB-A",),
+        (beam.start, beam.end),
+        False,
+        False,
+    )
+    design = BeamDesignResult(
+        "F1-SB1-1",
+        (
+            _station(0.0, 1000.0, 1000.0),
+            _station(3000.0, 1000.0, 1000.0),
+            _station(6000.0, 1000.0, 1000.0),
+        ),
+    )
+    schedule = SpanScheduleMapping(
+        (SpanScheduleRecord(span, beam, design),),
+        {"SB-A": ("F1-SB1-S1",)},
+        {"SB-A": ("F1-SB1",)},
+    )
+
+    payload = build_payload_from_schedule(
+        schedule,
+        [beam],
+        section_loader=_section,
+        frame_types={"SB-A": "Sway Special"},
+        metadata={"model": "sample.EDB", "units": "N_mm_C"},
+    )
+
+    raw = payload["raw_rows"][0]
+    assert raw["detailing_profile"] == "SB_ORDINARY_NO_CH18"
+    assert raw["is_smf"] is False
+    assert raw["engine_status"] == "OK"
+    assert "SB_ETABS_SWAY_DESIGN_RESULT_REVIEW" in raw["warnings"]
+    assert payload["final_rows"][0]["legs"] == 2
+
+
+def test_program_determined_pb_stays_blocked_after_offline_redetail() -> None:
+    beam = _beam("PB-PD", (0, 0, 0), (6000, 0, 0))
+    span = BeamSpan(
+        "F1",
+        "PB",
+        1,
+        1,
+        ("PB-PD",),
+        (beam.start, beam.end),
+        False,
+        False,
+    )
+    design = BeamDesignResult(
+        "F1-PB1-1",
+        (
+            _station(0.0, 1000.0, 1000.0),
+            _station(3000.0, 1000.0, 1000.0),
+            _station(6000.0, 1000.0, 1000.0),
+        ),
+    )
+    schedule = SpanScheduleMapping(
+        (SpanScheduleRecord(span, beam, design),),
+        {},
+        {},
+    )
+    payload = build_payload_from_schedule(
+        schedule,
+        [beam],
+        section_loader=_section,
+        frame_types={"PB-PD": "Program Determined"},
+        metadata={"model": "sample.EDB", "units": "N_mm_C"},
+    )
+
+    assert payload["raw_rows"][0]["engine_status"] == "FRAME_TYPE_REVIEW_REQUIRED"
+    redetailed = redetail_payload(payload)
+    assert redetailed["raw_rows"][0]["engine_status"] == "FRAME_TYPE_REVIEW_REQUIRED"
+    assert redetailed["final_rows"][0]["engine_status"] == "FRAME_TYPE_REVIEW_REQUIRED"
 
 
 def test_mixed_section_span_is_fail_closed() -> None:

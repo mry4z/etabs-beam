@@ -21,16 +21,18 @@ from src.core.beam_line_span_analyzer import BeamLineSpanResult
 from src.core.etabs_connector import api_values
 from src.core.geometry_extractor import BeamGeometry
 from src.design.detailing import (
+    BeamDetailingProfile,
     BeamDetailingEngine,
     BeamDetailingInput,
     BeamRegionDemand,
     BeamSection,
     DetailingError,
+    resolve_detailing_profile,
 )
 from src.design.provider import BeamDesignResult, DesignStation
 from src.excel_span_adapter import SpanScheduleMapping, build_span_schedule
 
-PAYLOAD_SCHEMA_VERSION = "1.0"
+PAYLOAD_SCHEMA_VERSION = "1.1"
 DEFAULT_AGGREGATE_MM = 20.0
 REGIONS = ("left", "middle", "right")
 BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "build_rebar_workbook.mjs"
@@ -79,7 +81,10 @@ def build_rebar_workbook_payload(
             "cover_source": (
                 "ETABS PropFrame.GetRebarBeam 顶/底纵筋设计 cover 的较大值；" "不等同于施工箍筋外缘净保护层"
             ),
-            "is_smf_source": ("Concrete Beam Overwrites - ACI 318-14 / " "FrameType == Sway Special"),
+            "detailing_profile_source": (
+                "SB is always ordinary without Chapter 18; PB Sway Special is SMF; "
+                "all other resolved PB types use the project OMF profile"
+            ),
             "minimum_bars_per_layer": 2,
         },
         aggregate_mm=aggregate_mm,
@@ -112,17 +117,29 @@ def build_payload_from_schedule(
         source_sections = tuple(dict.fromkeys(by_name[name].section for name in span.source_objects if name in by_name))
         primary_section = source_sections[0] if source_sections else geometry.section
         source_frame_types = tuple(dict.fromkeys(frame_types.get(name, "Unknown") for name in span.source_objects))
+        detailing_profile, profile_source = resolve_detailing_profile(span.beam_type, source_frame_types)
         warnings: list[str] = []
         blocked_reason = ""
         if len(source_sections) > 1:
             warnings.append("MIXED_SECTION")
             blocked_reason = "MIXED_SECTION_DETAILING_BLOCKED"
-        if len(source_frame_types) > 1:
+        if len(source_frame_types) > 1 and span.beam_type == "PB":
             warnings.append("MIXED_FRAME_TYPE")
             blocked_reason = blocked_reason or "MIXED_FRAME_TYPE_DETAILING_BLOCKED"
-        if "Program Determined" in source_frame_types:
+        elif len(source_frame_types) > 1:
+            warnings.append("SB_FRAME_TYPE_IGNORED_FOR_PROFILE")
+        if "Program Determined" in source_frame_types and span.beam_type == "PB":
             warnings.append("FRAME_TYPE_PROGRAM_DETERMINED")
             blocked_reason = blocked_reason or "FRAME_TYPE_REVIEW_REQUIRED"
+        elif "Program Determined" in source_frame_types:
+            warnings.append("SB_FRAME_TYPE_IGNORED_FOR_PROFILE")
+        if span.beam_type == "SB" and any(
+            frame_type in {"Sway Ordinary", "Sway Intermediate", "Sway Special"} for frame_type in source_frame_types
+        ):
+            warnings.append("SB_ETABS_SWAY_DESIGN_RESULT_REVIEW")
+        if detailing_profile is BeamDetailingProfile.PB_REVIEW_REQUIRED:
+            warnings.append("DETAILING_PROFILE_REVIEW_REQUIRED")
+            blocked_reason = blocked_reason or "DETAILING_PROFILE_REVIEW_REQUIRED"
 
         section_error = ""
         try:
@@ -160,7 +177,9 @@ def build_payload_from_schedule(
             "fyt_mpa": section.get("fyt_mpa"),
             "aggregate_mm": float(aggregate_mm),
             "frame_type": ", ".join(source_frame_types),
-            "is_smf": "Sway Special" in source_frame_types,
+            "detailing_profile": detailing_profile.value,
+            "profile_source": profile_source,
+            "is_smf": detailing_profile.is_smf,
             "source_objects": ", ".join(span.source_objects),
             "design_status": record.design.status.value,
             "warnings": "; ".join(warnings),
@@ -200,7 +219,7 @@ def build_payload_from_schedule(
                         float(section["fyt_mpa"]),
                         float(aggregate_mm),
                         geometry.length,
-                        bool(common["is_smf"]),
+                        detailing_profile,
                     ),
                     demands,
                 )
@@ -250,12 +269,21 @@ def redetail_payload(
             if not key.startswith(tuple(f"{region}_" for region in REGIONS))
             and key not in {"engine_status", "engine_mode"}
         }
+        profile_value = common.get("detailing_profile")
+        if profile_value:
+            detailing_profile = BeamDetailingProfile(str(profile_value))
+        elif str(common.get("beam_type", "")).upper() == "SB":
+            detailing_profile = BeamDetailingProfile.SB_ORDINARY_NO_CH18
+        elif bool(common.get("is_smf")):
+            detailing_profile = BeamDetailingProfile.PB_SMF
+        else:
+            detailing_profile = BeamDetailingProfile.PB_OMF
         controls = {
             region: {key[len(region) + 1 :]: value for key, value in raw.items() if key.startswith(f"{region}_")}
             for region in REGIONS
         }
         prior_status = str(source.get("engine_status", ""))
-        if prior_status.startswith(("MIXED_", "FRAME_TYPE_", "SECTION_INFO_")):
+        if prior_status.startswith(("MIXED_", "FRAME_TYPE_", "DETAILING_PROFILE_", "SECTION_INFO_")):
             status = prior_status
         elif any("top_total_mm2" not in controls[region] for region in REGIONS):
             status = "NO_RESULTS"
@@ -281,7 +309,7 @@ def redetail_payload(
                         float(common["fyt_mpa"]),
                         float(common["aggregate_mm"]),
                         float(common["length_mm"]),
-                        bool(common["is_smf"]),
+                        detailing_profile,
                     ),
                     tuple(_engine_demand(region, controls[region]) for region in REGIONS),
                 )

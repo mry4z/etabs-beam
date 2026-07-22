@@ -3,7 +3,7 @@
 > 状态：第一版配筋排布引擎已接入真实 ETABS 23 模型的独立 Excel 评审链路；当前算法能力有效，但既有 3,070/3,074 跨工作簿使用了已修正的旧分跨拓扑，必须重算后才能作为最终验收件
 > 当前规范：ACI 318-14（采用 SI 单位，并应用官方勘误）
 > 目的：把 ETABS 左/中/右设计需求转换为主梁梁表配筋，同时保留以后扩展其他规范版本的接口。
-> 适用边界：本文件只定义 PB。PB 不必然是 SMF，18.6 规则仅用于明确分类为 SMF 的 PB；SB 固定采用普通梁且不使用 Chapter 18，详见 `ORDINARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md`。
+> 适用边界：本文件只定义 PB。PB 不必然是 SMF；明确分类为 `Sway Special` 的 PB 使用 18.6，其余已解析 PB 保留本文件项目规则并按 Chapter 18 OMF profile 执行。SB 固定采用普通梁且不使用 Chapter 18，但已确认与 PB 共用“两排后转 face”、`h≥800 mm` T10@250 和全跨最大 Legs，详见 `ORDINARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md`。
 
 ## 1. 输入字段必须先统一语义
 

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from src.design.detailing import (
     BeamDetailingEngine,
     BeamDetailingInput,
+    BeamDetailingProfile,
     BeamRegionDemand,
     BeamSection,
     ContinuityOption,
@@ -13,6 +14,7 @@ from src.design.detailing import (
     ProjectDetailingPolicy,
     ReinforcementMode,
     coordinate_adjacent_spans,
+    resolve_detailing_profile,
 )
 from src.design.etabs_result import EtabsResultProvider
 
@@ -20,7 +22,8 @@ from src.design.etabs_result import EtabsResultProvider
 def _input(
     name: str, width: float, depth: float, demands, *, smf: bool = True, length: float = 6000
 ) -> BeamDetailingInput:
-    section = BeamSection(name, width, depth, 40, 35, 420, 420, 20, length, smf)
+    profile = BeamDetailingProfile.PB_SMF if smf else BeamDetailingProfile.PB_OMF
+    section = BeamSection(name, width, depth, 40, 35, 420, 420, 20, length, profile)
     return BeamDetailingInput(section, tuple(demands))
 
 
@@ -31,6 +34,41 @@ def _demand(name: str, top: float, bottom: float, av: float, at: float, al: floa
 def test_project_policy_rejects_diameter_outside_full_catalog() -> None:
     with pytest.raises(DetailingError):
         ProjectDetailingPolicy(enabled_diameters_mm=(10, 13))
+
+
+def test_profile_resolver_never_promotes_sb_to_chapter_18() -> None:
+    profile, source = resolve_detailing_profile("SB", ("Sway Special",))
+    assert profile is BeamDetailingProfile.SB_ORDINARY_NO_CH18
+    assert "does not enable Chapter 18" in source
+
+
+@pytest.mark.parametrize("frame_type", ["Non-Sway", "Sway Ordinary", "Sway Intermediate"])
+def test_profile_resolver_treats_every_non_smf_pb_as_omf(frame_type: str) -> None:
+    profile, _ = resolve_detailing_profile("PB", (frame_type,))
+    assert profile is BeamDetailingProfile.PB_OMF
+
+
+def test_profile_resolver_requires_review_for_unresolved_pb() -> None:
+    profile, _ = resolve_detailing_profile("PB", ("Program Determined",))
+    assert profile is BeamDetailingProfile.PB_REVIEW_REQUIRED
+
+
+def test_review_required_profile_is_fail_closed_in_engine() -> None:
+    section = BeamSection(
+        "PB-REVIEW",
+        500,
+        700,
+        40,
+        35,
+        420,
+        420,
+        20,
+        6000,
+        BeamDetailingProfile.PB_REVIEW_REQUIRED,
+    )
+    demands = tuple(_demand(region, 1000, 1000, 0.2, 0, 0) for region in ("left", "middle", "right"))
+    with pytest.raises(DetailingError, match="DETAILING_PROFILE_REVIEW_REQUIRED"):
+        BeamDetailingEngine().design(BeamDetailingInput(section, demands))
 
 
 def test_station_envelope_can_override_asflex_from_same_station_calculation() -> None:
@@ -116,6 +154,34 @@ def test_deep_non_torsion_beam_gets_default_t10_skin_bars() -> None:
     assert result.face_rebar.notation == "3T10"
 
 
+def test_sb_uses_two_flexural_bars_and_parenthesized_t12_hangers_for_four_legs() -> None:
+    policy = ProjectDetailingPolicy(
+        enabled_diameters_mm=(10, 12, 16),
+        preferred_stirrup_diameters_mm=(10, 12),
+        preferred_longitudinal_diameters_mm=(16,),
+        preferred_torsion_face_diameters_mm=(16, 12, 10),
+    )
+    demands = tuple(_demand(region, 300, 300, 1.20, 0.00, 0) for region in ("left", "middle", "right"))
+    section = BeamSection(
+        "SB-HANGER",
+        500,
+        700,
+        40,
+        35,
+        420,
+        420,
+        20,
+        6000,
+        BeamDetailingProfile.SB_ORDINARY_NO_CH18,
+    )
+    result = BeamDetailingEngine(project_policy=policy).design(BeamDetailingInput(section, demands))
+    assert all(region.stirrup.legs == 4 for region in result.regions)
+    assert result.regions[0].top.notation == "2T16+(2T12)"
+    assert result.regions[0].top.provided_area_mm2 == pytest.approx(402.12386)
+    assert result.regions[0].top.hanger_bars is not None
+    assert result.regions[0].top.hanger_bars.role == "hanger"
+
+
 def test_adjacent_span_option_coordinates_shared_support_only() -> None:
     first = BeamDetailingEngine().design(
         _input(
@@ -144,6 +210,43 @@ def test_adjacent_span_option_coordinates_shared_support_only() -> None:
     first_out, second_out = coordinate_adjacent_spans(first, second, ContinuityOption.OPTION_1_STRICT_EQUAL)
     assert first_out.regions[2].top.bars[0].count == second_out.regions[0].top.bars[0].count
     assert first_out.regions[1].top.bars[0].count == first.regions[1].top.bars[0].count
+
+
+def test_sb_adjacent_spans_equalize_top_but_leave_bottom_independent() -> None:
+    engine = BeamDetailingEngine()
+
+    def sb_result(name: str, right_top: float, right_bottom: float, left_top: float, left_bottom: float):
+        section = BeamSection(
+            name,
+            500,
+            700,
+            40,
+            35,
+            420,
+            420,
+            20,
+            6000,
+            BeamDetailingProfile.SB_ORDINARY_NO_CH18,
+        )
+        return engine.design(
+            BeamDetailingInput(
+                section,
+                (
+                    _demand("left", left_top, left_bottom, 1.20, 0, 0),
+                    _demand("middle", 1000, 1000, 1.20, 0, 0),
+                    _demand("right", right_top, right_bottom, 1.20, 0, 0),
+                ),
+            )
+        )
+
+    first = sb_result("SB-1", 1800, 1000, 1000, 1000)
+    second = sb_result("SB-2", 1000, 1000, 1000, 1800)
+    original_first_bottom = first.regions[2].bottom.notation
+    original_second_bottom = second.regions[0].bottom.notation
+    first_out, second_out = coordinate_adjacent_spans(first, second, ContinuityOption.OPTION_1_STRICT_EQUAL)
+    assert first_out.regions[2].top.notation == second_out.regions[0].top.notation
+    assert first_out.regions[2].bottom.notation == original_first_bottom
+    assert second_out.regions[0].bottom.notation == original_second_bottom
 
 
 def test_etabs23_total_result_adapter_preserves_total_min_and_provided(monkeypatch) -> None:
