@@ -26,13 +26,15 @@ from src.design.detailing import (
     BeamDetailingInput,
     BeamRegionDemand,
     BeamSection,
+    BeamDetailingResult,
     DetailingError,
+    coordinate_adjacent_spans,
     resolve_detailing_profile,
 )
 from src.design.provider import BeamDesignResult, DesignStation
 from src.excel_span_adapter import SpanScheduleMapping, build_span_schedule
 
-PAYLOAD_SCHEMA_VERSION = "1.1"
+PAYLOAD_SCHEMA_VERSION = "1.2"
 DEFAULT_AGGREGATE_MM = 20.0
 REGIONS = ("left", "middle", "right")
 BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "build_rebar_workbook.mjs"
@@ -51,6 +53,7 @@ def build_rebar_workbook_payload(
 ) -> dict[str, Any]:
     """Build the complete JSON-ready workbook payload from one ETABS run."""
 
+    engine = engine or BeamDetailingEngine()
     beam_list = tuple(beams)
     schedule = build_span_schedule(
         structural,
@@ -86,6 +89,8 @@ def build_rebar_workbook_payload(
                 "all other resolved PB types use the project OMF profile"
             ),
             "minimum_bars_per_layer": 2,
+            "minimum_main_diameter_mm": engine.project.minimum_main_diameter_mm,
+            "hanger_diameter_mm": engine.project.sb_hanger_diameter_mm,
         },
         aggregate_mm=aggregate_mm,
         engine=engine,
@@ -110,6 +115,8 @@ def build_payload_from_schedule(
     raw_rows: list[dict[str, Any]] = []
     review_rows: list[dict[str, Any]] = []
     final_rows: list[dict[str, Any]] = []
+    contexts: list[tuple[dict[str, Any], Mapping[str, Any] | None]] = []
+    detailing_results: list[BeamDetailingResult | None] = []
 
     for record in schedule.records:
         span = record.span
@@ -203,6 +210,8 @@ def build_payload_from_schedule(
             raw_rows.append(raw)
             review_rows.append(_empty_review(common, status))
             final_rows.append(_empty_final(common, status))
+            contexts.append((common, controls))
+            detailing_results.append(None)
             continue
 
         try:
@@ -233,9 +242,31 @@ def build_payload_from_schedule(
             raw["engine_status"] = status
             review = _empty_review(common, status)
             final = _empty_final(common, status)
+            result = None
         raw_rows.append(raw)
         review_rows.append(review)
         final_rows.append(final)
+        contexts.append((common, controls))
+        detailing_results.append(result)
+
+    detailing_results, coordination_errors = _coordinate_results_by_beam_line(
+        detailing_results,
+        contexts,
+        engine,
+    )
+    for index, result in enumerate(detailing_results):
+        common, controls = contexts[index]
+        if index in coordination_errors:
+            status = coordination_errors[index]
+            raw_rows[index]["engine_status"] = status
+            raw_rows[index].pop("engine_mode", None)
+            review_rows[index] = _empty_review(common, status)
+            final_rows[index] = _empty_final(common, status)
+        elif result is not None and controls is not None:
+            raw_rows[index]["engine_status"] = "OK"
+            raw_rows[index]["engine_mode"] = result.mode.value
+            review_rows[index] = _review_row(common, controls, result)
+            final_rows[index] = _final_row(common, result)
 
     payload = {
         "metadata": dict(metadata),
@@ -246,6 +277,8 @@ def build_payload_from_schedule(
     payload["metadata"].setdefault("schema_version", PAYLOAD_SCHEMA_VERSION)
     payload["metadata"].setdefault("aggregate_mm", float(aggregate_mm))
     payload["metadata"].setdefault("minimum_bars_per_layer", 2)
+    payload["metadata"].setdefault("minimum_main_diameter_mm", engine.project.minimum_main_diameter_mm)
+    payload["metadata"].setdefault("hanger_diameter_mm", engine.project.sb_hanger_diameter_mm)
     return payload
 
 
@@ -261,6 +294,8 @@ def redetail_payload(
     raw_rows: list[dict[str, Any]] = []
     review_rows: list[dict[str, Any]] = []
     final_rows: list[dict[str, Any]] = []
+    contexts: list[tuple[dict[str, Any], Mapping[str, Any] | None]] = []
+    detailing_results: list[BeamDetailingResult | None] = []
     for source in output.get("raw_rows", []):
         raw = dict(source)
         common = {
@@ -295,6 +330,8 @@ def redetail_payload(
             raw_rows.append(raw)
             review_rows.append(_empty_review(common, status))
             final_rows.append(_empty_final(common, status))
+            contexts.append((common, controls))
+            detailing_results.append(None)
             continue
         try:
             result = engine.design(
@@ -324,14 +361,93 @@ def redetail_payload(
             raw.pop("engine_mode", None)
             review = _empty_review(common, status)
             final = _empty_final(common, status)
+            result = None
         raw_rows.append(raw)
         review_rows.append(review)
         final_rows.append(final)
+        contexts.append((common, controls))
+        detailing_results.append(result)
+    detailing_results, coordination_errors = _coordinate_results_by_beam_line(
+        detailing_results,
+        contexts,
+        engine,
+    )
+    for index, result in enumerate(detailing_results):
+        common, controls = contexts[index]
+        if index in coordination_errors:
+            status = coordination_errors[index]
+            raw_rows[index]["engine_status"] = status
+            raw_rows[index].pop("engine_mode", None)
+            review_rows[index] = _empty_review(common, status)
+            final_rows[index] = _empty_final(common, status)
+        elif result is not None and controls is not None:
+            raw_rows[index]["engine_status"] = "OK"
+            raw_rows[index]["engine_mode"] = result.mode.value
+            review_rows[index] = _review_row(common, controls, result)
+            final_rows[index] = _final_row(common, result)
     output["raw_rows"] = raw_rows
     output["review_rows"] = review_rows
     output["final_rows"] = final_rows
     output.setdefault("metadata", {})["minimum_bars_per_layer"] = 2
+    output["metadata"]["schema_version"] = PAYLOAD_SCHEMA_VERSION
+    output["metadata"]["minimum_main_diameter_mm"] = engine.project.minimum_main_diameter_mm
+    output["metadata"]["hanger_diameter_mm"] = engine.project.sb_hanger_diameter_mm
     return output
+
+
+def _coordinate_results_by_beam_line(
+    results: list[BeamDetailingResult | None],
+    contexts: list[tuple[Mapping[str, Any], Mapping[str, Any] | None]],
+    engine: BeamDetailingEngine,
+) -> tuple[list[BeamDetailingResult | None], dict[int, str]]:
+    output = list(results)
+    errors: dict[int, str] = {}
+    groups: dict[str, list[int]] = {}
+    for index, (common, _) in enumerate(contexts):
+        if output[index] is None:
+            continue
+        groups.setdefault(str(common.get("beam_line", "")), []).append(index)
+
+    for indexes in groups.values():
+        indexes.sort(key=lambda index: int(contexts[index][0].get("span_no", 0)))
+        if len(indexes) < 2:
+            continue
+        try:
+            max_rounds = max(2, len(indexes) * 3)
+            for _ in range(max_rounds):
+                before = tuple(_result_layout_signature(output[index]) for index in indexes)
+                for first_index, second_index in zip(indexes, indexes[1:]):
+                    first_span = int(contexts[first_index][0].get("span_no", 0))
+                    second_span = int(contexts[second_index][0].get("span_no", 0))
+                    if second_span != first_span + 1:
+                        continue
+                    first = output[first_index]
+                    second = output[second_index]
+                    if first is None or second is None:
+                        continue
+                    output[first_index], output[second_index] = coordinate_adjacent_spans(
+                        first,
+                        second,
+                        engine.project.default_continuity_option,
+                        engine,
+                    )
+                after = tuple(_result_layout_signature(output[index]) for index in indexes)
+                if after == before:
+                    break
+            else:
+                raise DetailingError("BEAM_LINE_COORDINATION_DID_NOT_CONVERGE")
+        except (DetailingError, ValueError) as exc:
+            status = f"BEAM_LINE_COORDINATION_BLOCKED: {exc}"
+            for index in indexes:
+                output[index] = None
+                errors[index] = status
+    return output, errors
+
+
+def _result_layout_signature(result: BeamDetailingResult | None) -> tuple[str, ...]:
+    if result is None:
+        return ()
+    return tuple(value for region in result.regions for value in (region.top.notation, region.bottom.notation))
 
 
 def write_rebar_payload(payload: Mapping[str, Any], path: str | Path) -> Path:

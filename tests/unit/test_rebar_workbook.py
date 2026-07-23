@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.geometry_extractor import BeamGeometry
@@ -194,6 +195,49 @@ def test_program_determined_pb_stays_blocked_after_offline_redetail() -> None:
     redetailed = redetail_payload(payload)
     assert redetailed["raw_rows"][0]["engine_status"] == "FRAME_TYPE_REVIEW_REQUIRED"
     assert redetailed["final_rows"][0]["engine_status"] == "FRAME_TYPE_REVIEW_REQUIRED"
+
+
+def test_payload_coordinates_adjacent_sb_support_reinforcement_by_beam_line() -> None:
+    beam_a = _beam("SB-1", (0, 0, 0), (6000, 0, 0))
+    beam_b = _beam("SB-2", (6000, 0, 0), (12000, 0, 0))
+    span_a = BeamSpan("F1", "SB", 1, 1, ("SB-1",), (beam_a.start, beam_a.end), False, False)
+    span_b = BeamSpan("F1", "SB", 1, 2, ("SB-2",), (beam_b.start, beam_b.end), False, False)
+    design_a = BeamDesignResult(
+        "F1-SB1-1",
+        (
+            _station(0.0, 1000.0, 1000.0),
+            _station(3000.0, 1000.0, 1000.0),
+            _station(6000.0, 1800.0, 1000.0),
+        ),
+    )
+    design_b = BeamDesignResult(
+        "F1-SB1-2",
+        (
+            _station(0.0, 1000.0, 1800.0),
+            _station(3000.0, 1000.0, 1000.0),
+            _station(6000.0, 1000.0, 1000.0),
+        ),
+    )
+    schedule = SpanScheduleMapping(
+        (
+            SpanScheduleRecord(span_a, beam_a, design_a),
+            SpanScheduleRecord(span_b, beam_b, design_b),
+        ),
+        {},
+        {},
+    )
+    payload = build_payload_from_schedule(
+        schedule,
+        [beam_a, beam_b],
+        section_loader=_section,
+        frame_types={"SB-1": "Non-Sway", "SB-2": "Non-Sway"},
+        metadata={"model": "sample.EDB", "units": "N_mm_C"},
+    )
+
+    first, second = payload["final_rows"]
+    assert first["engine_status"] == second["engine_status"] == "OK"
+    assert first["et2"] == second["et1"]
+    assert re.search(r"T(\d+)", first["eb2"]).group(1) == re.search(r"T(\d+)", second["eb1"]).group(1)
 
 
 def test_mixed_section_span_is_fail_closed() -> None:

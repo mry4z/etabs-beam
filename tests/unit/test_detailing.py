@@ -3,17 +3,24 @@ import sys
 from types import SimpleNamespace
 
 from src.design.detailing import (
+    BarSpec,
     BeamDetailingEngine,
     BeamDetailingInput,
     BeamDetailingProfile,
+    BeamDetailingResult,
     BeamRegionDemand,
     BeamSection,
     ContinuityOption,
     DetailingError,
+    FaceRebarDesign,
     FaceRebarMode,
+    LongitudinalDesign,
     ProjectDetailingPolicy,
+    RegionDetailing,
     ReinforcementMode,
+    StirrupDesign,
     coordinate_adjacent_spans,
+    coordinate_intraspan_result,
     resolve_detailing_profile,
 )
 from src.design.etabs_result import EtabsResultProvider
@@ -31,9 +38,64 @@ def _demand(name: str, top: float, bottom: float, av: float, at: float, al: floa
     return BeamRegionDemand(name, {"left": 0, "middle": 3000, "right": 6000}[name], top, bottom, av, at, al)
 
 
+def _manual_longitudinal(*groups: tuple[int, int, tuple[int, ...] | None]) -> LongitudinalDesign:
+    bars = []
+    for diameter, count, layers in groups:
+        area = 3.141592653589793 * diameter**2 / 4
+        bars.append(BarSpec(diameter, count, layers or (count,), area))
+    provided = sum(bar.total_area_mm2 for bar in bars)
+    return LongitudinalDesign(tuple(bars), provided, provided, max(len(bar.layers) for bar in bars), 25)
+
+
+def _manual_result(
+    profile: BeamDetailingProfile,
+    top: tuple[LongitudinalDesign, LongitudinalDesign, LongitudinalDesign],
+    bottom: tuple[LongitudinalDesign, LongitudinalDesign, LongitudinalDesign],
+    *,
+    width: float = 500,
+    legs: int = 4,
+) -> BeamDetailingResult:
+    section = BeamSection("MANUAL", width, 700, 40, 35, 420, 420, 20, 6000, profile)
+    regions = []
+    for index, name in enumerate(("left", "middle", "right")):
+        demand = _demand(name, top[index].required_area_mm2, bottom[index].required_area_mm2, 0.2, 0, 0)
+        stirrup = StirrupDesign(10, 150, legs, 1.0, 0.5, 150, "manual")
+        regions.append(
+            RegionDetailing(
+                name,
+                demand,
+                500,
+                top[index].required_area_mm2,
+                bottom[index].required_area_mm2,
+                stirrup,
+                top[index],
+                bottom[index],
+            )
+        )
+    return BeamDetailingResult(
+        "MANUAL",
+        "ACI 318-14",
+        "test",
+        "test",
+        profile,
+        section,
+        ReinforcementMode.NORMAL,
+        tuple(regions),
+        FaceRebarDesign(FaceRebarMode.NOT_APPLICABLE, None, 0, 0, "manual"),
+    )
+
+
 def test_project_policy_rejects_diameter_outside_full_catalog() -> None:
     with pytest.raises(DetailingError):
         ProjectDetailingPolicy(enabled_diameters_mm=(10, 13))
+
+
+def test_main_bar_selection_never_uses_diameter_below_t16() -> None:
+    policy = ProjectDetailingPolicy(
+        preferred_longitudinal_diameters_mm=(16,),
+    )
+    assert policy.ordered_longitudinal_diameters() == (25, 20, 16)
+    assert all(value >= 16 for value in policy.ordered_longitudinal_diameters())
 
 
 def test_profile_resolver_never_promotes_sb_to_chapter_18() -> None:
@@ -182,6 +244,141 @@ def test_sb_uses_two_flexural_bars_and_parenthesized_t12_hangers_for_four_legs()
     assert result.regions[0].top.hanger_bars.role == "hanger"
 
 
+def test_sb_asmin_control_can_count_unparenthesized_t12_hanger_area() -> None:
+    policy = ProjectDetailingPolicy(
+        enabled_diameters_mm=(10, 12, 16, 20, 25),
+        preferred_longitudinal_diameters_mm=(16,),
+    )
+    section = BeamSection(
+        "SB-ASMIN-CREDIT",
+        300,
+        500,
+        40,
+        35,
+        420,
+        420,
+        20,
+        6000,
+        BeamDetailingProfile.SB_ORDINARY_NO_CH18,
+    )
+    demands = tuple(
+        BeamRegionDemand(
+            region,
+            {"left": 0, "middle": 3000, "right": 6000}[region],
+            500,
+            500,
+            0.20,
+            0,
+            0,
+            as_flex_top_override_mm2=300,
+            as_flex_bottom_override_mm2=300,
+        )
+        for region in ("left", "middle", "right")
+    )
+    result = BeamDetailingEngine(project_policy=policy).design(BeamDetailingInput(section, demands))
+    assert result.regions[1].top.notation == "2T16+1T12"
+    assert result.regions[1].top.provided_area_mm2 == pytest.approx(515.2212)
+    assert result.regions[1].top.bars[1].role == "minimum_credit_hanger"
+
+
+def test_300_wide_beam_prefers_valid_two_leg_stirrup_candidate() -> None:
+    section = BeamSection(
+        "SB-300-TWO-LEG",
+        300,
+        700,
+        40,
+        35,
+        420,
+        420,
+        20,
+        6000,
+        BeamDetailingProfile.SB_ORDINARY_NO_CH18,
+    )
+    demands = tuple(_demand(region, 1000, 1000, 1.0, 0, 0) for region in ("left", "middle", "right"))
+    result = BeamDetailingEngine().design(BeamDetailingInput(section, demands))
+    assert result.regions[0].stirrup.notation == "T12@200"
+    assert result.regions[0].stirrup.legs == 2
+
+
+@pytest.mark.parametrize(
+    ("top", "expected_middle"),
+    [
+        (
+            (
+                _manual_longitudinal((20, 4, None)),
+                _manual_longitudinal((16, 4, None)),
+                _manual_longitudinal((25, 5, None)),
+            ),
+            "2T20+2T25",
+        ),
+        (
+            (
+                _manual_longitudinal((25, 6, (4, 2))),
+                _manual_longitudinal((16, 6, None)),
+                _manual_longitudinal((25, 6, (4, 2))),
+            ),
+            "4T25",
+        ),
+        (
+            (
+                _manual_longitudinal((25, 9, (5, 4))),
+                _manual_longitudinal((20, 6, None)),
+                _manual_longitudinal((25, 9, (5, 4))),
+            ),
+            "4T25",
+        ),
+    ],
+)
+def test_pb_top_allows_only_one_diameter_transition(top, expected_middle) -> None:
+    bottom = tuple(_manual_longitudinal((16, 4, None)) for _ in range(3))
+    result = _manual_result(BeamDetailingProfile.PB_OMF, top, bottom)
+    coordinated = coordinate_intraspan_result(result)
+    assert coordinated.regions[1].top.notation == expected_middle
+
+
+def test_pb_bottom_middle_does_not_reduce_from_support_layout() -> None:
+    top = tuple(_manual_longitudinal((20, 4, None)) for _ in range(3))
+    bottom = (
+        _manual_longitudinal((20, 8, (5, 3))),
+        _manual_longitudinal((16, 8, (5, 3))),
+        _manual_longitudinal((20, 8, (5, 3))),
+    )
+    result = _manual_result(BeamDetailingProfile.PB_OMF, top, bottom)
+    coordinated = coordinate_intraspan_result(result)
+    assert coordinated.regions[0].bottom.notation == "8T20 5/3"
+    assert coordinated.regions[1].bottom.notation == "8T20 5/3"
+    assert coordinated.regions[2].bottom.notation == "8T20 5/3"
+
+
+def test_sb_bottom_uses_one_through_diameter_and_area_based_middle_supplement() -> None:
+    top = (
+        _manual_longitudinal((16, 4, None)),
+        _manual_longitudinal((16, 2, None), (12, 1, None)),
+        _manual_longitudinal((25, 4, (2, 2))),
+    )
+    bottom = (
+        _manual_longitudinal((20, 2, None)),
+        _manual_longitudinal((25, 2, None)),
+        _manual_longitudinal((16, 2, None)),
+    )
+    result = _manual_result(
+        BeamDetailingProfile.SB_ORDINARY_NO_CH18,
+        top,
+        bottom,
+        width=300,
+        legs=2,
+    )
+    coordinated = coordinate_intraspan_result(result)
+    assert coordinated.regions[0].bottom.notation == "2T20"
+    assert coordinated.regions[1].bottom.notation == "2T20+1T25"
+    assert coordinated.regions[2].bottom.notation == "2T20"
+    assert tuple(region.top.notation for region in coordinated.regions) == (
+        "4T16",
+        "2T16+1T12",
+        "4T25 2/2",
+    )
+
+
 def test_adjacent_span_option_coordinates_shared_support_only() -> None:
     first = BeamDetailingEngine().design(
         _input(
@@ -212,7 +409,40 @@ def test_adjacent_span_option_coordinates_shared_support_only() -> None:
     assert first_out.regions[1].top.bars[0].count == first.regions[1].top.bars[0].count
 
 
-def test_sb_adjacent_spans_equalize_top_but_leave_bottom_independent() -> None:
+def test_pb_adjacent_bottom_diameter_propagates_from_support_into_next_span() -> None:
+    top = tuple(_manual_longitudinal((20, 4, None)) for _ in range(3))
+    first = _manual_result(
+        BeamDetailingProfile.PB_OMF,
+        top,
+        tuple(_manual_longitudinal((20, 4, None)) for _ in range(3)),
+        width=300,
+        legs=4,
+    )
+    second = _manual_result(
+        BeamDetailingProfile.PB_OMF,
+        top,
+        (
+            _manual_longitudinal((16, 8, (5, 3))),
+            _manual_longitudinal((16, 8, (5, 3))),
+            _manual_longitudinal((16, 4, None)),
+        ),
+        width=300,
+        legs=4,
+    )
+
+    first_out, second_out = coordinate_adjacent_spans(
+        first,
+        second,
+        ContinuityOption.OPTION_1_STRICT_EQUAL,
+    )
+
+    assert first_out.regions[2].bottom.notation == "6T20 4/2"
+    assert second_out.regions[0].bottom.notation == "6T20 4/2"
+    assert second_out.regions[1].bottom.notation == "6T20 4/2"
+    assert second_out.regions[2].bottom.notation == "4T20"
+
+
+def test_sb_adjacent_spans_equalize_top_and_bottom_base_diameter() -> None:
     engine = BeamDetailingEngine()
 
     def sb_result(name: str, right_top: float, right_bottom: float, left_top: float, left_bottom: float):
@@ -241,12 +471,11 @@ def test_sb_adjacent_spans_equalize_top_but_leave_bottom_independent() -> None:
 
     first = sb_result("SB-1", 1800, 1000, 1000, 1000)
     second = sb_result("SB-2", 1000, 1000, 1000, 1800)
-    original_first_bottom = first.regions[2].bottom.notation
-    original_second_bottom = second.regions[0].bottom.notation
     first_out, second_out = coordinate_adjacent_spans(first, second, ContinuityOption.OPTION_1_STRICT_EQUAL)
     assert first_out.regions[2].top.notation == second_out.regions[0].top.notation
-    assert first_out.regions[2].bottom.notation == original_first_bottom
-    assert second_out.regions[0].bottom.notation == original_second_bottom
+    assert first_out.regions[2].bottom.bars[0].diameter_mm == second_out.regions[0].bottom.bars[0].diameter_mm
+    assert first_out.regions[2].bottom.provided_area_mm2 >= first_out.regions[2].bottom.required_area_mm2
+    assert second_out.regions[0].bottom.provided_area_mm2 >= second_out.regions[0].bottom.required_area_mm2
 
 
 def test_etabs23_total_result_adapter_preserves_total_min_and_provided(monkeypatch) -> None:

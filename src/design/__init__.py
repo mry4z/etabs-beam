@@ -22,6 +22,7 @@ from src.design.detailing import (
     ProjectDetailingPolicy,
     ReinforcementMode,
     coordinate_adjacent_spans,
+    coordinate_intraspan_result,
     resolve_detailing_profile,
 )
 
@@ -42,6 +43,7 @@ __all__ = [
     "ReinforcementMode",
     "calculate_single_layer_max_bars",
     "coordinate_adjacent_spans",
+    "coordinate_intraspan_result",
     "minimum_clear_bar_spacing_mm",
     "single_layer_max_bars",
     "resolve_detailing_profile",

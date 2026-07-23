@@ -262,19 +262,23 @@ Object `302` 在本次新拓扑 CSV 中只贡献 `T1-F1-PB9-3`；跨 Span Object
 
 - [x] 建立 ACI 318-14 单排纵筋最大根数的 720 组合字典，并让配筋引擎统一调用；键使用工程尺寸，保护层明确为混凝土表面至箍筋外缘，非标准组合按同一公式后备计算。720 项逐项公式对照、窄梁边界和引擎接入测试均通过。
 - [x] 固定配筋类别边界并形成 `docs/ORDINARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md`：SB 永久采用普通梁且不使用 Chapter 18；显式 `Sway Special` PB 使用 SMF，其余已解析 PB 保留现有项目规则并按 OMF profile 执行。
-- [x] 重构设计 profile 解析：`beam_type=SB` 强制进入 `SB_ORDINARY_NO_CH18`；PB 分为 `PB_OMF`、`PB_SMF`、`PB_REVIEW_REQUIRED`，中间 payload schema 升至 `1.1` 并保留 `detailing_profile/profile_source/frame_type`；`Program Determined`、未知或混合 PB 继续 fail-closed，旧 payload 可由 `beam_type/is_smf` 兼容重算。
+- [x] 重构设计 profile 解析：`beam_type=SB` 强制进入 `SB_ORDINARY_NO_CH18`；PB 分为 `PB_OMF`、`PB_SMF`、`PB_REVIEW_REQUIRED`，中间 payload schema 已随纵筋协调字段/规则升至 `1.2` 并保留 `detailing_profile/profile_source/frame_type`；`Program Determined`、未知或混合 PB 继续 fail-closed，旧 payload 可由 `beam_type/is_smf` 兼容重算。
 - [ ] 对照项目持有的 ACI 318-14 授权正文，将 `PB_OMF` 的 Chapter 18 OMF 条文逐项实现为可追溯校核；当前已完成 profile 路由、顶底最少筋和现有 PB 项目构造策略，但不得据此声称 OMF 全条文闭环。
 - [ ] 修正普通梁剪扭间距：低剪、 高剪和抗扭条件分别启用 `d/2`、`d/4`、`ph/8` 限值；显式消费可追溯的最小 `Av/s` 和剪力 regime，缺输入时 fail-closed。
-- [x] 落实 SB/PB 构造策略边界：两类梁共用“两排后整跨转 face”、`h>=800` T10@250 和全跨最大 Legs；SB 顶、底受弯筋各至少 2 根，箍筋固定点不足时输出 `(nT12)` 架立筋且不计入受弯实配面积；SB 相邻跨只统一公共支座上筋，下筋独立。
+- [x] 落实 SB/PB 构造策略边界：两类梁共用“两排后整跨转 face”、`h>=800` T10@250 和全跨最大 Legs；SB 顶、底受弯筋各至少 2 根，箍筋固定点不足时输出 `(nT12)` 架立筋且不计入受弯实配面积；SB 公共支座上筋方案完全相同，下筋采用相同基准直径但根数可不同。
+- [x] 落实纵筋直径/搭接基线：受弯主筋自动候选不小于 T16；T12 仅作架立筋，`(nT12)` 不计面积，AsMin 控制时 `+nT12` 计入实配面积；PB 上筋一跨最多一次直径转换，SB 上筋可两次变化；PB/SB 下筋采用通长基准直径且跨中不减。
+- [x] 将基础纵筋协调正式接入 payload/Excel：按 Beam Line 和跨号迭代公共支座至稳定；PB/SB 上筋匹配，PB 下筋按共同方案协调，SB 下筋同直径但根数可不同；不收敛或无法排布时整条 Beam Line fail-closed。
 
-**P1-1 增量验证（2026-07-22）**：profile 路由、SB 括号 T12 架立筋、SB 支座仅协调上筋、旧 payload 兼容重算和 Review Required 离线重算阻断均已加入回归测试；全量 pytest 为 150 passed、1 skipped，覆盖率 78.45%，Flake8、Black、工作簿生成器 JavaScript 语法及 `git diff --check` 均通过。
+**P1-1 增量验证（2026-07-22）**：profile 路由、SB 括号 T12 架立筋、旧 payload 兼容重算和 Review Required 离线重算阻断均已加入回归测试；全量 pytest 为 150 passed、1 skipped，覆盖率 78.45%，Flake8、Black、工作簿生成器 JavaScript 语法及 `git diff --check` 均通过。后续 2026-07-23 纵筋协调增量验证见本节新增任务后的质量记录。
+
+**纵筋搭接协调增量验证（2026-07-23）**：PB 顶筋单跨一次转换、PB/SB 下筋跨中不减、相邻跨支座直径/根数协调、窄梁 2-leg 优选、T16 主筋下限及 T12 两种面积语义均已进入回归测试；特别覆盖公共支座由 T16 调整为 `6T20 4/2` 后向下一跨中部传播。全量 pytest 为 160 passed、1 skipped，覆盖率 79.01%；Black、Flake8、工作区 Node.js 的工作簿脚本语法检查及 `git diff --check` 均通过。
 - [ ] 明确区分 ETABS `GetRebarBeam` 的纵筋设计 cover 与施工构造使用的箍筋外缘净保护层，不共用含义不清的单一 `cover_mm`。
 - [ ] 复核旧结果中 147 个 `B 200X400`、`NO_ALLOWED_SPACING` 梁跨；确认净保护层后，明确采用 75 mm 间距、调整截面/保护层或人工 override 的项目策略。
 - [ ] 新拓扑重放后确认旧 5 个 127 mm 假碎跨和 `NO_RESULTS` 是否归零。
 - [ ] 36 个混合截面 Span 必须 fail-closed、拆分或采用经确认的控制截面，禁止静默使用首截面。（正式负载适配器已 fail-closed；尚需最新模型重跑和逐 Span 人工决定。）
 - [ ] 57 个 `Program Determined` 和 7 个混合 Frame Type 必须解析或要求项目显式指定，禁止默认按非 SMF。
 - [ ] SB 若源 ETABS Frame Type 为 `Sway Ordinary/Intermediate/Special`，程序虽强制使用 `SB_ORDINARY_NO_CH18` 构造 profile，但 ETABS 原始 `Av/s` 等需求仍可能已包含 Sway/Chapter 18 设计影响；当前输出 `SB_ETABS_SWAY_DESIGN_RESULT_REVIEW`，后续需通过设计 overwrite/普通梁重设计取得严格的普通梁需求，不能假定 profile 路由能够反算并去除 capacity shear。
-- [ ] PB 相邻跨 option 1/2 必须在整根 Beam Line 上联合协调，并覆盖混合直径、分层、对称和迭代稳定性；SB 已完成“公共支座上筋相同、下筋独立”的局部纯函数和回归测试，仍需接入整线迭代工作流。
+- [ ] 完成 PB `OPTION_2_COUNT_ADJUSTMENT` 的独立算法：当前 Beam Line 迭代和 `OPTION_1` 共同方案已接入，但 option 2 仍与严格相同方案共用局部内核；需实现“共同直径/位置/排列基线 + 较大侧仅增根数”，并覆盖混合直径、分层、对称和真实模型迭代稳定性。
 - [ ] SMF 箍筋间距使用最终实配纵筋直径复核，而不是预设最大启用直径。
 - [ ] Excel 公式继续校核面积，并增加直径、分层根数和、末排至少两根、箍筋间距和 legs 合法性。
 - [ ] `FLEXURAL_DEMAND_BELOW_AS_MIN` 按已确认的 AsFlex/AsTotal 工程策略降为有意义的说明，避免形成大量无效警告。

@@ -118,6 +118,8 @@ const metadataText =
   `｜Profile 来源：${m.detailing_profile_source ?? m.is_smf_source ?? "未记录"}` +
   `｜骨料：${m.aggregate_mm} mm（项目默认）` +
   `｜多排纵筋每排≥${m.minimum_bars_per_layer ?? 2}根` +
+  `｜受弯主筋≥T${m.minimum_main_diameter_mm ?? 16}` +
+  `｜架立筋T${m.hanger_diameter_mm ?? 12}` +
   `｜保护层来源：${m.cover_source ?? "未记录"}`;
 
 const rawColumns = [
