@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Any, Mapping
@@ -18,8 +19,8 @@ ALGORITHM_VERSIONS = {
     "topology": "2026.07.22-p01",
     "numbering": "2026.07.22-no-span-s",
     "writeback": "1.0",
-    "detailing": "aci318-14-project-policy-1.0",
-    "rebar_workbook_payload": "1.0",
+    "detailing": "aci318-14-si-errata+project-2026-07",
+    "rebar_workbook_payload": "2.0",
 }
 
 
@@ -98,11 +99,42 @@ def git_state(root: str | Path = PROJECT_ROOT) -> dict[str, Any]:
     commit = command("rev-parse", "HEAD").decode("utf-8", "replace").strip() or None
     status = command("status", "--porcelain=v1")
     diff = command("diff", "--binary", "HEAD")
+    untracked_names = tuple(
+        os.fsdecode(raw_name)
+        for raw_name in command("ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
+        if raw_name
+    )
+    content_digest = hashlib.sha256()
+    content_digest.update(b"TRACKED-DIFF\0")
+    content_digest.update(diff)
+    untracked_files: list[dict[str, Any]] = []
+    for relative_name in sorted(untracked_names):
+        target = directory / relative_name
+        if not target.is_file():
+            continue
+        size = target.stat().st_size
+        file_hash = sha256_file(target)
+        normalized_name = Path(relative_name).as_posix()
+        content_digest.update(
+            f"\0UNTRACKED\0{normalized_name}\0{size}\0{file_hash}".encode(
+                "utf-8",
+                "surrogateescape",
+            )
+        )
+        untracked_files.append(
+            {
+                "path": normalized_name,
+                "size_bytes": size,
+                "sha256": file_hash,
+            }
+        )
     return {
         "commit": commit,
         "dirty": bool(status.strip()),
         "status_sha256": hashlib.sha256(status).hexdigest(),
-        "content_sha256": hashlib.sha256(diff).hexdigest(),
+        "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "content_sha256": content_digest.hexdigest(),
+        "untracked_files": untracked_files,
     }
 
 
@@ -164,6 +196,7 @@ class RunManifest:
         environment = summary_data.get("environment", {})
         identity = {
             "model_input_sha256": input_sha,
+            "snapshot_input_sha256": _optional_file_hash(self.arguments.get("snapshot_input")),
             "selection": self.arguments.get("selection"),
             "confirmed_multi_section_spans_sha256": _optional_file_hash(
                 self.arguments.get("confirmed_multi_section_spans")
@@ -197,6 +230,7 @@ class RunManifest:
                 "input_sha256": input_sha,
             },
             "environment": environment,
+            "data_source": summary_data.get("data_source"),
             "git": self.git,
             "algorithms": ALGORITHM_VERSIONS,
             "configuration": self.config,

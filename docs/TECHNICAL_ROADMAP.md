@@ -1,200 +1,25 @@
-# ETABS Beam Generator 技术路线图
+---
+id: LEGACY-TECHNICAL-ROADMAP
+type: archive
+status: superseded
+owner: project
+created: 2026-07-10
+updated: 2026-07-25
+related:
+  - IP-DOCS-001
+supersedes: []
+superseded_by: delivery/ROADMAP.md
+---
 
-> 更新基线：2026-07-22
->
-> 当前阶段：P0 已关闭；进入 P1 配筋工程闭环、稳定编号和 CAD 中间数据
->
-> 当前主环境：ETABS 22.7.0 / 23.3.1、Python 3.11、公开 `ETABSv1` OAPI、ACI 318-14
+# 文档已迁移
 
-## 1. 项目目标与当前边界
+本路径原先混合产品目标、架构、历史进度和任务，现已停止维护且不是权威来源。
 
-项目目标是把 ETABS 混凝土梁从模型读取、结构语义识别、编号、设计结果整理、工程配筋到 CAD/Excel 交付串成可审计的工作流。核心关系必须始终一致：
+权威 successor：
 
-```text
-ETABS Frame Object/GUID
-        ↓
-Beam Line（同一根结构梁）
-        ↓
-Span（按真实支承划分的结构跨）
-        ↓
-模型 Unique Name / DXF 文字 / Excel 梁号
-        ↓
-ETABS I→J = 图纸文字方向 = 梁表左→右
-```
+- [Roadmap](delivery/ROADMAP.md)
+- [产品范围规范](specs/SPEC-001_PRODUCT_SCOPE.md)
+- [系统架构](architecture/ARCH-001_SYSTEM_ARCHITECTURE.md)
+- [P1 里程碑规范](specs/milestones/MS-P1-001_REBAR_ENGINEERING_CLOSURE.md)
 
-当前已经打通只读提取、Beam Line/Span、DXF、模型副本写回、ETABS 设计结果、ACI 318-14 配筋原型和三表 Excel。项目尚未达到“无人工复核即可修改生产模型”的交付状态；拓扑冻结、事务强化和配筋引擎生产化仍是正式交付前的门禁。
-
-## 2. 已验证的技术基线
-
-| 项目 | 当前结论 |
-|---|---|
-| ETABS | 正式支持 22.7.0 / 23.3.1；DLL 必须取自对应宿主安装目录，禁止跨主版本加载 |
-| API 绑定 | Python 通过 pythonnet 加载公开 `ETABSv1` OAPI；不调用 ETABS 内部程序集 |
-| 连接方式 | 当前正式连接器附着到已运行实例；操作前必须同时核对进程 ID 和 `GetModelFilename()` |
-| 权限 | ETABS 与 Python 进程必须具有相同权限级别；最终 ETABS 内加载插件可消除跨进程权限不一致问题 |
-| 单位 | 读取前记录显示单位，临时切换为 `N_mm_C`，结束后恢复原单位 |
-| 设计规范 | 当前配筋主路径为 ACI 318-14；规范版本和钢筋直径候选保留策略接口 |
-| 数据身份 | GUID 是稳定身份；Unique Name 是可变交付名称，不能作为内部永久主键 |
-| 修改原则 | 只在模型副本执行；方向整理与编号改名是两个独立、显式事务 |
-
-## 3. 当前架构
-
-```text
-src/core
-  etabs_connector        连接、单位上下文
-  geometry_extractor     几何、截面、混凝土梁/柱支承筛选
-  beam_line_span_analyzer
-                         Beam Line、PB/SB、Span、悬挑、弧形梁
-  model_writeback        工作副本、I/J 计划、两阶段改名、写后验证
-
-src/design
-  etabs_result           ETABS 设计站点与剪扭纵筋结果
-  key_positions          左 2D / 跨中 / 右 2D
-  detailing              ACI 318-14 工程配筋与排布策略
-
-src/drawing              DXF、CSV 和源 Object/坐标映射
-src/excel_export.py      正式只读 CLI 的标准梁表
-src/excel_span_adapter.py
-                         Span 数据到既有 Excel 的稳定适配边界
-build/output/reports     当前模型专用的端到端验证脚本（尚非正式 CLI）
-```
-
-设计原则是“上游可替换、下游少改动”：编号规则、分跨算法和设计提供者通过稳定数据对象进入 DXF/Excel；导出模块不直接重新推导结构拓扑。
-
-## 4. 阶段进度
-
-### 阶段 0 — 项目与验证基线：基础完成
-
-- Git、`src/`、`tests/`、`docs/` 和输出目录已经建立。
-- 单元测试覆盖几何、分跨、设计站点、配筋、DXF、Excel 和写回计划。
-- 依赖和配置契约已收敛：`openpyxl` 使用受支持的 `<4` 版本范围，主路径统一为 Python 3.11、ETABS 22/23 和 ACI 318-14；当前配置加载器会拒绝其他配筋规范。
-- 仍需清理未跟踪的大体积检查文件、Flake8 问题和输出目录策略。
-
-### 阶段 1 — ETABS 连接与安全单位上下文：基础完成
-
-- 可附着已运行 ETABS，读取实际模型路径、显示单位和锁定状态。
-- 可在 `try/finally` 语义下临时切换 `N_mm_C` 并恢复原始单位。
-- 已确认普通终端无法附着提升权限 ETABS 属于 Windows 权限边界，而不是 OAPI 数据错误。
-- 待生产化：插件内多实例/PID 选择接口及 ETABS 22/23 错误信息和连接诊断报告。
-
-### 阶段 2 — 几何、材料与设计对象筛选：基础完成
-
-- 已读取楼层、端点、三维坐标、截面、材料、GUID 和 Frame 设计方向。
-- 仅混凝土设计梁进入梁表；`None` 截面、非混凝土梁和截面名含 `rigid` 的辅助杆件被排除。
-- 待加强：把 `rigid` 柱端刚域的支承语义传递到真实梁端，而不只是排除该杆件。
-
-### 阶段 3 — Beam Line / Span 拓扑：基础完成，尚未冻结
-
-已经实现：
-
-- 同楼层、端点相接且局部切线转角不超过 15° 的梁段组成候选路径；截面变化不作为 Beam Line 编号边界；
-- 主梁 PB、次梁 SB、悬挑跨和弧形主梁识别；
-- PB 按柱支承分跨，SB 按 PB 支承分跨，SB-SB 相交不增加跨数；
-- 一根结构梁内部多个 ETABS Object 的源映射；
-- 楼层间并行分析。
-
-2026-07-18 已修复 Object `302` 被错误同时划入 `T1-F1-PB9-3/4` 的问题。最新只读重算为 3010 跨，仍有 24 个 `REQUIRES_SPLIT` Object 需要逐项核查，因此这一阶段尚不能宣告规则冻结。
-
-### 阶段 4 — ETABS 设计结果与关键位置：基础完成
-
-- 可读取 `GetSummaryResultsBeam_2` 的组合、Station、受弯纵筋、`VMajorArea`、`TTArea`、`TLArea` 和 provided area。
-- 已确认：`VMajorArea=Av/s`，`TTArea=At/s`（单腿抗扭箍筋），`TLArea=Al`（总抗扭纵筋）。
-- 左、右区域取两端 `2D` 范围；无直接 Station 时取最近 Station；跨中取中部控制值。
-- 当前纵筋拆分采用 `AsFlex = AsTotal - Al/2`，并保留实配面积供性能计算和后续非线性扩展。
-
-### 阶段 5 — DXF、映射数据与 Excel：基础完成
-
-- 可按楼层导出完整结构跨 DXF：PB 黄色、SB 绿色，一跨一条多段线，文字位于跨中。
-- 可输出 CSV/源 Object/坐标映射，作为 CAD 中间数据雏形。
-- 正式只读 CLI 可输出标准梁表、设计站点、梁分跨、说明和异常记录。
-- 已生成“原始分跨数据、配筋调整复核、整理后的梁表”三表 Excel 验证件；其构建脚本仍位于 `build/`，尚未迁入正式 CLI。
-
-### 阶段 6 — 模型副本写回原型：基础完成
-
-- 已实现 `plan_orientation()`、`plan_rename()`、显式 `apply_*()` 和写后验证。
-- I/J 反向使用 `EditFrame.ChangeConnectivity`；Unique Name 使用“旧名→临时唯一名→最终名”两阶段改名。
-- 最终对象名采用 `楼层-PB/SB梁号-跨号.段号`，例如 `F1-PB5-3.1`。
-- 已在 ETABS 23 模型副本验证批量方向整理、编号写回、保存、重新分析和混凝土设计。
-- 当前原型允许验证脚本过滤阻塞项后部分写回；正式事务必须改为默认 fail-closed。
-
-## 5. 后续阶段与 TODO
-
-### 阶段 7 — 拓扑冻结（P0-1 自动门禁已完成）
-
-目标：冻结 Beam Line/Span 和编号规则，使同一输入模型在不同导出通道获得完全一致的结果。
-
-1. 已实现 `rigid` 刚域支承传递和批量三维坐标读取：刚域一端为柱、另一端为真实梁时，将柱支承投影到真实梁端。
-2. 已完成梁交点 Z 高程校验、Frame Object 内部柱支承和按楼层 Z 包络过滤。
-3. 已按模型版本输出 `REQUIRES_SPLIT` JSON/CSV/DXF；v6.4.1 为 24 个，当前 v6.4.3 为 29 个。
-4. 已生成当前 3,020 跨完整 DXF，并把 Object 302、PB17、连续 SB、悬挑、弧形和 SB—SB 相交固化为回归；最终图形验收由用户在该成果上确认。
-5. 建立统一编号策略接口；DXF、Excel、JSON 和写回只能消费同一编号结果，不能各自删改 `S`。
-6. 建立 GUID + 空间指纹的编号稳定映射，控制新增梁导致的编号整体漂移。
-7. 两轮人工拓扑 override 的 GUID 数据契约、开链排序、I→J 和支承冲突二级确认已实现；ETABS 内选择、局部重排预览和第二次写回 UI 留在阶段 10 插件。
-
-**自动退出条件结果（2026-07-21）**：源 Object 覆盖 4,110/4,110，PB/SB 内部支承门禁通过，15°/角色收敛 BLOCKED 为 0，默认测试及 Flake8 通过；当前 DXF 已交付图形复核。真实跨 Span Object 继续以明确 `REQUIRES_SPLIT` 状态存在，不等同于未解释拓扑错误。
-
-### 阶段 8 — 正式写回事务（P0）
-
-目标：把模型专用验证脚本收敛为可审计、可拒绝危险输入的正式命令。
-
-1. 将准备副本、分析设计、写回、验证和成果导出迁入 `src/` 编排层。
-2. 固定流程：原模型哈希→工作副本→自动拓扑/编号→第一次方向/改名事务→验证→人工 Line/Span Group 确认→局部重编号差异预览→第二次方向/改名事务→验证→分析设计→成果比较。
-3. 默认只要存在 `BLOCKED/REQUIRES_SPLIT` 就拒绝执行；仅显式 `allow_partial_writeback` 才允许部分写回，并在成果首页标红。
-4. 写前/写后比较 GUID、数量、连接、截面、荷载、释放、端部偏移、组、铰、弹簧、设计覆盖项和变换矩阵。
-5. [已完成] 生成 manifest：原模型/副本 SHA-256、ETABS/API 版本、PID、规范、单位、Git 状态、算法版本、动作统计、异常统计和交付文件哈希；通过确定性 input fingerprint 管理 `CURRENT/SUPERSEDED/INVALID`。
-6. 失败时回滚已执行动作；禁止覆盖原始 EDB 和既有工作副本。
-
-**退出条件**：同一正式命令可在副本上重复执行并得到可追溯、通过写后校验的成果包。
-
-### 阶段 9 — 配筋引擎生产化（P1）
-
-目标：把已验证的 ACI 318-14 工程策略转成稳定、可配置、可人工调整复核的梁表流程。
-
-1. 分离 ETABS 纵筋保护层与箍筋外缘净保护层；复核 147 个 `B 200X400` 的 `NO_ALLOWED_SPACING`。
-2. 修复或排除假碎跨；分跨重算后重新核对无设计结果记录。
-3. 完成相邻跨配筋协调：option 1 两侧根数一致；option 2 直径连续、仅以根数增减吸收差异。
-4. 延续既定工程策略：先确定箍筋 legs，再约束纵筋最少可固定根数；第二排不得只有 1 根；超过两排时把抗扭需求转移到 face bar，但受弯筋仍可进入第三排。
-5. 任一左/中/右位置触发 face 模式后整跨统一；梁高 `<800 mm` 且未触发抗扭 face 模式时输出 `N.A.`。
-6. 混合截面、`Program Determined` 抗震类型和混合 Frame Type 必须 fail-closed，禁止静默采用首截面或默认非 SMF。
-7. 钢筋候选、优先直径、规范版本和配筋协调 option 全部进入配置接口。
-8. 将三表 Excel 构建器迁入正式导出模块，保留配筋文本→实配面积公式，仅用于与计算需求对比复核。
-
-**退出条件**：异常跨都有可解释状态；相邻跨连续性和 Excel 公式通过自动测试与工程抽查。
-
-### 阶段 10 — CAD、SQLite 与 ETABS 插件（P2）
-
-1. 定义版本化 CAD JSON：楼层、Beam Line、Span、GUID、源 Object、路径、文字插入点、I→J 方向和样式。
-2. CAD 插件按梁中点放置编号，并把文字中下插入点吸附到文字上方一侧梁线；禁止为“可读性”擅自反转 180°，文字方向必须严格跟随 I→J。
-3. 使用公开 OAPI 批量表读取建立本地 SQLite 只读快照；ETABS 未来公开原生 SQLite OAPI 后，通过数据源接口替换实现。
-4. 最终插件在 ETABS 进程内加载，提供模型/PID确认、预览、事务执行、验证和成果导出界面。
-
-## 6. 成果有效性和版本失效规则
-
-任何影响支承、PB/SB、分跨、编号、方向或设计区域的算法改动，都必须使旧成果自动失效。成果 manifest 至少比较：
-
-- 源 EDB SHA-256；
-- 拓扑/编号/配筋算法版本或 Git commit；
-- ETABS 主版本、设计规范和显示单位；
-- Beam Line、Span、阻塞对象和排除对象数量；
-- 写回动作以及 DXF/Excel/JSON 文件哈希。
-
-当前以下成果只能用于历史追溯，不能作为最终验收件：
-
-- v6.4.1 基于旧算法的 3070 跨 EDB、DXF 和 Excel；
-- v6.4.3 基于旧算法的 3074 跨配筋成果。
-
-2026-07-21 当前 v6.4.3 只读拓扑基线为 3,020 跨、29 个 `REQUIRES_SPLIT`、拓扑 BLOCKED=0，成果位于 `build/output/topology_p01_20260721_final3/`。该 EDB 与旧 v6.4.3 验证副本哈希不同，统计只能在同一模型哈希和算法版本内比较。
-
-## 7. 当前执行顺序
-
-```text
-当前 DXF 用户图形复核
-    → P0-2 配筋三表迁入正式 CLI（已完成）
-    → P0-3 manifest 与失效注册表（已完成）
-    → P0-4 写回事务全属性验证
-    → 从原始模型重新生成全链路成果
-    → 配筋异常与相邻跨协调收尾
-    → CAD JSON / SQLite / ETABS 插件
-```
-
-任务状态和逐项验收证据以项目根目录的 `PROJECT_COMPLETION_CHECKLIST.md` 为唯一执行清单；本路线图负责阶段目标、依赖关系和退出门禁。
+原文已保存在[迁移前 ZIP](../backups/documentation/2026-07-25-pre-governance.zip)，文件清单及哈希见[备份清单](../backups/documentation/2026-07-25-pre-governance-manifest.json)。处置依据见[迁移指导](governance/DOCUMENT_MIGRATION_GUIDE.md)。

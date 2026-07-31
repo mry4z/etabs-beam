@@ -43,28 +43,39 @@ function colLetter(index) {
   return value;
 }
 
+function colIndex(label) {
+  return [...label].reduce(
+    (value, character) => value * 26 + character.charCodeAt(0) - 64,
+    0,
+  ) - 1;
+}
+
 function styleTitle(sheet, endCol, title, subtitle, metadata) {
-  sheet.mergeCells(`A1:${endCol}1`);
+  // Very wide audit sheets can render a merge that extends far beyond the
+  // preview as an empty partial range. Keep the title panel compact and
+  // readable while the data table remains full width.
+  const titleEnd = colLetter(Math.min(colIndex(endCol), colIndex("R")));
+  sheet.mergeCells(`A1:${titleEnd}1`);
   sheet.getRange("A1").values = [[title]];
-  sheet.getRange(`A1:${endCol}1`).format = {
+  sheet.getRange(`A1:${titleEnd}1`).format = {
     fill: colors.navy,
     font: { bold: true, color: colors.white, size: 16 },
     horizontalAlignment: "left",
     verticalAlignment: "center",
   };
   sheet.getRange("A1").format.rowHeight = 28;
-  sheet.mergeCells(`A2:${endCol}2`);
+  sheet.mergeCells(`A2:${titleEnd}2`);
   sheet.getRange("A2").values = [[subtitle]];
-  sheet.getRange(`A2:${endCol}2`).format = {
+  sheet.getRange(`A2:${titleEnd}2`).format = {
     fill: colors.lightBlue,
     font: { color: colors.navy, size: 10 },
     wrapText: true,
     verticalAlignment: "center",
   };
   sheet.getRange("A2").format.rowHeight = 32;
-  sheet.mergeCells(`A3:${endCol}3`);
+  sheet.mergeCells(`A3:${titleEnd}3`);
   sheet.getRange("A3").values = [[metadata]];
-  sheet.getRange(`A3:${endCol}3`).format = {
+  sheet.getRange(`A3:${titleEnd}3`).format = {
     fill: colors.gray,
     font: { color: "#595959", size: 9 },
     wrapText: true,
@@ -112,26 +123,40 @@ function addStatusFormats(range) {
 }
 
 const m = payload.metadata;
+const coverText =
+  m.cover_calculation_basis === "ETABS_LONGITUDINAL_CENTROID"
+    ? "保护层计算口径：ETABS CoverTop/CoverBot（混凝土面至纵筋重心，逐截面取控制值）"
+    : `箍筋外缘净保护层：${m.clear_cover_to_stirrup_outer_mm ?? "未确认"} mm` +
+      `（${m.clear_cover_source || "来源未记录"}）`;
 const metadataText =
   `模型：${m.model}｜单位：${m.units}｜规范：${m.design_code}` +
   `｜梁 Object：${m.frame_objects}｜梁线：${m.beam_lines}｜结构跨：${m.spans}` +
   `｜Profile 来源：${m.detailing_profile_source ?? m.is_smf_source ?? "未记录"}` +
-  `｜骨料：${m.aggregate_mm} mm（项目默认）` +
+  `｜最大骨料：${m.max_aggregate_size_mm ?? "未确认"} mm` +
+  `（${m.max_aggregate_size_source || "来源未记录"}）` +
   `｜多排纵筋每排≥${m.minimum_bars_per_layer ?? 2}根` +
   `｜受弯主筋≥T${m.minimum_main_diameter_mm ?? 16}` +
   `｜架立筋T${m.hanger_diameter_mm ?? 12}` +
-  `｜保护层来源：${m.cover_source ?? "未记录"}`;
+  `｜${coverText}`;
 
 const rawColumns = [
   ["beam_no", "梁编号"], ["beam_line", "梁线编号"], ["span_no", "跨号"],
   ["story", "楼层"], ["beam_type", "主次梁"], ["position", "位置"],
   ["section", "采用截面"], ["all_sections", "本跨全部截面"],
   ["width_mm", "梁宽/mm"], ["depth_mm", "梁高D/mm"], ["length_mm", "跨长/mm"],
-  ["cover_mm", "ETABS纵筋设计cover/mm"], ["fc_mpa", "fc'/MPa"],
-  ["fy_mpa", "fy/MPa"], ["fyt_mpa", "fyt/MPa"], ["aggregate_mm", "骨料/mm"],
+  ["etabs_longitudinal_cover_mm", "ETABS纵筋设计cover/mm"],
+  ["cover_calculation_basis", "保护层计算口径"],
+  ["etabs_longitudinal_cover_source", "ETABS cover来源"],
+  ["clear_cover_to_stirrup_outer_mm", "箍筋外缘净保护层/mm"],
+  ["clear_cover_source", "净保护层来源"],
+  ["fc_mpa", "fc'/MPa"], ["fy_mpa", "fy/MPa"], ["fyt_mpa", "fyt/MPa"],
+  ["max_aggregate_size_mm", "最大骨料/mm"],
+  ["max_aggregate_size_source", "骨料来源"],
   ["frame_type", "ETABS FrameType"], ["detailing_profile", "配筋Profile"],
   ["profile_source", "Profile来源"], ["is_smf", "是否SMF"],
   ["source_objects", "源 Object"], ["design_status", "设计结果状态"],
+  ["design_status_message", "设计状态说明"], ["design_result_source", "设计字段来源"],
+  ["design_units", "设计结果单位"],
   ["engine_status", "引擎状态"], ["warnings", "警告"],
   ["top_total_mm2", "顶部AsTotal/mm²"], ["top_total_station_mm", "顶部Total站点/mm"],
   ["top_total_combo", "顶部Total组合"], ["top_flex_mm2", "顶部AsFlex/mm²"],
@@ -141,10 +166,13 @@ const rawColumns = [
   ["bottom_flex_station_mm", "底部Flex站点/mm"], ["bottom_flex_combo", "底部Flex组合"],
   ["as_min_top_mm2", "AsMinTop/mm²"], ["as_min_bottom_mm2", "AsMinBot/mm²"],
   ["as_provided_top_mm2", "AsProvidedTop/mm²"], ["as_provided_bottom_mm2", "AsProvidedBot/mm²"],
+  ["raw_as_provided_top", "ETABS顶部Provided原始值"], ["raw_as_provided_bottom", "ETABS底部Provided原始值"],
   ["av_over_s", "VMajorArea Av/s"], ["av_station_mm", "Av/s站点/mm"], ["av_combo", "Av/s组合"],
   ["al_mm2", "TLArea Al/mm²"], ["al_station_mm", "Al站点/mm"], ["al_combo", "Al组合"],
   ["at_over_s", "TTArea At/s"], ["at_station_mm", "At/s站点/mm"], ["at_combo", "At/s组合"],
-  ["source_station_count", "区域站点数"],
+  ["source_station_count", "区域站点数"], ["source_objects", "区域来源Object"],
+  ["units", "区域单位"], ["result_source", "区域结果API"],
+  ["design_errors", "区域设计Error"], ["design_warnings", "区域设计Warning"],
 ];
 const rawRows = [];
 for (const row of payload.raw_rows) {
@@ -152,7 +180,7 @@ for (const row of payload.raw_rows) {
     const output = { ...row, position: label, is_smf: row.is_smf ? "是" : "否" };
     for (const [key] of rawColumns) {
       const sourceKey = `${prefix}_${key}`;
-      if (!(key in output) && sourceKey in row) output[key] = row[sourceKey];
+      if (sourceKey in row) output[key] = row[sourceKey];
     }
     rawRows.push(output);
   }
@@ -178,10 +206,13 @@ rawSheet.showGridLines = false;
 rawSheet.getRange(`I6:P${rawEndRow}`).format.numberFormat = "0.0";
 rawSheet.getRange(`Y6:AX${rawEndRow}`).format.numberFormat = "0.000";
 rawSheet.getRange(`A6:${rawEnd}${rawEndRow}`).format.font = { size: 9 };
-for (const col of ["A", "B", "G"]) rawSheet.getRange(`${col}1:${col}${rawEndRow}`).format.columnWidth = 22;
-for (const col of ["H", "S", "V"]) rawSheet.getRange(`${col}1:${col}${rawEndRow}`).format.columnWidth = 32;
 rawSheet.getRange(`C1:R${rawEndRow}`).format.columnWidth = 11;
 rawSheet.getRange(`W1:AV${rawEndRow}`).format.columnWidth = 13;
+for (const col of ["A", "B", "G"]) rawSheet.getRange(`${col}1:${col}${rawEndRow}`).format.columnWidth = 22;
+for (const col of ["H", "N", "P", "U", "V"]) {
+  rawSheet.getRange(`${col}1:${col}${rawEndRow}`).format.columnWidth = 32;
+}
+rawSheet.getRange(`M1:M${rawEndRow}`).format.columnWidth = 28;
 
 const reviewColumns = [
   ["beam_no", "梁编号"], ["beam_line", "梁线编号"], ["span_no", "跨号"],
@@ -190,6 +221,8 @@ const reviewColumns = [
   ["detailing_profile", "配筋Profile"], ["is_smf", "SMF"],
   ["mode", "引擎模式"], ["engine_status", "引擎状态"],
   ["warnings", "警告"], ["legs", "Legs（可编辑）"],
+  ["iteration_status", "纵筋/箍筋迭代状态"], ["iteration_count", "迭代次数"],
+  ["coordination_status", "相邻跨协调状态"], ["continuity_option", "公共支座方案"],
   ["face_required_mm2", "Face计算面积/侧"], ["face_text", "Face配筋文本/侧"],
   ["face_actual", "Face实配面积/侧"], ["face_diff", "Face差值"], ["face_status", "Face状态"],
 ];
@@ -210,11 +243,37 @@ reviewColumns.push(
   ["s1_at_actual", "S1单腿At/s实配"], ["s1_combo_actual", "S1总腿实配"],
   ["s1_status", "中S1状态"],
 );
+for (const [prefix, label] of [["s2_left", "左端"], ["s1", "跨中"], ["s2_right", "右端"]]) {
+  reviewColumns.push(
+    [`${prefix}_av_required`, `${label}原始Av/s`],
+    [`${prefix}_av_min`, `${label}最小Av/s`],
+    [`${prefix}_at_provided`, `${label}引擎单腿At/s实配`],
+    [`${prefix}_combo_provided`, `${label}引擎总腿实配`],
+    [`${prefix}_maximum_spacing_mm`, `${label}最大允许间距/mm`],
+    [`${prefix}_governing_reason`, `${label}间距控制原因`],
+    [`${prefix}_final_main_db_mm`, `${label}最终纵筋db/mm`],
+    [`${prefix}_high_shear`, `${label}高剪分支`],
+    [`${prefix}_spacing_limits`, `${label}全部间距限值`],
+    [`${prefix}_shear_source`, `${label}剪力需求来源`],
+  );
+}
 const reviewIndex = Object.fromEntries(reviewColumns.map(([key], index) => [key, index]));
 const engineStatusCol = colLetter(reviewIndex.engine_status);
 const reviewEnd = colLetter(reviewColumns.length - 1);
 const reviewStart = 6;
 const reviewEndRow = reviewStart + payload.review_rows.length - 1;
+const calculatedReviewStatusKeys = [
+  "face_status",
+  "et1_status",
+  "t1_status",
+  "et2_status",
+  "eb1_status",
+  "b1_status",
+  "eb2_status",
+  "s2_left_status",
+  "s2_right_status",
+  "s1_status",
+];
 styleTitle(
   reviewSheet,
   reviewEnd,
@@ -228,7 +287,13 @@ reviewSheet.getRange(`A${reviewStart}:${reviewEnd}${reviewEndRow}`).values = pay
   const initial = payload.final_rows[index] ?? {};
   const values = { ...row, is_smf: row.is_smf ? "是" : "否", s2_text: initial.s2 ?? "" };
   return reviewColumns.map(([key]) => {
-    if (key.endsWith("_actual") || key.endsWith("_diff") || (key.endsWith("_status") && key !== "engine_status")) return null;
+    if (
+      key.endsWith("_actual") ||
+      key.endsWith("_diff") ||
+      calculatedReviewStatusKeys.includes(key)
+    ) {
+      return null;
+    }
     return values[key] ?? null;
   });
 });
@@ -240,10 +305,18 @@ for (const group of ["face", "et1", "t1", "et2", "eb1", "b1", "eb2"]) {
   const diffCol = colLetter(reviewIndex[`${group}_diff`]);
   const statusCol = colLetter(reviewIndex[`${group}_status`]);
   reviewSheet.getRange(`${actualCol}${reviewStart}:${actualCol}${reviewEndRow}`).formulas = Array.from(
-    { length: payload.review_rows.length }, (_, i) => [rebarAreaFormula(`${textCol}${reviewStart + i}`)],
+    { length: payload.review_rows.length }, (_, i) => {
+      if (payload.review_rows[i]?.engine_status !== "OK") return ['=""'];
+      const row = reviewStart + i;
+      return [rebarAreaFormula(`${textCol}${row}`)];
+    },
   );
   reviewSheet.getRange(`${diffCol}${reviewStart}:${diffCol}${reviewEndRow}`).formulas = Array.from(
-    { length: payload.review_rows.length }, (_, i) => [`=${actualCol}${reviewStart + i}-${requiredCol}${reviewStart + i}`],
+    { length: payload.review_rows.length }, (_, i) => {
+      if (payload.review_rows[i]?.engine_status !== "OK") return ['=""'];
+      const row = reviewStart + i;
+      return [`=${actualCol}${row}-${requiredCol}${row}`];
+    },
   );
   reviewSheet.getRange(`${statusCol}${reviewStart}:${statusCol}${reviewEndRow}`).formulas = Array.from(
     { length: payload.review_rows.length }, (_, i) => {
@@ -262,10 +335,18 @@ for (const group of ["s2", "s1"]) {
   const atCol = colLetter(reviewIndex[`${group}_at_actual`]);
   const comboCol = colLetter(reviewIndex[`${group}_combo_actual`]);
   reviewSheet.getRange(`${atCol}${reviewStart}:${atCol}${reviewEndRow}`).formulas = Array.from(
-    { length: payload.review_rows.length }, (_, i) => [stirrupAtFormula(`${textCol}${reviewStart + i}`)],
+    { length: payload.review_rows.length }, (_, i) => {
+      if (payload.review_rows[i]?.engine_status !== "OK") return ['=""'];
+      const row = reviewStart + i;
+      return [stirrupAtFormula(`${textCol}${row}`)];
+    },
   );
   reviewSheet.getRange(`${comboCol}${reviewStart}:${comboCol}${reviewEndRow}`).formulas = Array.from(
-    { length: payload.review_rows.length }, (_, i) => [`=${atCol}${reviewStart + i}*${legsCol}${reviewStart + i}`],
+    { length: payload.review_rows.length }, (_, i) => {
+      if (payload.review_rows[i]?.engine_status !== "OK") return ['=""'];
+      const row = reviewStart + i;
+      return [`=${atCol}${row}*${legsCol}${row}`];
+    },
   );
 }
 for (const [statusKey, atReqKey, comboReqKey, atActualKey, comboActualKey] of [
@@ -310,7 +391,9 @@ reviewSheet.getRange(`A1:A${reviewEndRow}`).format.columnWidth = 24;
 reviewSheet.getRange(`B1:B${reviewEndRow}`).format.columnWidth = 22;
 reviewSheet.getRange(`F1:F${reviewEndRow}`).format.columnWidth = 18;
 reviewSheet.getRange(`I1:I${reviewEndRow}`).format.columnWidth = 18;
-reviewSheet.getRange(`K1:M${reviewEndRow}`).format.columnWidth = 20;
+reviewSheet.getRange(`K1:L${reviewEndRow}`).format.columnWidth = 20;
+reviewSheet.getRange(`M1:M${reviewEndRow}`).format.columnWidth = 34;
+reviewSheet.getRange(`N1:N${reviewEndRow}`).format.columnWidth = 26;
 reviewSheet.getRange(`A1:${reviewEnd}${reviewEndRow}`).format.verticalAlignment = "center";
 
 const finalColumns = [
@@ -341,20 +424,31 @@ const reviewRefs = {
   s2: "s2_text", s1: "s1_text", legs: "legs", face: "face_text",
   mode: "mode", engine_status: "engine_status",
 };
+const guardedFinalFields = new Set([
+  "et1", "t1", "et2", "eb1", "b1", "eb2", "s2", "s1",
+  "legs", "face", "mode",
+]);
 for (const [key, reviewKey] of Object.entries(reviewRefs)) {
   const finalCol = colLetter(finalIndex[key]);
   const reviewCol = colLetter(reviewIndex[reviewKey]);
   finalSheet.getRange(`${finalCol}${finalStart}:${finalCol}${finalEndRow}`).formulas = Array.from(
-    { length: payload.final_rows.length }, (_, i) => [`='配筋调整复核'!${reviewCol}${reviewStart + i}`],
+    { length: payload.final_rows.length }, (_, i) => {
+      const row = reviewStart + i;
+      const valueRef = `'配筋调整复核'!${reviewCol}${row}`;
+      if (!guardedFinalFields.has(key)) return [`=${valueRef}`];
+      const engineRef = `'配筋调整复核'!${colLetter(reviewIndex.engine_status)}${row}`;
+      return [`=IF(${engineRef}<>"OK","",${valueRef})`];
+    },
   );
 }
 const qcCol = colLetter(finalIndex.qc_status);
-const statusKeys = ["face_status", "et1_status", "t1_status", "et2_status", "eb1_status", "b1_status", "eb2_status", "s2_left_status", "s2_right_status", "s1_status"];
 finalSheet.getRange(`${qcCol}${finalStart}:${qcCol}${finalEndRow}`).formulas = Array.from(
   { length: payload.final_rows.length }, (_, i) => {
     const row = reviewStart + i;
     const engineRef = `'配筋调整复核'!${colLetter(reviewIndex.engine_status)}${row}`;
-    const checks = statusKeys.map((key) => `'配筋调整复核'!${colLetter(reviewIndex[key])}${row}="NG"`).join(",");
+    const checks = calculatedReviewStatusKeys
+      .map((key) => `'配筋调整复核'!${colLetter(reviewIndex[key])}${row}="NG"`)
+      .join(",");
     return [`=IF(${engineRef}<>"OK","ENGINE_ERROR",IF(OR(${checks}),"CHECK","OK"))`];
   },
 );
@@ -368,40 +462,53 @@ addStatusFormats(finalSheet.getRange(`${qcCol}${finalStart}:${qcCol}${finalEndRo
 finalSheet.getRange(`A1:B${finalEndRow}`).format.columnWidth = 24;
 finalSheet.getRange(`C1:F${finalEndRow}`).format.columnWidth = 11;
 finalSheet.getRange(`G1:P${finalEndRow}`).format.columnWidth = 15;
-finalSheet.getRange(`Q1:S${finalEndRow}`).format.columnWidth = 18;
+finalSheet.getRange(`Q1:Q${finalEndRow}`).format.columnWidth = 18;
+finalSheet.getRange(`R1:R${finalEndRow}`).format.columnWidth = 34;
+finalSheet.getRange(`S1:S${finalEndRow}`).format.columnWidth = 20;
 
 const reviewCheck = await workbook.inspect({
   kind: "table",
   range: `配筋调整复核!A5:S${Math.min(reviewEndRow, 12)}`,
   include: "values,formulas",
+  maxChars: 6000,
   tableMaxRows: 8,
   tableMaxCols: 19,
 });
 console.log(reviewCheck.ndjson);
-const errors = await workbook.inspect({
-  kind: "match",
-  searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A",
-  options: { useRegex: true, maxResults: 100 },
-  summary: "final formula error scan",
+const errorPattern = "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A";
+const formulaErrorScans = calculatedReviewStatusKeys.map((key) => {
+  const column = colLetter(reviewIndex[key]);
+  return [
+    "配筋调整复核",
+    `${column}${reviewStart}:${column}${reviewEndRow}`,
+    `review ${key} formula error scan`,
+  ];
 });
-console.log(errors.ndjson);
-
-await fs.mkdir(previewDir, { recursive: true });
-for (const [name, range, file] of [
-  ["原始分跨数据", `A1:V${Math.min(rawEndRow, 14)}`, "raw_left.png"],
-  ["原始分跨数据", `W1:AV${Math.min(rawEndRow, 14)}`, "raw_demands.png"],
-  ["配筋调整复核", `A1:S${Math.min(reviewEndRow, 14)}`, "review_base.png"],
-  ["配筋调整复核", `T1:BL${Math.min(reviewEndRow, 14)}`, "review_rebar.png"],
-  ["整理梁表", `A1:S${Math.min(finalEndRow, 18)}`, "final_schedule.png"],
-]) {
-  const image = await workbook.render({ sheetName: name, range, scale: 1.2, format: "png" });
-  await fs.writeFile(path.join(previewDir, file), new Uint8Array(await image.arrayBuffer()));
+formulaErrorScans.push([
+  "整理梁表",
+  `${qcCol}${finalStart}:${qcCol}${finalEndRow}`,
+  "final schedule QC formula error scan",
+]);
+for (const [sheetId, range, summary] of formulaErrorScans) {
+  const errors = await workbook.inspect({
+    kind: "match",
+    sheetId,
+    range,
+    searchTerm: errorPattern,
+    maxChars: 4000,
+    options: { useRegex: true, maxResults: 100 },
+    summary,
+  });
+  console.log(errors.ndjson);
 }
 
 await fs.mkdir(path.dirname(outputPath), { recursive: true });
 const xlsx = await SpreadsheetFile.exportXlsx(workbook);
-await xlsx.save(outputPath);
-// Large-workbook inspect may spill a temporary NDJSON file beside the output.
-// It is a QA scratch artifact, not part of the project delivery contract.
-await fs.rm(`${outputPath}.inspect.ndjson`, { force: true });
+try {
+  await xlsx.save(outputPath);
+} finally {
+  // Large-workbook inspect may spill a temporary NDJSON file beside the
+  // output. It is a QA scratch artifact, not part of the delivery contract.
+  await fs.rm(`${outputPath}.inspect.ndjson`, { force: true });
+}
 console.log(`OUTPUT=${outputPath}`);

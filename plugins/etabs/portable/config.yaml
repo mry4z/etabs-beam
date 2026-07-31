@@ -1,0 +1,32 @@
+# Portable read-only workflow defaults.
+# The plugin always overrides etabs.dll_path with the API assembly path of the
+# ETABS host that loaded the plugin, so this placeholder is not machine-specific.
+etabs:
+  dll_path: "ETABSv1.dll"
+  mode: "attach"
+
+geometry:
+  coordinate_tolerance_mm: 1.0
+  source_span_overlap_tolerance_mm: 2.0
+  slope_limit_deg: 1.0
+  merge_angle_limit_deg: 15.0
+  unit_system: "N_mm_C"
+
+design:
+  standard: "ACI 318-14"
+  clear_cover_to_stirrup_outer_mm:
+  clear_cover_source: ""
+  max_aggregate_size_mm:
+  max_aggregate_size_source: ""
+
+output:
+  reports_dir: "outputs/reports"
+  logs_dir: "outputs/logs"
+  report_filename: "beam_schedule_{timestamp}.xlsx"
+  log_filename: "etabs_beam_{timestamp}.log"
+
+logging:
+  level: "INFO"
+
+advanced:
+  beam_selection_mode: "all"

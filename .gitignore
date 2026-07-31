@@ -53,6 +53,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# .NET build intermediates
+**/bin/
+**/obj/
+
 # ============================================================================
 # 测试和覆盖率
 # ============================================================================
@@ -94,6 +98,8 @@ build/output/logs/*.txt
 # 本地配置（使用 config.example.yaml 作模板）
 config.yaml
 config.local.yaml
+# 例外：便携运行器默认配置模板必须入库（插件构建脚本依赖该文件作为 configSource）
+!plugins/etabs/portable/config.yaml
 # Claude Code / Codex 配置
 .claude/
 .codex/

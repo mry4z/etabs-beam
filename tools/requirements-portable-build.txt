@@ -1,0 +1,7 @@
+PyInstaller==6.12.0
+pythonnet==3.1.0
+clr-loader==0.3.1
+pandas==2.2.3
+numpy==1.26.4
+openpyxl==3.1.5
+PyYAML==6.0.2

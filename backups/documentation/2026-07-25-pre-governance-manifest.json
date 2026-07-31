@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-25T11:30:51.0824054+08:00",
+  "repository": "F:\\2026\\Research Study\\etabs beam",
+  "purpose": "Pre-governance backup of project development Markdown",
+  "git_head": "7d3862752041fe18eb0201b21671f3575d70b52b",
+  "git_status": [
+    " M docs/ORDINARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md",
+    " M src/cli.py",
+    " M src/design/detailing.py",
+    " M src/rebar_workbook.py",
+    " M tests/unit/test_detailing.py",
+    " M tests/unit/test_rebar_workbook.py",
+    "?? backups/",
+    "?? src/spreadsheet/build_secondary_beam_workbook.mjs"
+  ],
+  "source_count": 17,
+  "archive": "2026-07-25-pre-governance.zip",
+  "archive_sha256": "54b8f2918673aa015601a3e670caeb7ad23c136f72cd36b5003c1c263f8dc60b",
+  "excluded_scopes": [
+    ".codex",
+    ".agents",
+    ".claude",
+    ".pytest_cache",
+    "build",
+    "outputs",
+    "extracted_frames",
+    "video_frames",
+    "raw media"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 8801,
+      "last_write_time": "2026-07-22T16:56:06.0746696+08:00",
+      "sha256": "16ad9cc02721b4166ad915057e0ffc349ac85a9045138e926a6b73d23b067032"
+    },
+    {
+      "path": "README form CODEX start.md",
+      "bytes": 847,
+      "last_write_time": "2026-07-10T19:08:25.1639670+08:00",
+      "sha256": "c7ec9358fc8fc5f72173f570d7c6ed7fa187e5fcfb5e1ca1fbb16e75a1b5e4f1"
+    },
+    {
+      "path": "PROJECT_STRUCTURE.md",
+      "bytes": 21865,
+      "last_write_time": "2026-07-22T20:12:56.7962831+08:00",
+      "sha256": "7eae9357eb5748de1629879c1d39d8903b5440b04afe28993bbf505606a34e20"
+    },
+    {
+      "path": "PROJECT_COMPLETION_CHECKLIST.md",
+      "bytes": 33724,
+      "last_write_time": "2026-07-23T14:56:32.8895763+08:00",
+      "sha256": "69b6a247a873ad53f01db978e972d017a6ee96557e17b5002f03d1a42d88908a"
+    },
+    {
+      "path": "PROCESS_CONTROL_REQUIREMENTS.md",
+      "bytes": 15100,
+      "last_write_time": "2026-07-10T22:37:42.0488503+08:00",
+      "sha256": "52c051011dc81a12979a63c2263f636c448224c60dd1176349d08d4d36531833"
+    },
+    {
+      "path": "docs/API.md",
+      "bytes": 7621,
+      "last_write_time": "2026-07-22T16:56:10.9315002+08:00",
+      "sha256": "e330240e7de0aba5dfe65502de32b3bf552efbed879bd72b9c721097405d9741"
+    },
+    {
+      "path": "docs/api/design_results.md",
+      "bytes": 3889,
+      "last_write_time": "2026-07-22T16:58:37.3612189+08:00",
+      "sha256": "32e79c29c8abe2d7c59b0b1f82595a41712fa910898375a8c980bc449635dcd6"
+    },
+    {
+      "path": "docs/BEAM_LINE_SPAN_RULES.md",
+      "bytes": 21296,
+      "last_write_time": "2026-07-22T10:22:50.6891053+08:00",
+      "sha256": "910c7b8901e51e7097f1c4bdf6cec060ba60e523cb741eff724423f91db4212a"
+    },
+    {
+      "path": "docs/DEVELOPMENT.md",
+      "bytes": 9076,
+      "last_write_time": "2026-07-22T16:58:34.7985743+08:00",
+      "sha256": "524a1d9a3a181bea377ed1bd3a1eabf5b1c1201a30b5168fa89637a6c5740d36"
+    },
+    {
+      "path": "docs/DRAWING_NUMBERING_INTERCHANGE.md",
+      "bytes": 6700,
+      "last_write_time": "2026-07-22T16:58:42.0405211+08:00",
+      "sha256": "2f0a71a9732da826e4f2acae5385be0b1d4a309240cd64d96ba9e951bb3272fe"
+    },
+    {
+      "path": "docs/ETABS_OAPI_VALIDATION.md",
+      "bytes": 35134,
+      "last_write_time": "2026-07-22T16:56:51.0234626+08:00",
+      "sha256": "97dda7c94a1c7ae061cf46051da915fc7f35d23eea5e86f38786e109bae67c4b"
+    },
+    {
+      "path": "docs/ETABS_SQLITE_SNAPSHOT_ROUTE.md",
+      "bytes": 9302,
+      "last_write_time": "2026-07-16T12:41:02.7581630+08:00",
+      "sha256": "4713eb1bd3a8d3b9672491d9799bd17e00b340bc26ecff0b62b9481a38723923"
+    },
+    {
+      "path": "docs/MANUAL_BEAM_TOPOLOGY_OVERRIDE.md",
+      "bytes": 10751,
+      "last_write_time": "2026-07-22T10:22:53.3128066+08:00",
+      "sha256": "ebfe21267e92de1b5822709c4bd676046ee183200189101fd3b60b738231b1d0"
+    },
+    {
+      "path": "docs/ORDINARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md",
+      "bytes": 15087,
+      "last_write_time": "2026-07-23T19:06:17.9971439+08:00",
+      "sha256": "f3c5c71d25809192d7aa6dd158674423b99978755a1ada0d54c28660097ce354"
+    },
+    {
+      "path": "docs/PRIMARY_BEAM_REBAR_DETAILING_ACI318_14_REVIEW.md",
+      "bytes": 31348,
+      "last_write_time": "2026-07-23T14:50:26.9544490+08:00",
+      "sha256": "62433038eda57a2f52579f60be9fe14a92c377e4a2a9f1ff72f61b724b89e690"
+    },
+    {
+      "path": "docs/TECHNICAL_ROADMAP.md",
+      "bytes": 12915,
+      "last_write_time": "2026-07-22T16:56:15.7075152+08:00",
+      "sha256": "12af7436d271fe86d0db185478dfb159d80b497f0efa26407cec39309a814c38"
+    },
+    {
+      "path": "docs/USER_GUIDE.md",
+      "bytes": 10986,
+      "last_write_time": "2026-07-22T16:56:13.4167624+08:00",
+      "sha256": "18139ca60831dd9c3a5b78aff1594ca8be705d18eaa01812a2dae7670c4aace1"
+    }
+  ]
+}

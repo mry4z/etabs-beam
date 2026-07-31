@@ -1,8 +1,90 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
 
-from src.run_manifest import RunManifest, artifact_record, create_run_id, fingerprint
+from src.rebar_workbook import PAYLOAD_SCHEMA_VERSION
+from src.run_manifest import ALGORITHM_VERSIONS, RunManifest, artifact_record, create_run_id, fingerprint, git_state
+
+
+def test_manifest_rebar_payload_identity_matches_writer_schema() -> None:
+    assert ALGORITHM_VERSIONS["rebar_workbook_payload"] == PAYLOAD_SCHEMA_VERSION
+
+
+def test_manifest_fingerprints_snapshot_input(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("src.run_manifest.git_state", lambda root=None: {"commit": "abc", "dirty": False})
+    model = tmp_path / "model.EDB"
+    snapshot = tmp_path / "domain.sqlite"
+    model.write_bytes(b"model")
+    snapshot.write_bytes(b"snapshot-v1")
+    session = RunManifest(
+        output_dir=tmp_path / "run",
+        registry_dir=tmp_path / "registry",
+        config={},
+        arguments={
+            "expected_model": model,
+            "snapshot_input": snapshot,
+            "selection": "all",
+        },
+        run_id="snapshot-run",
+    )
+    path = session.finalize(
+        status="SUCCESS",
+        summary={
+            "model": str(model),
+            "model_input_sha256": artifact_record(model)["sha256"],
+            "data_source": {"kind": "sqlite-snapshot"},
+            "outputs": {},
+        },
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["data_source"] == {"kind": "sqlite-snapshot"}
+    assert payload["validity"]["state"] == "CURRENT"
+
+    snapshot.write_bytes(b"snapshot-v2")
+    changed = RunManifest(
+        output_dir=tmp_path / "run-changed",
+        registry_dir=tmp_path / "registry-changed",
+        config={},
+        arguments={
+            "expected_model": model,
+            "snapshot_input": snapshot,
+            "selection": "all",
+        },
+        run_id="snapshot-run-changed",
+    ).finalize(
+        status="SUCCESS",
+        summary={
+            "model": str(model),
+            "model_input_sha256": artifact_record(model)["sha256"],
+            "data_source": {"kind": "sqlite-snapshot"},
+            "outputs": {},
+        },
+    )
+    changed_payload = json.loads(changed.read_text(encoding="utf-8"))
+    assert changed_payload["validity"]["input_fingerprint"] != payload["validity"]["input_fingerprint"]
+
+
+def test_git_state_fingerprints_untracked_file_contents(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Tests"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=tmp_path, check=True)
+    untracked = tmp_path / "new.txt"
+    untracked.write_text("first\n", encoding="utf-8")
+
+    first = git_state(tmp_path)
+    untracked.write_text("second\n", encoding="utf-8")
+    second = git_state(tmp_path)
+
+    assert first["status_sha256"] == second["status_sha256"]
+    assert first["content_sha256"] != second["content_sha256"]
+    assert first["untracked_files"][0]["path"] == "new.txt"
+    assert first["untracked_files"][0]["sha256"] != second["untracked_files"][0]["sha256"]
 
 
 def test_create_run_id_is_sortable_and_unique() -> None:

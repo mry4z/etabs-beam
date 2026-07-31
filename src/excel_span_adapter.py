@@ -7,7 +7,7 @@ the existing object-level ``梁表`` remain unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import inf
 from typing import Mapping
 
@@ -130,7 +130,19 @@ def _clip_design_to_span(
             continue
         deduped.append(station)
     status, message = _status(source_results, bool(deduped))
-    return BeamDesignResult(span.span_id, tuple(deduped), status, message)
+    sources = tuple(
+        dict.fromkeys(source for result in source_results for source in (result.source_objects or (result.beam_name,)))
+    )
+    result_source = ",".join(dict.fromkeys(result.result_source for result in source_results if result.result_source))
+    return BeamDesignResult(
+        span.span_id,
+        tuple(deduped),
+        status,
+        message,
+        sources,
+        "N_mm_C",
+        result_source,
+    )
 
 
 def _status(results: list[BeamDesignResult], has_stations: bool) -> tuple[DesignResultStatus, str]:
@@ -152,27 +164,7 @@ def _status(results: list[BeamDesignResult], has_stations: bool) -> tuple[Design
 
 
 def _offset_station(station: DesignStation, location: float) -> DesignStation:
-    return DesignStation(
-        location,
-        station.top_flexural_combo,
-        station.top_flexural_area,
-        station.bottom_flexural_combo,
-        station.bottom_flexural_area,
-        station.shear_combo,
-        station.shear_area,
-        station.torsion_longitudinal_combo,
-        station.torsion_longitudinal_area,
-        station.torsion_trans_combo,
-        station.torsion_trans_area,
-        station.error,
-        station.warning,
-        station.top_total_area,
-        station.bottom_total_area,
-        station.top_min_area,
-        station.bottom_min_area,
-        station.top_provided_area,
-        station.bottom_provided_area,
-    )
+    return replace(station, location=location)
 
 
 def _path_position(path: tuple[Point3D, ...], point: Point3D, tolerance: float) -> float | None:

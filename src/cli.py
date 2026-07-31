@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -41,8 +43,11 @@ from src.design.etabs_result import EtabsResultProvider
 from src.design.provider import BeamDesignResult, DesignResultStatus
 from src.excel_export import export_beam_schedule
 from src.excel_span_adapter import build_span_schedule
+from src.model_source import EtabsOapiReadSource
 from src.rebar_workbook import (
-    build_rebar_workbook_payload,
+    build_rebar_workbook_payload_from_domain,
+    build_secondary_schedule_payload,
+    run_secondary_workbook_builder,
     run_workbook_builder,
     write_rebar_payload,
 )
@@ -53,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        summary = run(args)
+        summary = _runtime_self_test(args) if args.runtime_self_test else run(args)
     except Exception as exc:  # CLI boundary: preserve a concise machine-readable error.
         print(json.dumps({"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
         return 2
@@ -64,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Run the workflow and always leave a success or failure manifest."""
 
-    config = load_config(args.config)
+    config = load_config(args.config, etabs_dll_path=args.etabs_api)
     output_dir = Path(args.output_dir or config.output.reports_dir / "topology_run")
     output_dir.mkdir(parents=True, exist_ok=True)
     registry_dir = Path(args.manifest_registry or output_dir.parent / "manifests")
@@ -92,6 +97,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[str, Any]:
+    if args.snapshot_input is not None:
+        from src.snapshot.workflow import run_snapshot_workflow
+
+        return run_snapshot_workflow(args, config, output_dir)
+    if args.pid is None:
+        raise ValueError("ETABS OAPI 工作流要求 --pid；离线工作流应提供 --snapshot-input。")
     if args.allow_partial_writeback and not args.writeback:
         raise ValueError("--allow-partial-writeback 只能与 --writeback 一起使用。")
     if (args.verify_full_writeback or args.verify_demand_equivalence) and not args.writeback:
@@ -139,9 +150,14 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
 
     original_units = str(sap.GetPresentUnits())
     with connector.temporary_present_units(eUnits.N_mm_C):
-        extractor = GeometryExtractor(sap)
-        beams = extractor.extract(args.selection)
-        column_supports = extractor.column_supports()
+        read_source = EtabsOapiReadSource(
+            sap,
+            actual_model,
+            durable_model_path=durable_model,
+            expected_model_sha256=model_input_sha256,
+        )
+        beams = read_source.extract_beams(args.selection)
+        column_supports = read_source.column_supports()
         structural = analyze_beam_lines(
             beams,
             set(column_supports),
@@ -155,7 +171,7 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
             column_support_coordinates=column_supports,
         )
         writeback = EtabsWriteback(sap)
-        states = writeback.snapshot_from_geometry(beams)
+        states = read_source.frame_states(beams)
         plan = build_writeback_plan(
             structural,
             beams,
@@ -213,6 +229,9 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
         rebar_payload_path = None
         rebar_workbook_output = None
         rebar_preview_dir = None
+        secondary_rebar_payload_path = None
+        secondary_rebar_workbook_output = None
+        secondary_rebar_preview_dir = None
 
         blocked = tuple(action for action in plan.renames if action.status != "READY")
         split_actions = tuple(action for action in plan.renames if action.status == "REQUIRES_SPLIT")
@@ -342,9 +361,13 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
             if not sap.DesignConcrete.GetResultsAvailable():
                 raise RuntimeError("设计结果导出要求 ETABS 已存在当前模型状态的混凝土设计结果。")
             if args.writeback:
-                export_extractor = GeometryExtractor(sap)
-                export_beams = export_extractor.extract(args.selection)
-                export_supports = export_extractor.column_supports()
+                export_source = EtabsOapiReadSource(
+                    sap,
+                    actual_model,
+                    durable_model_path=durable_model,
+                )
+                export_beams = export_source.extract_beams(args.selection)
+                export_supports = export_source.column_supports()
                 export_structural = analyze_beam_lines(
                     export_beams,
                     set(export_supports),
@@ -358,9 +381,10 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
                     column_support_coordinates=export_supports,
                 )
             else:
+                export_source = read_source
                 export_beams = beams
                 export_structural = structural
-            designs = _read_designs(sap, tuple(export_beams))
+            designs = export_source.designs(export_beams)
             span_schedule = build_span_schedule(
                 export_structural,
                 export_beams,
@@ -385,16 +409,38 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
                 rebar_payload_path = output_dir / f"rebar_workbook_payload_{stamp}.json"
                 rebar_workbook_output = output_dir / f"beam_rebar_review_{stamp}.xlsx"
                 rebar_preview_dir = output_dir / f"rebar_workbook_previews_{stamp}"
-                payload = build_rebar_workbook_payload(
-                    sap,
+                secondary_rebar_payload_path = output_dir / f"secondary_beam_payload_{stamp}.json"
+                secondary_rebar_workbook_output = output_dir / f"secondary_beam_schedule_{stamp}.xlsx"
+                secondary_rebar_preview_dir = output_dir / f"secondary_beam_previews_{stamp}"
+                payload = build_rebar_workbook_payload_from_domain(
                     export_structural,
                     export_beams,
                     designs,
+                    section_loader=export_source.section_info,
+                    frame_types=export_source.frame_types(),
                     model_path=actual_model,
+                    design_code=export_source.design_code(),
                     tolerance_mm=config.geometry.coordinate_tolerance_mm,
+                    clear_cover_to_stirrup_outer_mm=(config.design.clear_cover_to_stirrup_outer_mm),
+                    clear_cover_source=config.design.clear_cover_source,
+                    max_aggregate_size_mm=config.design.max_aggregate_size_mm,
+                    max_aggregate_size_source=(config.design.max_aggregate_size_source),
                 )
                 write_rebar_payload(payload, rebar_payload_path)
+                write_rebar_payload(
+                    build_secondary_schedule_payload(payload),
+                    secondary_rebar_payload_path,
+                )
 
+    if not args.writeback and not args.prepare_section_review_groups:
+        data_source_identity = dict(read_source.identity())
+    else:
+        data_source_identity = {
+            "kind": "etabs-oapi",
+            "model_path": str(actual_model),
+            "durable_model_path": str(durable_model) if durable_model else None,
+            "source_model_sha256_before_mutation": model_input_sha256,
+        }
     summary = {
         "status": "OK",
         "mode": (
@@ -407,6 +453,7 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
         "original_units": original_units,
         "export_units": "N_mm_C",
         "design_standard": config.design.standard,
+        "data_source": data_source_identity,
         "environment": environment,
         "beams": len(beams),
         "beam_lines": len(structural.lines),
@@ -475,6 +522,17 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
         summary["outputs"]["rebar_payload_json"] = str(rebar_payload_path)
         summary["outputs"]["rebar_workbook"] = str(rebar_workbook_output)
         summary["outputs"]["rebar_workbook_previews"] = str(rebar_preview_dir)
+        run_secondary_workbook_builder(
+            secondary_rebar_payload_path,
+            secondary_rebar_workbook_output,
+            preview_dir=secondary_rebar_preview_dir,
+            node_executable=args.artifact_node,
+            node_modules=args.artifact_node_modules,
+            node_max_old_space_mb=args.artifact_node_max_old_space_mb,
+        )
+        summary["outputs"]["secondary_rebar_payload_json"] = str(secondary_rebar_payload_path)
+        summary["outputs"]["secondary_rebar_workbook"] = str(secondary_rebar_workbook_output)
+        summary["outputs"]["secondary_rebar_workbook_previews"] = str(secondary_rebar_preview_dir)
     if excel_output is not None:
         summary["outputs"]["excel"] = str(excel_output)
     return summary
@@ -499,6 +557,39 @@ def _api_environment(dll_path: Path) -> dict[str, Any]:
     except Exception as exc:
         record["version_error"] = f"{type(exc).__name__}: {exc}"
     return record
+
+
+def _runtime_self_test(args: argparse.Namespace) -> dict[str, Any]:
+    """Verify the packaged runtime and ETABS API bridge without attaching to a model."""
+
+    if args.etabs_api is None:
+        raise ValueError("--runtime-self-test requires --etabs-api.")
+    api_path = Path(args.etabs_api).resolve()
+    if not api_path.is_file():
+        raise FileNotFoundError(f"ETABS API DLL not found: {api_path}")
+    config = load_config(args.config, etabs_dll_path=api_path)
+
+    import clr
+    import openpyxl
+    import pandas
+    import yaml
+
+    clr.AddReference(str(config.etabs.dll_path))
+    from ETABSv1 import cHelper, cPluginContract
+
+    return {
+        "status": "OK",
+        "mode": "runtime-self-test",
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "executable": sys.executable,
+        "architecture": platform.architecture()[0],
+        "python": platform.python_version(),
+        "pandas": pandas.__version__,
+        "openpyxl": openpyxl.__version__,
+        "pyyaml": yaml.__version__,
+        "etabs_api": _api_environment(config.etabs.dll_path),
+        "etabs_types": [cHelper.__name__, cPluginContract.__name__],
+    }
 
 
 def _attach(pid: int, dll_path: Path) -> tuple[Any, Path]:
@@ -635,14 +726,29 @@ def _read_designs(sap: Any, beams: tuple[Any, ...]) -> dict[str, BeamDesignResul
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ETABS 22/23 梁拓扑、诊断和安全写回工作流")
-    parser.add_argument("--pid", required=True, type=int, help="已运行 ETABS 进程 PID")
+    parser.add_argument("--pid", type=int, help="已运行 ETABS 进程 PID；与 --snapshot-input 二选一")
+    parser.add_argument(
+        "--snapshot-input",
+        type=Path,
+        help="项目自建 SQLite 快照；启用不附着 ETABS 的只读工作流",
+    )
     parser.add_argument("--expected-model", type=Path, help="期望当前打开的 EDB 路径")
+    parser.add_argument(
+        "--etabs-api",
+        type=Path,
+        help="覆盖 config 中的 ETABSv1.dll；便携插件使用当前宿主程序集的绝对路径",
+    )
     parser.add_argument(
         "--source-model",
         type=Path,
         help="工作副本对应的未修改源 EDB；用于 manifest 源/副本哈希",
     )
     parser.add_argument("--config", type=Path, help="配置文件路径")
+    parser.add_argument(
+        "--runtime-self-test",
+        action="store_true",
+        help="验证便携 Python/依赖/ETABS API 装载后退出，不附着或修改模型",
+    )
     parser.add_argument("--selection", choices=["all", "selected"], default="all")
     parser.add_argument("--output-dir", type=Path, help="本次运行输出目录")
     parser.add_argument(
@@ -694,7 +800,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--export-rebar-workbook",
         action="store_true",
-        help="导出原始分跨数据、配筋调整复核、整理梁表三表 Excel",
+        help="导出三表配筋评审 Excel，并同时导出独立 SB 梁表 Excel",
     )
     parser.add_argument(
         "--artifact-node",

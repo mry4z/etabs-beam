@@ -40,6 +40,11 @@ class DesignStation:
     bottom_min_area: float | None = None
     top_provided_area: float | None = None
     bottom_provided_area: float | None = None
+    raw_top_provided_area: float | None = None
+    raw_bottom_provided_area: float | None = None
+    source_object: str = ""
+    units: str = "N_mm_C"
+    result_source: str = ""
 
     @property
     def as_total_top_mm2(self) -> float:
@@ -64,10 +69,21 @@ class BeamDesignResult:
     stations: tuple[DesignStation, ...] = field(default_factory=tuple)
     status: DesignResultStatus = DesignResultStatus.AVAILABLE
     status_message: str = ""
+    source_objects: tuple[str, ...] = field(default_factory=tuple)
+    units: str = "N_mm_C"
+    result_source: str = ""
 
     @property
     def has_results(self) -> bool:
         return bool(self.stations)
+
+    @property
+    def errors(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(station.error for station in self.stations if station.error.strip()))
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(station.warning for station in self.stations if station.warning.strip()))
 
     @property
     def max_top_flexural_area(self) -> float | None:

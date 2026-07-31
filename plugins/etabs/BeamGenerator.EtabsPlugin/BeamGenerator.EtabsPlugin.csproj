@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <AssemblyName>BeamGenerator.EtabsPlugin</AssemblyName>
+    <RootNamespace>BeamGenerator.EtabsPlugin</RootNamespace>
+    <Version>0.2.0</Version>
+    <FileVersion>0.2.0.0</FileVersion>
+    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <Product>ETABS Beam Generator Plugin</Product>
+    <Description>Read-only ETABS interaction and Python workflow launcher.</Description>
+    <EtabsApiPath Condition="'$(EtabsApiPath)' == ''">$(ETABS_API_PATH)</EtabsApiPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="ETABSv1">
+      <HintPath>$(EtabsApiPath)</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="RequireEtabsApi" BeforeTargets="ResolveReferences">
+    <Error
+      Condition="'$(EtabsApiPath)' == '' Or !Exists('$(EtabsApiPath)')"
+      Text="Set EtabsApiPath (or ETABS_API_PATH) to an absolute ETABSv1.dll path from ETABS 22/23."
+    />
+  </Target>
+</Project>

@@ -75,6 +75,18 @@ def _major_version(version: str | None) -> int | None:
         return None
 
 
+def model_paths_match(actual: str | Path, expected: str | Path) -> bool:
+    """Compare one ETABS-reported path with a durable EDB path.
+
+    ETABS may report the transient ``.$et`` sidecar while a model is open.
+    Only the same resolved parent and filename stem are accepted.
+    """
+
+    actual_path = Path(actual).resolve()
+    expected_path = Path(expected).resolve()
+    return actual_path.parent == expected_path.parent and actual_path.stem.casefold() == expected_path.stem.casefold()
+
+
 class EtabsConnector:
     """Attach to ETABS through CSI's documented ``cHelper.GetObject`` API."""
 
@@ -86,6 +98,20 @@ class EtabsConnector:
         self.sap_model: Any | None = None
 
     def attach(self) -> Any:
+        """Attach to the registered active ETABS instance."""
+
+        return self._attach(lambda helper: helper.GetObject(self.PROG_ID))
+
+    def attach_process(self, pid: int) -> Any:
+        """Attach to one explicit ETABS process and retain its application."""
+
+        if isinstance(pid, bool) or int(pid) <= 0:
+            raise EtabsConnectionError("ETABS PID 必须是正整数。")
+        return self._attach(
+            lambda helper: helper.GetObjectProcess(self.PROG_ID, int(pid)),
+        )
+
+    def _attach(self, resolver: Any) -> Any:
         if not self.dll_path.is_file():
             raise EtabsConnectionError(f"找不到 ETABS API DLL：{self.dll_path}")
         try:
@@ -95,7 +121,7 @@ class EtabsConnector:
             from ETABSv1 import Helper, cHelper
 
             helper = cHelper(Helper())
-            app = helper.GetObject(self.PROG_ID)
+            app = resolver(helper)
             if app is None:
                 raise EtabsConnectionError("未找到已运行的 ETABS 实例。")
             sap_model = app.SapModel

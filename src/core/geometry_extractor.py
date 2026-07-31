@@ -229,7 +229,9 @@ class GeometryExtractor:
         values = api_values(get_labels(0, None, None, None), "FrameObj.GetLabelNameList")
         if len(values) != 4:
             raise EtabsApiError("FrameObj.GetLabelNameList: 返回参数数量异常。")
-        count, labels, names, _stories = values
+        # ETABS 22/23 signature:
+        # NumberNames, MyName (unique object name), MyLabel, MyStory.
+        count, names, labels, _stories = values
         if int(count) != len(labels) or int(count) != len(names):
             raise EtabsApiError("FrameObj.GetLabelNameList: 数组长度不一致。")
         return {str(name): str(label) for name, label in zip(list(names), list(labels))}

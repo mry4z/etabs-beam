@@ -3,7 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.core.etabs_connector import EtabsConnector, etabs_version_info
+from src.core.etabs_connector import (
+    EtabsConnectionError,
+    EtabsConnector,
+    etabs_version_info,
+    model_paths_match,
+)
 from src.core.geometry_extractor import GeometryExtractor, expand_rigid_support_points
 
 
@@ -66,6 +71,56 @@ def test_temporary_units_restores_after_failure() -> None:
         with _connector(model).temporary_present_units(9):
             raise RuntimeError("export failed")
     assert model.units == 6
+
+
+def test_process_attachment_uses_explicit_pid(monkeypatch, tmp_path) -> None:
+    dll = tmp_path / "ETABSv1.dll"
+    dll.write_bytes(b"fake")
+    sap = object()
+    calls: list[tuple[str, int]] = []
+
+    class HelperApi:
+        def GetObjectProcess(self, prog_id, pid):
+            calls.append((prog_id, pid))
+            return SimpleNamespace(SapModel=sap)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "clr",
+        SimpleNamespace(AddReference=lambda path: path),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ETABSv1",
+        SimpleNamespace(
+            Helper=lambda: object(),
+            cHelper=lambda _helper: HelperApi(),
+        ),
+    )
+
+    connector = EtabsConnector(dll)
+
+    assert connector.attach_process(1234) is sap
+    assert connector.app is not None
+    assert calls == [(connector.PROG_ID, 1234)]
+
+
+def test_process_attachment_rejects_invalid_pid() -> None:
+    connector = EtabsConnector("unused.dll")
+
+    with pytest.raises(EtabsConnectionError, match="正整数"):
+        connector.attach_process(0)
+    with pytest.raises(EtabsConnectionError, match="正整数"):
+        connector.attach_process(True)
+
+
+def test_model_paths_match_accepts_only_same_edb_sidecar(tmp_path) -> None:
+    expected = tmp_path / "model.EDB"
+
+    assert model_paths_match(tmp_path / "model.$et", expected)
+    assert model_paths_match(expected, expected)
+    assert not model_paths_match(tmp_path / "other.$et", expected)
+    assert not model_paths_match(tmp_path / "nested" / "model.$et", expected)
 
 
 def test_rigid_support_propagates_only_from_real_column_points() -> None:

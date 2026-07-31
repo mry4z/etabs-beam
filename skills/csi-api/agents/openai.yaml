@@ -1,0 +1,4 @@
+interface:
+  display_name: "CSI API"
+  short_description: "Use and extend ETABS 22/23 CSI OAPI safely"
+  default_prompt: "Use $csi-api to implement or review a CSI OAPI integration for this project."

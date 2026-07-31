@@ -21,6 +21,8 @@ def test_cli_parser_exposes_safe_workflow_flags() -> None:
             "123",
             "--expected-model",
             "model.EDB",
+            "--etabs-api",
+            "ETABSv1.dll",
             "--read-only",
             "--export-excel",
             "--output-dir",
@@ -28,6 +30,7 @@ def test_cli_parser_exposes_safe_workflow_flags() -> None:
         ]
     )
     assert args.pid == 123
+    assert args.etabs_api == Path("ETABSv1.dll")
     assert args.read_only is True
     assert args.writeback is False
     assert args.export_excel is True
@@ -54,6 +57,22 @@ def test_cli_parser_exposes_formal_rebar_workbook_flags() -> None:
     assert args.artifact_node == "C:/runtime/node.exe"
     assert args.artifact_node_modules == Path("C:/runtime/node_modules")
     assert args.artifact_node_max_old_space_mb == 8192
+
+
+def test_cli_parser_accepts_snapshot_as_read_only_source() -> None:
+    args = _parser().parse_args(
+        [
+            "--snapshot-input",
+            "domain.sqlite",
+            "--expected-model",
+            "working.EDB",
+            "--read-only",
+        ]
+    )
+
+    assert args.pid is None
+    assert args.snapshot_input == Path("domain.sqlite")
+    assert args.expected_model == Path("working.EDB")
 
 
 def test_cli_accepts_etabs_sidecar_for_same_model() -> None:
