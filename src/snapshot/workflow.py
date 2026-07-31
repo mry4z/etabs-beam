@@ -183,6 +183,7 @@ def run_snapshot_workflow(
                 node_executable=args.artifact_node,
                 node_modules=args.artifact_node_modules,
                 node_max_old_space_mb=args.artifact_node_max_old_space_mb,
+                builder=getattr(args, "workbook_builder", "python"),
             )
             run_secondary_workbook_builder(
                 secondary_payload_path,
@@ -191,6 +192,7 @@ def run_snapshot_workflow(
                 node_executable=args.artifact_node,
                 node_modules=args.artifact_node_modules,
                 node_max_old_space_mb=args.artifact_node_max_old_space_mb,
+                builder=getattr(args, "workbook_builder", "python"),
             )
             outputs.update(
                 {

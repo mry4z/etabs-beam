@@ -94,6 +94,11 @@ internal sealed class PluginSettings
     public string SelectionMode { get; set; } = "selected";
 
     public bool ExportExcel { get; set; }
+
+    /// <summary>Optional ETABS API DLL override. Empty means use the host assembly path.</summary>
+    public string EtabsApiPath { get; set; } = "";
+
+    public bool ExportRebarWorkbook { get; set; }
 }
 
 internal sealed record WorkflowRunRequest(
@@ -104,6 +109,7 @@ internal sealed record WorkflowRunRequest(
     string OutputDirectory,
     string SelectionMode,
     bool ExportExcel,
+    bool ExportRebarWorkbook,
     int EtabsProcessId,
     string ExpectedModelPath
 );

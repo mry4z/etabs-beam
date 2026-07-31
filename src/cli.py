@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from src.config import load_config
+from src.etabs_locate import search_etabs_dll_path
 from src.core.beam_line_span_analyzer import BeamLineSpanSettings, analyze_beam_lines
 from src.core.continuity_analyzer import ContinuityAnalyzer
 from src.core.etabs_connector import EtabsConnector, etabs_version_info
@@ -66,10 +68,38 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _ensure_etabs_dll(config: Any, explicit: Any) -> Any:
+    """Resolve the ETABS API DLL path for a standalone CLI run.
+
+    Priority: explicit ``--etabs-api`` > ``ETABS_API_PATH`` env > config value >
+    automatic search of well-known install roots.  The plugin always passes the
+    host assembly path explicitly, so this only affects direct CLI / portable
+    workflow runs.
+    """
+    if explicit is not None:
+        return config
+    env_path = os.environ.get("ETABS_API_PATH")
+    if env_path:
+        candidate = Path(env_path)
+        if candidate.is_file():
+            return replace(config, etabs=replace(config.etabs, dll_path=candidate.resolve()))
+    if config.etabs.dll_path.is_file():
+        return config
+    found = search_etabs_dll_path()
+    if found is None:
+        raise FileNotFoundError(
+            "未找到 ETABS API DLL。已搜索常见安装目录；"
+            "请安装 ETABS 22/23、设置 ETABS_API_PATH 环境变量，"
+            "或用 --etabs-api 显式指定 ETABSv1.dll。"
+        )
+    return replace(config, etabs=replace(config.etabs, dll_path=found))
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Run the workflow and always leave a success or failure manifest."""
 
     config = load_config(args.config, etabs_dll_path=args.etabs_api)
+    config = _ensure_etabs_dll(config, args.etabs_api)
     output_dir = Path(args.output_dir or config.output.reports_dir / "topology_run")
     output_dir.mkdir(parents=True, exist_ok=True)
     registry_dir = Path(args.manifest_registry or output_dir.parent / "manifests")
@@ -518,6 +548,7 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
             node_executable=args.artifact_node,
             node_modules=args.artifact_node_modules,
             node_max_old_space_mb=args.artifact_node_max_old_space_mb,
+            builder=getattr(args, "workbook_builder", "python"),
         )
         summary["outputs"]["rebar_payload_json"] = str(rebar_payload_path)
         summary["outputs"]["rebar_workbook"] = str(rebar_workbook_output)
@@ -529,6 +560,7 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
             node_executable=args.artifact_node,
             node_modules=args.artifact_node_modules,
             node_max_old_space_mb=args.artifact_node_max_old_space_mb,
+            builder=getattr(args, "workbook_builder", "python"),
         )
         summary["outputs"]["secondary_rebar_payload_json"] = str(secondary_rebar_payload_path)
         summary["outputs"]["secondary_rebar_workbook"] = str(secondary_rebar_workbook_output)
@@ -563,7 +595,10 @@ def _runtime_self_test(args: argparse.Namespace) -> dict[str, Any]:
     """Verify the packaged runtime and ETABS API bridge without attaching to a model."""
 
     if args.etabs_api is None:
-        raise ValueError("--runtime-self-test requires --etabs-api.")
+        found = search_etabs_dll_path()
+        if found is None:
+            raise ValueError("--runtime-self-test requires --etabs-api (或设置 ETABS_API_PATH / 自动搜索安装目录).")
+        args.etabs_api = found
     api_path = Path(args.etabs_api).resolve()
     if not api_path.is_file():
         raise FileNotFoundError(f"ETABS API DLL not found: {api_path}")
@@ -803,9 +838,15 @@ def _parser() -> argparse.ArgumentParser:
         help="导出三表配筋评审 Excel，并同时导出独立 SB 梁表 Excel",
     )
     parser.add_argument(
+        "--workbook-builder",
+        choices=["python", "node"],
+        default="python",
+        help="工作簿生成器：python（openpyxl，便携默认，无需 node）或 node（artifact-tool 对照基线）",
+    )
+    parser.add_argument(
         "--artifact-node",
         default="node",
-        help="运行正式 artifact-tool 工作簿生成器的 Node.js 可执行文件",
+        help="运行正式 artifact-tool 工作簿生成器的 Node.js 可执行文件（仅 --workbook-builder node 生效）",
     )
     parser.add_argument(
         "--artifact-node-modules",

@@ -131,6 +131,11 @@ internal sealed class PythonWorkflowRunner : IDisposable
             startInfo.ArgumentList.Add("--export-excel");
         }
 
+        if (request.ExportRebarWorkbook)
+        {
+            startInfo.ArgumentList.Add("--export-rebar-workbook");
+        }
+
         return startInfo;
     }
 

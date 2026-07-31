@@ -657,8 +657,23 @@ def run_workbook_builder(
     node_executable: str | Path = "node",
     node_modules: str | Path | None = None,
     node_max_old_space_mb: int = 8192,
+    builder: str = "python",
 ) -> Path:
-    """Run the tracked artifact-tool builder without importing ignored files."""
+    """Run the workbook builder for the three-sheet rebar workbook.
+
+    ``builder="python"`` uses the portable openpyxl renderer (no node) and
+    skips PNG previews.  ``builder="node"`` runs the tracked Node artifact-tool
+    builder plus its preview renderer, kept as the development-machine
+    reference baseline.
+    """
+    if builder == "python":
+        from src.spreadsheet.render_rebar_workbook_xlsx import render_rebar_workbook_xlsx
+
+        Path(preview_dir).mkdir(parents=True, exist_ok=True)
+        payload = json.loads(Path(payload_path).read_text(encoding="utf-8"))
+        return render_rebar_workbook_xlsx(payload, Path(output_path))
+    if builder != "node":
+        raise ValueError(f"unknown workbook builder: {builder}")
 
     output = _run_artifact_builder(
         BUILDER_PATH,
@@ -687,9 +702,21 @@ def run_secondary_workbook_builder(
     node_executable: str | Path = "node",
     node_modules: str | Path | None = None,
     node_max_old_space_mb: int = 8192,
+    builder: str = "python",
 ) -> Path:
-    """Generate the standalone SB reinforcement schedule workbook."""
+    """Generate the standalone SB reinforcement schedule workbook.
 
+    ``builder="python"`` uses the portable openpyxl renderer; ``builder="node"``
+    keeps the Node artifact-tool reference path.
+    """
+    if builder == "python":
+        from src.spreadsheet.render_secondary_beam_xlsx import render_secondary_beam_xlsx
+
+        Path(preview_dir).mkdir(parents=True, exist_ok=True)
+        payload = json.loads(Path(payload_path).read_text(encoding="utf-8"))
+        return render_secondary_beam_xlsx(payload, Path(output_path))
+    if builder != "node":
+        raise ValueError(f"unknown workbook builder: {builder}")
     return _run_artifact_builder(
         SECONDARY_BUILDER_PATH,
         payload_path,

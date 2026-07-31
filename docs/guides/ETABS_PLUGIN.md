@@ -14,7 +14,7 @@ supersedes: []
 superseded_by:
 ---
 
-# ETABS Beam Generator 插件 v0.2.0
+# ETABS Beam Generator 插件 v0.3.0
 
 本指南适用于 x64 `.NET 8` 便携插件。交互界面全部位于 ETABS 插件 DLL 内；发布包同时携带一个无窗口
 后台计算引擎，已经封装 Python 3.11、项目算法和运行依赖。目标机器只需要 ETABS 22/23，不需要安装
@@ -74,13 +74,13 @@ Python、克隆仓库或配置 `src/cli.py`。当前插件没有写回、保存�
 
 ## 2. 在 ETABS 中添加
 
-如果已经添加过 v0.1.x，先在 `Tools > Add/Show Plugins` 删除旧条目并完全退出所有加载过旧 DLL 的
-ETABS 进程。把 v0.2.0 ZIP **完整解压到新目录**后再重新启动 ETABS。不能只复制 DLL；`workflow/`
+如果已经添加过 v0.1.x / v0.2.x，先在 `Tools > Add/Show Plugins` 删除旧条目并完全退出所有加载过旧 DLL 的
+ETABS 进程。把 v0.3.0 ZIP **完整解压到新目录**后再重新启动 ETABS。不能只复制 DLL；`workflow/`
 目录是发布包的一部分。
 
 1. 打开目标 ETABS 22/23 模型。
 2. 选择 `Tools > Add/Show Plugins`。
-3. 浏览并选择 **v0.2.0 完整发布目录**中的 `BeamGenerator.EtabsPlugin.dll`。
+3. 浏览并选择 **v0.3.0 完整发布目录**中的 `BeamGenerator.EtabsPlugin.dll`。
 4. 点击 `Add`；确认 Status 表明插件已加载。
 5. 从 `Tools` 菜单点击新增的插件项。
 
@@ -105,19 +105,44 @@ ETABS 进程。把 v0.2.0 ZIP **完整解压到新目录**后再重新启动 ETA
 
 - “内置计算引擎”为“已就绪”；
 - 随包提供或用户覆盖的 `config.yaml`；
+- **ETABS API DLL** 路径（默认自动填入当前宿主程序集路径，可浏览选择其它机器的 ETABS 安装位置）；
 - 输出根目录；
 - `selected` 或 `all`；
-- 是否附加 `--export-excel`。
+- 是否附加 `--export-excel`（基础梁表）；
+- 是否附加 `--export-rebar-workbook`（三表配筋工作簿 + SB 梁表，带公式）。
 
 ETABS 仍只加载插件 DLL。`BeamGenerator.Workflow.exe` 不提供第二套 UI，也不需要用户手动运行或注册；
 插件使用 `CreateNoWindow=true` 在后台调用它。该进程隔离避免 Python/.NET 依赖进入 ETABS 宿主进程。
+
+### 4.1 ETABS API DLL 定位
+
+插件在 ETABS 进程内运行时，自动从当前宿主程序集取得 `ETABSv1.dll` 的绝对路径，作为“ETABS API DLL”
+的默认值。需要部署到其它机器或使用非标准安装位置时，可以：
+
+- 在“运行只读工作流”页的 **ETABS API DLL** 行点击“浏览…”选择目标机器的 `ETABSv1.dll`；选择会持久化到
+  `%LOCALAPPDATA%\ETABS Beam Generator\plugin-settings.json`，下次打开插件自动沿用；
+- 独立运行便携 CLI（不经插件）时，优先级为 `--etabs-api` 参数 > `ETABS_API_PATH` 环境变量 >
+  `config.yaml` 的有效路径 > 自动搜索常见安装目录（各盘符 `Program Files / Program Files (x86)` 下
+  `Computers and Structures/ETABS 23|22/ETABSv1.dll`，优先 23）> 明确报错。
+
+### 4.2 输出成果
+
+默认只读工作流产出拓扑 CSV/DXF/JSON 与审计清单。勾选“导出配筋工作簿”后额外生成（无需 node，
+便携运行时内置 openpyxl 渲染）：
+
+- `beam_rebar_review_<时间戳>.xlsx`：三表“原始分跨数据 / 配筋调整复核 / 整理梁表”，实配面积、OK/NG
+  状态和跨表引用均为公式，在 Excel 打开时按黄色输入单元格（配筋文本、Legs）自动重算；
+- `secondary_beam_schedule_<时间戳>.xlsx`：SB 梁表 + 复核异常表。
+
+便携运行时不生成 PNG 预览（预览是开发机 QA 用，非交付成果）。
 
 插件只会生成以下类别的后台命令：
 
 ```text
 BeamGenerator.Workflow.exe --pid <ETABS_PID> --expected-model <EDB> \
   --etabs-api <HOST_ETABSV1_DLL> --config <CONFIG> --read-only \
-  --selection <all|selected> --output-dir <NEW_DIR>
+  --selection <all|selected> --output-dir <NEW_DIR> \
+  [--export-excel] [--export-rebar-workbook]
 ```
 
 当前源码不生成 `--writeback`、`--run-analysis`、`--run-design` 或其他 mutation 参数。输出目录按运行时间
@@ -153,6 +178,7 @@ BeamGenerator.Workflow.exe --pid <ETABS_PID> --expected-model <EDB> \
 | `selected` 被拒绝 | 先在 ETABS 选择至少一个 Frame Object，再点击刷新。 |
 | “内置计算引擎”显示缺失 | 重新完整解压 ZIP；确认 `workflow/BeamGenerator.Workflow/BeamGenerator.Workflow.exe` 和 `_internal/` 都存在。不要单独移动 DLL 或 EXE。 |
 | 找不到 config | 确认同一计算引擎目录存在 `config.yaml`；DLL 路径由插件根据当前 ETABS 宿主自动覆盖，不需要手工改盘符。 |
+| 找不到 ETABS API DLL | 插件默认用宿主程序集路径；独立 CLI 自动搜索常见安装目录。仍找不到时用 `--etabs-api` 或 `ETABS_API_PATH` 显式指定 `ETABSv1.dll`，或在插件“ETABS API DLL”行浏览选择。 |
 | 便携工作流退出码非零 | 查看插件日志和新输出目录；错误不会被转换为成功，也不会触发写回。 |
 | 关闭窗口被阻止 | 后台计算进程仍在运行；等待完成或确认终止由插件启动的进程。 |
 
@@ -162,4 +188,6 @@ BeamGenerator.Workflow.exe --pid <ETABS_PID> --expected-model <EDB> \
 - 这不是正式安装器或签名发布包。
 - ZIP 当前约百兆，采用目录式自包含运行时；必须保持目录结构完整。
 - 运行器尚未进行代码签名，企业终端可能需要将发布目录加入允许列表。
+- 便携配筋工作簿由 openpyxl 渲染（无需 node），与 Node artifact-tool 版本可能存在样式/条件格式的
+  亚像素差异；公式语义一致。PNG 预览仅在开发机生成，便携端不产出。
 - CAD 插件、稳定编号/override UI、写回事务 UI、升级机制和企业部署仍未交付。

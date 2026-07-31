@@ -5,7 +5,7 @@ status: current
 owner: project
 created: 2026-07-25
 updated: 2026-07-31
-as_of: 2026-07-31T22:40:00+08:00
+as_of: 2026-07-31T23:55:00+08:00
 git_commit: 7d3862752041fe18eb0201b21671f3575d70b52b
 dirty: true
 accepted_manifest: p1-writeback:20260730T072626Z-5101501d;p1-cover25:20260730T103252Z-d96440dc;p2-offline:20260730T095035Z-d1abb748;p2-plugin-v01:20260730T131855Z-53226a75
@@ -20,6 +20,7 @@ related:
   - VAL-20260730-P2-ETABS-PLUGIN-V01
   - IP-P2-003
   - VAL-20260731-P2-ETABS-PLUGIN-V02
+  - VAL-20260731-P2-ETABS-PLUGIN-V03
 supersedes: []
 superseded_by:
 ---
@@ -38,7 +39,7 @@ superseded_by:
 | writeback 全链证据 | [VAL-20260730-P1-V645-CURRENT-FULL-CHAIN](validation/VAL-20260730_P1_V645_CURRENT_FULL_CHAIN.md)，较早代码身份 |
 | P2 技术验证 | [VAL-20260730-P2-SQLITE-SNAPSHOT-SPIKE](validation/VAL-20260730_P2_SQLITE_SNAPSHOT_SPIKE.md)，`passed`（spike 范围） |
 | P2 当前领域证据 | [VAL-20260730-P2-OAPI-SQLITE-WORKFLOW-PARITY](validation/VAL-20260730_P2_OAPI_SQLITE_WORKFLOW_PARITY.md)，`passed`（ETABS 22 矩形梁只读工作流） |
-| ETABS 插件 v0.2.0 | [VAL-20260731-P2-ETABS-PLUGIN-V02](validation/VAL-20260731_P2_ETABS_PLUGIN_V02.md)，`partial`（正式封装构建通过：插件 DLL + 便携 workflow 运行时 + 合同校验 + manifest + ZIP；ETABS 菜单加载与 ETABS 23 待人工/环境验收） |
+| ETABS 插件 v0.3.0 | [VAL-20260731-P2-ETABS-PLUGIN-V03](validation/VAL-20260731_P2_ETABS_PLUGIN_V03.md)，`partial`（ETABS API DLL 可定位 + 便携无 node 生成带公式配筋 xlsx；菜单加载与 ETABS 23 待人工/环境验收） |
 | 活动阶段 | [MS-P1-001 配筋工程闭环](../specs/milestones/MS-P1-001_REBAR_ENGINEERING_CLOSURE.md) |
 
 当前代码身份已完成离线门禁、ETABS 22.7 只读配筋链和 ETABS 插件 v0.1 技术垂直切片；run 技术状态为 `SUCCESS`。ETABS 设计保护层与
@@ -89,6 +90,14 @@ v0.2.0 正式封装构建对修复后的构建脚本、插件源码和便携运�
 该 identity 在 v0.2.0 发布封装构建、构建脚本环境修复（PowerShell 7 guard、manifest 兼容写法）及本次
 Validation/Guide/Task/Baseline 治理 Markdown 写入前生成。
 
+v0.3.0 对新增的 DLL 定位、便携配筋渲染器和插件 UI 改动重新冻结：
+
+- tracked diff SHA-256：`bb0f10c140e7a075159cf4956a1eb19142e0d865f78362a60d01d46e9bb18636`
+- tracked diff 与全部未跟踪文件内容 SHA-256：
+  `477bb677d1a703d3e657b6870b73f1716761db0349d4954b8e0e44b94559158f`
+
+该 identity 在 v0.3.0 重打包与 Validation/Guide/Task/Baseline 治理 Markdown 写入前生成。
+
 ## 3. 能力矩阵
 
 状态只使用 `VERIFIED`、`PARTIAL`、`BLOCKED`、`UNVERIFIED`。
@@ -106,7 +115,7 @@ Validation/Guide/Task/Baseline 治理 Markdown 写入前生成。
 | 人工拓扑 Override 核心契约 | `PARTIAL` | 单元测试覆盖 JSON、GUID、连通和失效 | ETABS 交互 UI 与第二轮写回未实现 | TASK-NUM-003 |
 | 稳定编号和 CAD 正式交换 schema | `PARTIAL` | 当前 formatter、DXF/CSV 和方向测试 | 稳定编号映射、正式 JSON 和 CAD 消费未闭环 | TASK-NUM-001、TASK-CAD-001 |
 | SQLite 快照数据源 | `PARTIAL` | ETABS 22 矩形梁：4,094 梁、1,441 支承、65,881 station；六个拓扑成果逐字节一致，3,018 个主/SB payload 行逐字段一致 | 非矩形真实样本、CAD schema、ETABS 23 和 bundle 生命周期未完成 | TASK-P2-SQLITE-001 |
-| ETABS 交互插件 v0.2.0 | `PARTIAL` | v0.2.0 正式封装构建通过：插件 DLL + 便携 workflow 运行时（EXE + 153 配套 DLL + config）+ 合同校验 `passed` + manifest 912 artifacts + runtime 自检 OK + ZIP；v0.1.1 的 `<AssemblyName>.cPlugin` 解析/实例化和真实 ETABS 22 SapModel 窗口/JSON/Finish(0) 证据仍有效 | v0.2.0 的 ETABS Tools 菜单加载、非空选择、ETABS 23、安装签名待验证 | TASK-P2-PLUGIN-001 |
+| ETABS 交互插件 v0.3.0 | `PARTIAL` | v0.3.0 支持 ETABS API DLL 定位（插件 UI 覆盖 + CLI 自动搜索常见安装目录）；便携 `--export-rebar-workbook` 在无 node 下用 openpyxl 生成带公式三表/SB xlsx（239 passed，coverage 80.52%；便携 run 3023 行，公式扫描 0 错误）；v0.2.0 封装证据仍有效 | v0.3.0 的 ETABS Tools 菜单加载、非空选择、ETABS 23、安装签名待验证 | TASK-P2-PLUGIN-001 |
 | SAP2000、CAD 插件、正式 GUI/安装器、CI/CD | `UNVERIFIED` | 无当前实现证据 | P2 范围 | Roadmap P2 |
 
 ## 4. 当前实模基线允许的受控例外
@@ -140,6 +149,8 @@ writeback run `20260730T072626Z-5101501d` 只对其精确输入有效：
   仍未完成，不能把该 profile 扩大解释为非矩形截面、ETABS 23、CAD schema 或正式 bundle 生命周期已获支持。
 - v0.1.0/v0.1.1 正式包缺少 `workflow/` 便携运行时，不能作为完整插件包交付；单独的便携运行器目录
   （EXE + config）也不是插件包。v0.2.0 包才同时包含插件 DLL 与便携计算引擎，且须整体部署。
+- v0.3.0 的便携带公式配筋工作簿由 openpyxl 渲染，与 Node artifact-tool 版本可能存在样式/条件格式的
+  亚像素差异（公式语义一致）；PNG 预览仅在开发机生成。
 
 ## 6. 更新规则
 

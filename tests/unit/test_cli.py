@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.cli import (
+    _ensure_etabs_dll,
     _etabs_version,
     _load_confirmed_multi_section_spans,
     _parser,
@@ -11,6 +12,7 @@ from src.cli import (
     _save_writeback_or_rollback,
     run,
 )
+from src.config import load_config
 from src.core.model_writeback import VerificationResult, WritebackExecutionError
 
 
@@ -57,6 +59,37 @@ def test_cli_parser_exposes_formal_rebar_workbook_flags() -> None:
     assert args.artifact_node == "C:/runtime/node.exe"
     assert args.artifact_node_modules == Path("C:/runtime/node_modules")
     assert args.artifact_node_max_old_space_mb == 8192
+    assert args.workbook_builder == "python"
+
+
+def test_cli_ensure_etabs_dll_short_circuits_on_explicit(tmp_path: Path) -> None:
+    config = load_config("config.example.yaml", etabs_dll_path=tmp_path / "missing.dll")
+    assert _ensure_etabs_dll(config, explicit=tmp_path / "api.dll") is config
+
+
+def test_cli_ensure_etabs_dll_prefers_env(tmp_path: Path, monkeypatch) -> None:
+    dll = tmp_path / "env.dll"
+    dll.write_bytes(b"x")
+    monkeypatch.setenv("ETABS_API_PATH", str(dll))
+    config = load_config("config.example.yaml", etabs_dll_path=tmp_path / "missing.dll")
+    resolved = _ensure_etabs_dll(config, explicit=None)
+    assert resolved.etabs.dll_path == dll.resolve()
+
+
+def test_cli_ensure_etabs_dll_falls_back_to_search(tmp_path: Path, monkeypatch) -> None:
+    dll = tmp_path / "found.dll"
+    dll.write_bytes(b"x")
+    config = load_config("config.example.yaml", etabs_dll_path=tmp_path / "missing.dll")
+    monkeypatch.setattr("src.cli.search_etabs_dll_path", lambda: dll)
+    resolved = _ensure_etabs_dll(config, explicit=None)
+    assert resolved.etabs.dll_path == dll
+
+
+def test_cli_ensure_etabs_dll_raises_when_not_found(tmp_path: Path, monkeypatch) -> None:
+    config = load_config("config.example.yaml", etabs_dll_path=tmp_path / "missing.dll")
+    monkeypatch.setattr("src.cli.search_etabs_dll_path", lambda: None)
+    with pytest.raises(FileNotFoundError, match="ETABS API DLL"):
+        _ensure_etabs_dll(config, explicit=None)
 
 
 def test_cli_parser_accepts_snapshot_as_read_only_source() -> None:

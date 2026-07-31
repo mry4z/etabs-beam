@@ -60,7 +60,7 @@ if ($hostMajor -notin @(22, 23)) {
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $OutputDirectory = Join-Path $workspaceRoot "build\etabs-plugin\v0.2.0-etabs$hostMajor-$stamp"
+    $OutputDirectory = Join-Path $workspaceRoot "build\etabs-plugin\v0.3.0-etabs$hostMajor-$stamp"
 }
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputDirectory)
 $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot "build\etabs-plugin"))
@@ -129,7 +129,7 @@ $artifactRecords = Get-ChildItem -LiteralPath $resolvedOutput -Recurse -File |
 $manifest = [ordered]@{
     schema = "etabs-beam-generator/plugin-package@1"
     generated_at = (Get-Date).ToString("o")
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     target = "net8.0-windows/x64"
     portable_workflow = "workflow/BeamGenerator.Workflow/BeamGenerator.Workflow.exe"
     local_python_required = $false

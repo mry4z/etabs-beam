@@ -18,9 +18,11 @@ internal sealed class MainForm : Form
     private readonly DataGridView _selectionGrid = new();
     private readonly TextBox _runtimeModeText = ReadOnlyTextBox();
     private readonly TextBox _configText = new();
+    private readonly TextBox _etabsApiText = new();
     private readonly TextBox _outputRootText = new();
     private readonly ComboBox _selectionMode = new();
     private readonly CheckBox _exportExcel = new();
+    private readonly CheckBox _exportRebarWorkbook = new();
     private readonly RichTextBox _logText = new();
     private readonly Button _runButton = new();
     private readonly Button _cancelButton = new();
@@ -146,13 +148,13 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 3,
-            RowCount = 7,
+            RowCount = 8,
             Padding = new Padding(12),
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 135));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
-        for (var row = 0; row < 5; row++)
+        for (var row = 0; row < 6; row++)
         {
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         }
@@ -162,21 +164,34 @@ internal sealed class MainForm : Form
         AddReadOnlyRow(layout, 0, "内置计算引擎", _runtimeModeText);
         AddPathRow(layout, 1, "config.yaml", _configText, BrowseConfig);
         AddPathRow(layout, 2, "输出根目录", _outputRootText, () => BrowseFolder(_outputRootText));
+        AddPathRow(layout, 3, "ETABS API DLL", _etabsApiText, BrowseEtabsApi);
 
-        layout.Controls.Add(new Label { Text = "处理范围", TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill }, 0, 3);
+        layout.Controls.Add(new Label { Text = "处理范围", TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill }, 0, 4);
         _selectionMode.DropDownStyle = ComboBoxStyle.DropDownList;
         _selectionMode.Items.AddRange(new object[] { "selected", "all" });
         _selectionMode.SelectedIndex = 0;
         _selectionMode.Dock = DockStyle.Left;
         _selectionMode.Width = 150;
-        layout.Controls.Add(_selectionMode, 1, 3);
+        layout.Controls.Add(_selectionMode, 1, 4);
 
-        layout.Controls.Add(new Label { Text = "可选成果", TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill }, 0, 4);
+        layout.Controls.Add(new Label { Text = "可选成果", TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill }, 0, 5);
+        var outputOptions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+        };
         _exportExcel.Text = "同时生成基础 Excel（要求当前模型已有设计结果）";
         _exportExcel.AutoSize = true;
         _exportExcel.Anchor = AnchorStyles.Left;
-        layout.Controls.Add(_exportExcel, 1, 4);
-        layout.SetColumnSpan(_exportExcel, 2);
+        _exportRebarWorkbook.Text = "同时生成配筋工作簿（三表 + SB 表，带公式）";
+        _exportRebarWorkbook.AutoSize = true;
+        _exportRebarWorkbook.Anchor = AnchorStyles.Left;
+        outputOptions.Controls.AddRange(new Control[] { _exportExcel, _exportRebarWorkbook });
+        layout.Controls.Add(outputOptions, 1, 5);
+        layout.SetColumnSpan(outputOptions, 2);
 
         var actions = new FlowLayoutPanel
         {
@@ -198,14 +213,14 @@ internal sealed class MainForm : Form
         var saveSettingsButton = new Button { Text = "保存设置", AutoSize = true };
         saveSettingsButton.Click += (_, _) => SaveSettings(showConfirmation: true);
         actions.Controls.AddRange(new Control[] { _runButton, _cancelButton, _openOutputButton, saveSettingsButton });
-        layout.Controls.Add(actions, 1, 5);
+        layout.Controls.Add(actions, 1, 6);
         layout.SetColumnSpan(actions, 2);
 
         _logText.Dock = DockStyle.Fill;
         _logText.ReadOnly = true;
         _logText.Font = new Font("Consolas", 9F);
         _logText.BackColor = Color.FromArgb(250, 250, 250);
-        layout.Controls.Add(_logText, 0, 6);
+        layout.Controls.Add(_logText, 0, 7);
         layout.SetColumnSpan(_logText, 3);
         page.Controls.Add(layout);
         return page;
@@ -242,6 +257,8 @@ internal sealed class MainForm : Form
         _outputRootText.Text = settings.OutputRoot;
         _selectionMode.SelectedItem = settings.SelectionMode is "all" ? "all" : "selected";
         _exportExcel.Checked = settings.ExportExcel;
+        _exportRebarWorkbook.Checked = settings.ExportRebarWorkbook;
+        _etabsApiText.Text = settings.EtabsApiPath ?? "";
         UpdateRuntimeMode();
         if (!string.IsNullOrWhiteSpace(warning))
         {
@@ -262,6 +279,8 @@ internal sealed class MainForm : Form
                     OutputRoot = _outputRootText.Text.Trim(),
                     SelectionMode = Convert.ToString(_selectionMode.SelectedItem) ?? "selected",
                     ExportExcel = _exportExcel.Checked,
+                    ExportRebarWorkbook = _exportRebarWorkbook.Checked,
+                    EtabsApiPath = _etabsApiText.Text.Trim(),
                 }
             );
             if (showConfirmation)
@@ -324,6 +343,10 @@ internal sealed class MainForm : Form
             var status = _snapshot.Complete
                 ? $"刷新完成：选择了 {_snapshot.SelectedFrames.Count:N0} 个 Frame。"
                 : $"刷新完成，但存在 {_snapshot.Diagnostics.Count + _snapshot.SelectedFrames.Count(frame => !frame.Complete)} 项诊断。";
+            if (string.IsNullOrWhiteSpace(_etabsApiText.Text) && !string.IsNullOrWhiteSpace(_snapshot.ApiAssemblyPath))
+            {
+                _etabsApiText.Text = _snapshot.ApiAssemblyPath;
+            }
             SetStatus(status);
         }
         catch (Exception exception)
@@ -409,7 +432,9 @@ internal sealed class MainForm : Form
                 "config.yaml"
             );
             var expectedModel = RequireFile(_snapshot.ExpectedDurableModelPath, "当前 durable EDB");
-            var etabsApiPath = RequireFile(_snapshot.ApiAssemblyPath, "当前 ETABS API 程序集");
+            var etabsApiPath = !string.IsNullOrWhiteSpace(_etabsApiText.Text.Trim())
+                ? RequireFile(ResolvePath(workingDirectory, _etabsApiText.Text), "ETABS API DLL")
+                : RequireFile(_snapshot.ApiAssemblyPath, "当前 ETABS API 程序集");
 
             var selection = Convert.ToString(_selectionMode.SelectedItem) ?? "selected";
             if (selection == "selected" && _snapshot.SelectedFrames.Count == 0)
@@ -438,6 +463,7 @@ internal sealed class MainForm : Form
                 _lastOutputDirectory,
                 selection,
                 _exportExcel.Checked,
+                _exportRebarWorkbook.Checked,
                 _snapshot.ProcessId,
                 expectedModel
             );
@@ -525,6 +551,32 @@ internal sealed class MainForm : Form
             MessageBoxButtons.OK,
             MessageBoxIcon.Information
         );
+    }
+
+    private void BrowseEtabsApi()
+    {
+        var initialDirectory = "";
+        if (!string.IsNullOrWhiteSpace(_etabsApiText.Text))
+        {
+            initialDirectory = Path.GetDirectoryName(Path.GetFullPath(_etabsApiText.Text)) ?? "";
+        }
+        else if (_snapshot is not null && !string.IsNullOrWhiteSpace(_snapshot.ApiAssemblyPath))
+        {
+            initialDirectory = Path.GetDirectoryName(Path.GetFullPath(_snapshot.ApiAssemblyPath)) ?? "";
+        }
+
+        using var dialog = new OpenFileDialog
+        {
+            Title = "选择 ETABS API DLL（ETABSv1.dll）",
+            Filter = "ETABS API DLL (*.dll)|*.dll|所有文件 (*.*)|*.*",
+            CheckFileExists = true,
+            InitialDirectory = Directory.Exists(initialDirectory) ? initialDirectory : "",
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            _etabsApiText.Text = dialog.FileName;
+            SetStatus($"ETABS API DLL 已指定：{dialog.FileName}");
+        }
     }
 
     private void BrowseConfig()

@@ -68,10 +68,11 @@ superseded_by:
 - P2 当前矩形梁 OAPI / SQLite 只读工作流：
   [VAL-20260730-P2-OAPI-SQLITE-WORKFLOW-PARITY](state/validation/VAL-20260730_P2_OAPI_SQLITE_WORKFLOW_PARITY.md)；
   剩余 Gate 见 [IP-P2-002](delivery/plans/active/IP-P2-002_SQLITE_DOMAIN_SOURCE.md)。
-- ETABS 插件 v0.2.0 正式发布封装（插件 DLL + 便携 workflow 运行时 + 合同校验 + manifest + ZIP）：
-  [VAL-20260731-P2-ETABS-PLUGIN-V02](state/validation/VAL-20260731_P2_ETABS_PLUGIN_V02.md)（`partial`；
-  ETABS 菜单加载和 ETABS 23 待人工/对应环境验收）；v0.1.x 入口类型空值修复历史见
-  [VAL-20260730-P2-ETABS-PLUGIN-V01](state/validation/VAL-20260730_P2_ETABS_PLUGIN_V01.md)。
+- ETABS 插件 v0.3.0（ETABS API DLL 可定位 + 便携无 node 生成带公式配筋 xlsx）：
+  [VAL-20260731-P2-ETABS-PLUGIN-V03](state/validation/VAL-20260731_P2_ETABS_PLUGIN_V03.md)（`partial`；
+  ETABS 菜单加载和 ETABS 23 待人工/对应环境验收）；v0.2.0 正式封装见
+  [VAL-20260731-P2-ETABS-PLUGIN-V02](state/validation/VAL-20260731_P2_ETABS_PLUGIN_V02.md)，v0.1.x 入口
+  类型空值修复历史见 [VAL-20260730-P2-ETABS-PLUGIN-V01](state/validation/VAL-20260730_P2_ETABS_PLUGIN_V01.md)。
 - 文档重构审查：[REV-20260725-DOCUMENT-GOVERNANCE](state/reviews/REV-20260725_DOCUMENTATION_GOVERNANCE.md)。
 
 P1 的保护层/骨料输入已解决；当前阻塞为 408 个实模异常处置、最新代码 writeback 全链和结构工程师冻结签署；具体边界以
