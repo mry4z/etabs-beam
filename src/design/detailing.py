@@ -1194,7 +1194,14 @@ class BeamDetailingEngine:
         regions: tuple[RegionDetailing, ...],
         mode: ReinforcementMode,
     ) -> tuple[RegionDetailing, ...]:
-        """Apply the confirmed left/middle/right lap rules within one span."""
+        """Apply the one-span longitudinal rules to the three design stations.
+
+        Bottom reinforcement is deliberately selected once from the complete
+        left/middle/right demand envelope.  The selected layout is then used
+        at every station in the span, while adjacent spans remain independent.
+        The existing top-bar coordination rules are retained for primary
+        beams.
+        """
 
         output = list(regions)
         max_layers = self.project.max_main_bar_layers if mode is ReinforcementMode.NORMAL else None
@@ -1263,32 +1270,7 @@ class BeamDetailingEngine:
         regions: list[RegionDetailing],
         max_layers: int | None,
     ) -> list[RegionDetailing]:
-        through_diameter = self._through_diameter(regions[0].bottom)
-        through_template = next(bar.layers for bar in regions[0].bottom.bars if bar.diameter_mm == through_diameter)
-        middle_required = max(
-            regions[1].bottom.required_area_mm2,
-            regions[0].bottom.provided_area_mm2,
-            regions[2].bottom.provided_area_mm2,
-        )
-        for index, region in enumerate(regions):
-            required = middle_required if index == 1 else region.bottom.required_area_mm2
-            coordinated = self._fixed_diameter_design(
-                section,
-                required,
-                region.stirrup.legs,
-                region.stirrup.diameter_mm,
-                through_diameter,
-                max_layers,
-            )
-            if len(coordinated.bars) == 1 and sum(through_template) == coordinated.bars[0].count:
-                coordinated_bar = replace(coordinated.bars[0], layers=through_template)
-                coordinated = replace(
-                    coordinated,
-                    bars=(coordinated_bar,),
-                    layers=len(through_template),
-                )
-            regions[index] = replace(region, bottom=coordinated)
-        return regions
+        return self._coordinate_full_span_bottom(section, regions, max_layers)
 
     def _coordinate_sb_bottom(
         self,
@@ -1296,26 +1278,53 @@ class BeamDetailingEngine:
         regions: list[RegionDetailing],
         max_layers: int | None,
     ) -> list[RegionDetailing]:
-        through_diameter = self._through_diameter(regions[0].bottom)
-        middle_required = max(
-            regions[1].bottom.required_area_mm2,
-            regions[0].bottom.provided_area_mm2,
-            regions[2].bottom.provided_area_mm2,
+        return self._coordinate_full_span_bottom(section, regions, max_layers)
+
+    def _coordinate_full_span_bottom(
+        self,
+        section: BeamSection,
+        regions: list[RegionDetailing],
+        max_layers: int | None,
+    ) -> list[RegionDetailing]:
+        """Select one actual bottom layout for the entire span.
+
+        The largest bottom demand and the strictest stirrup geometry are used
+        for the candidate search.  Reusing the same immutable design object at
+        all stations makes diameter, count, layering and hanger content
+        explicit and prevents the exporter from manufacturing a uniform
+        string out of three different calculations.
+        """
+
+        if len(regions) != 3:
+            raise DetailingError("FULL_SPAN_BOTTOM_REQUIRES_THREE_STATIONS")
+        common_stirrup_diameter = max(region.stirrup.diameter_mm for region in regions)
+        minimum_count = (
+            2
+            if section.is_secondary
+            else max(region.stirrup.legs for region in regions)
         )
-        for index, region in enumerate(regions):
-            required = middle_required if index == 1 else region.bottom.required_area_mm2
-            allow_credit = region.as_flex_bottom_mm2 <= region.as_min_mm2 + 1e-9
-            coordinated = self._base_diameter_design(
-                section,
-                required,
-                region.stirrup.diameter_mm,
-                through_diameter,
-                max_layers,
-                region.stirrup.legs,
-                allow_credit,
-            )
-            regions[index] = replace(region, bottom=coordinated)
-        return regions
+        hanger_support_count = (
+            max(region.stirrup.legs for region in regions)
+            if section.is_secondary
+            else None
+        )
+        required = max(region.bottom.required_area_mm2 for region in regions)
+        allow_minimum_credit_hanger = section.is_secondary and all(
+            region.as_flex_bottom_mm2 <= region.as_min_mm2 + 1e-9
+            for region in regions
+        )
+        coordinated = self._select_longitudinal(
+            section,
+            required,
+            minimum_count,
+            common_stirrup_diameter,
+            max_layers,
+            hanger_support_count,
+            allow_minimum_credit_hanger,
+        )
+        if coordinated is None:
+            raise DetailingError(f"{section.name}: FULL_SPAN_BOTTOM_LAYOUT_FAILED")
+        return [replace(region, bottom=coordinated) for region in regions]
 
     def _through_diameter(self, design: LongitudinalDesign, section: BeamSection | None = None) -> int:
         minimum = (
@@ -1994,12 +2003,15 @@ def coordinate_adjacent_spans(
     option: ContinuityOption,
     engine: BeamDetailingEngine | None = None,
 ) -> tuple[BeamDetailingResult, BeamDetailingResult]:
-    """Coordinate top/bottom bars at a shared support without touching ETABS.
+    """Coordinate top bars at a shared support without touching ETABS.
 
     Option 1 uses the larger selected layout on both sides.  Option 2 preserves
     one shared diameter baseline while allowing the higher-demand side to add
-    bars.  The function is intentionally pure so it can be applied before an
-    Excel export or a future model writeback transaction.
+    bars.  Bottom layouts are intentionally independent per span; each result
+    is re-normalized to its own full-span bottom demand envelope after the
+    support top bars are coordinated.  The function is intentionally pure so
+    it can be applied before an Excel export or a future model writeback
+    transaction.
     """
 
     if len(first.regions) != len(second.regions):
@@ -2016,7 +2028,8 @@ def coordinate_adjacent_spans(
     second_regions = list(second.regions)
 
     # A shared support is the J end of the first span and I end of the next.
-    count_adjustment = option is ContinuityOption.OPTION_2_COUNT_ADJUSTMENT and not first.detailing_profile.is_secondary
+    is_secondary = first.section.is_secondary
+    count_adjustment = option is ContinuityOption.OPTION_2_COUNT_ADJUSTMENT and not is_secondary
     first_top, second_top = _common_support_layout(
         first.regions[2].top,
         second.regions[0].top,
@@ -2031,33 +2044,6 @@ def coordinate_adjacent_spans(
     first_regions[2] = replace(first_regions[2], top=first_top)
     second_regions[0] = replace(second_regions[0], top=second_top)
 
-    if first.detailing_profile.is_secondary:
-        # SB bottom bars keep independent counts, but use the preceding span's
-        # through-bar diameter at the common support for lap compatibility.
-        first_bottom, second_bottom = _common_support_layout(
-            first.regions[2].bottom,
-            second.regions[0].bottom,
-            first.regions[2],
-            second.regions[0],
-            first,
-            second,
-            engine,
-            exact_count=False,
-        )
-    else:
-        first_bottom, second_bottom = _common_support_layout(
-            first.regions[2].bottom,
-            second.regions[0].bottom,
-            first.regions[2],
-            second.regions[0],
-            first,
-            second,
-            engine,
-            exact_count=not count_adjustment,
-            allow_supplement=not count_adjustment,
-        )
-    first_regions[2] = replace(first_regions[2], bottom=first_bottom)
-    second_regions[0] = replace(second_regions[0], bottom=second_bottom)
     coordination_warning = ("OPTION_2_COUNT_ADJUSTMENT_APPLIED",) if count_adjustment else ()
     first_output = replace(
         first,
@@ -2124,8 +2110,8 @@ def _common_support_layout(
     )
     if not exact_count:
         if not allow_supplement:
-            first_minimum = 2 if first_result.detailing_profile.is_secondary else first_region.stirrup.legs
-            second_minimum = 2 if second_result.detailing_profile.is_secondary else second_region.stirrup.legs
+            first_minimum = 2 if first_result.section.is_secondary else first_region.stirrup.legs
+            second_minimum = 2 if second_result.section.is_secondary else second_region.stirrup.legs
             for diameter in diameters:
                 first_output = engine._single_diameter_candidate(
                     first_result.section,
@@ -2168,7 +2154,7 @@ def _common_support_layout(
 
     minimum_count = (
         2
-        if first_result.detailing_profile.is_secondary
+        if first_result.section.is_secondary
         else max(
             first_region.stirrup.legs,
             second_region.stirrup.legs,
@@ -2233,7 +2219,7 @@ def _common_support_layout(
             len(layers),
             engine.code.minimum_clear_spacing(diameter, second_result.section.aggregate_mm),
         )
-        if first_result.detailing_profile.is_secondary:
+        if first_result.section.is_secondary:
             first_output = engine._with_sb_hangers(
                 first_output,
                 first_result.section,

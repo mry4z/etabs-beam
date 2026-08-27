@@ -235,6 +235,9 @@ def test_smf_capacity_shear_enters_stirrup_selection_before_final_result() -> No
     assert result.regions[2].demand.capacity_shear_av_over_s_mm2_per_mm == pytest.approx(required)
     assert result.regions[1].demand.capacity_shear_av_over_s_mm2_per_mm is None
     assert result.regions[0].stirrup.required_av_over_s_mm2_per_mm >= required
+    assert len({region.bottom.notation for region in result.regions}) == 1
+    assert result.capacity_shear_review.left_mpr_kNm is not None
+    assert result.capacity_shear_review.right_mpr_kNm is not None
 
 
 def test_multilayer_longitudinal_layout_never_leaves_one_bar_in_last_layer() -> None:
@@ -611,12 +614,12 @@ def test_pb_bottom_middle_does_not_reduce_from_support_layout() -> None:
     )
     result = _manual_result(BeamDetailingProfile.PB_OMF, top, bottom)
     coordinated = coordinate_intraspan_result(result)
-    assert coordinated.regions[0].bottom.notation == "8T20 5/3"
-    assert coordinated.regions[1].bottom.notation == "8T20 5/3"
-    assert coordinated.regions[2].bottom.notation == "8T20 5/3"
+    bottom_notations = tuple(region.bottom.notation for region in coordinated.regions)
+    assert len(set(bottom_notations)) == 1
+    assert coordinated.regions[0].bottom.provided_area_mm2 >= 8 * 314.1592653589793
 
 
-def test_sb_bottom_uses_one_through_diameter_and_area_based_middle_supplement() -> None:
+def test_sb_bottom_uses_one_full_span_layout_from_all_three_demands() -> None:
     top = (
         _manual_longitudinal((16, 4, None)),
         _manual_longitudinal((16, 2, None), (12, 1, None)),
@@ -635,9 +638,7 @@ def test_sb_bottom_uses_one_through_diameter_and_area_based_middle_supplement() 
         legs=2,
     )
     coordinated = coordinate_intraspan_result(result)
-    assert coordinated.regions[0].bottom.notation == "2T20"
-    assert coordinated.regions[1].bottom.notation == "2T20+1T25"
-    assert coordinated.regions[2].bottom.notation == "2T20"
+    assert tuple(region.bottom.notation for region in coordinated.regions) == ("2T25", "2T25", "2T25")
     assert tuple(region.top.notation for region in coordinated.regions) == (
         "4T16",
         "2T16+1T12",
@@ -709,7 +710,7 @@ def test_pb_option_2_keeps_common_diameter_but_allows_count_adjustment() -> None
     assert "OPTION_2_COUNT_ADJUSTMENT_APPLIED" in first_out.warnings
 
 
-def test_pb_adjacent_bottom_diameter_propagates_from_support_into_next_span() -> None:
+def test_pb_adjacent_spans_keep_independent_uniform_bottom_layouts() -> None:
     top = tuple(_manual_longitudinal((20, 4, None)) for _ in range(3))
     first = _manual_result(
         BeamDetailingProfile.PB_OMF,
@@ -736,13 +737,13 @@ def test_pb_adjacent_bottom_diameter_propagates_from_support_into_next_span() ->
         ContinuityOption.OPTION_1_STRICT_EQUAL,
     )
 
-    assert first_out.regions[2].bottom.notation == "6T20 4/2"
-    assert second_out.regions[0].bottom.notation == "6T20 4/2"
-    assert second_out.regions[1].bottom.notation == "6T20 4/2"
-    assert second_out.regions[2].bottom.notation == "4T20"
+    assert len({region.bottom.notation for region in first_out.regions}) == 1
+    assert len({region.bottom.notation for region in second_out.regions}) == 1
+    assert first_out.regions[2].bottom.notation == first_out.regions[0].bottom.notation
+    assert second_out.regions[0].bottom.notation == second_out.regions[2].bottom.notation
 
 
-def test_sb_adjacent_spans_equalize_top_and_bottom_base_diameter() -> None:
+def test_sb_adjacent_spans_equalize_top_but_keep_bottom_independent() -> None:
     engine = BeamDetailingEngine()
 
     def sb_result(name: str, right_top: float, right_bottom: float, left_top: float, left_bottom: float):
@@ -773,7 +774,9 @@ def test_sb_adjacent_spans_equalize_top_and_bottom_base_diameter() -> None:
     second = sb_result("SB-2", 1000, 1000, 1000, 1800)
     first_out, second_out = coordinate_adjacent_spans(first, second, ContinuityOption.OPTION_1_STRICT_EQUAL)
     assert first_out.regions[2].top.notation == second_out.regions[0].top.notation
-    assert first_out.regions[2].bottom.bars[0].diameter_mm == second_out.regions[0].bottom.bars[0].diameter_mm
+    assert len({region.bottom.notation for region in first_out.regions}) == 1
+    assert len({region.bottom.notation for region in second_out.regions}) == 1
+    assert first_out.regions[2].bottom.bars[0].diameter_mm != second_out.regions[0].bottom.bars[0].diameter_mm
     assert first_out.regions[2].bottom.provided_area_mm2 >= first_out.regions[2].bottom.required_area_mm2
     assert second_out.regions[0].bottom.provided_area_mm2 >= second_out.regions[0].bottom.required_area_mm2
 

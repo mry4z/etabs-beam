@@ -84,16 +84,8 @@ def test_large_workbook_previews_run_in_separate_processes(
         node_max_old_space_mb=8192,
     )
 
-    assert len(calls) == 7
-    assert [Path(call[0][-1]).stem for call in calls] == [
-        "raw_left",
-        "raw_demands",
-        "raw_trace",
-        "review_base",
-        "review_rebar",
-        "review_controls",
-        "final_schedule",
-    ]
+    assert len(calls) == 1
+    assert [Path(call[0][-1]).stem for call in calls] == ["schedule"]
     assert all(call[1]["check"] is True for call in calls)
 
 
@@ -124,9 +116,9 @@ def test_large_workbook_preview_retries_transient_native_failure(
         node_max_old_space_mb=8192,
     )
 
-    assert len(calls) == 8
-    assert calls[0][0][-2] == "raw_left"
-    assert calls[1][0][-2] == "raw_left"
+    assert len(calls) == 2
+    assert calls[0][0][-2] == "schedule"
+    assert calls[1][0][-2] == "schedule"
 
 
 def test_frame_type_table_is_strictly_parsed() -> None:
@@ -232,7 +224,7 @@ def _build_payload(schedule, beams, *, frame_types, resolved_frame_types=None):
     )
 
 
-def test_formal_payload_contains_three_sheet_rows_and_can_redetail(tmp_path: Path) -> None:
+def test_formal_payload_contains_audit_rows_and_can_redetail(tmp_path: Path) -> None:
     beam = _beam("A", (0, 0, 0), (6000, 0, 0))
     span = BeamSpan(
         "F1",
@@ -276,6 +268,12 @@ def test_formal_payload_contains_three_sheet_rows_and_can_redetail(tmp_path: Pat
     assert payload["raw_rows"][0]["clear_cover_to_stirrup_outer_mm"] == 40.0
     assert payload["metadata"]["smf_end_max_spacing_mm"] == pytest.approx(100.0)
     assert payload["metadata"]["smf_max_longitudinal_ratio"] == pytest.approx(0.01613)
+    assert payload["metadata"]["rebar_workbook_layout_version"] == "single-sheet-static-v1"
+    assert payload["metadata"]["bottom_reinforcement_strategy"] == "FULL_SPAN_UNIFORM_PER_SPAN"
+    assert payload["metadata"]["adjacent_span_bottom_strategy"] == "INDEPENDENT_PER_SPAN"
+    final = payload["final_rows"][0]
+    assert final["eb1"] == final["b1"] == final["eb2"]
+    assert final["bottom_uniform_regions_match"] is True
     assert payload["review_rows"][0]["s2_left_av_required"] == 0.35
     assert payload["review_rows"][0]["s2_left_shear_source"] == (
         "GetSummaryResultsBeam_2.VMajorArea (Av/s)"
@@ -351,7 +349,8 @@ def test_sb_sway_special_frame_type_remains_smf() -> None:
     assert len(secondary["raw_rows"]) == 1
     assert len(secondary["review_rows"]) == 1
     assert len(secondary["final_rows"]) == 1
-    assert secondary["metadata"]["secondary_workbook_layout"] == "three-sheet-rebar-workbook"
+    assert secondary["metadata"]["secondary_workbook_layout"] == "single-sheet-static-v1"
+    assert secondary["metadata"]["bottom_reinforcement_strategy"] == "FULL_SPAN_UNIFORM_PER_SPAN"
 
 
 def test_secondary_schedule_rejects_non_unified_stirrup_row() -> None:
@@ -504,7 +503,10 @@ def test_payload_coordinates_adjacent_sb_support_reinforcement_by_beam_line() ->
     first, second = payload["final_rows"]
     assert first["engine_status"] == second["engine_status"] == "OK"
     assert first["et2"] == second["et1"]
-    assert re.search(r"T(\d+)", first["eb2"]).group(1) == re.search(r"T(\d+)", second["eb1"]).group(1)
+    assert first["eb1"] == first["b1"] == first["eb2"]
+    assert second["eb1"] == second["b1"] == second["eb2"]
+    assert first["bottom_uniform_regions_match"] is True
+    assert second["bottom_uniform_regions_match"] is True
 
 
 def test_mixed_section_span_is_fail_closed() -> None:

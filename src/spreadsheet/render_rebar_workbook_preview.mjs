@@ -10,13 +10,7 @@ if (!inputPath || !previewKey || !outputPath) {
 }
 
 const previews = {
-  raw_left: ["原始分跨数据", "A1:V14"],
-  raw_demands: ["原始分跨数据", "W1:AV14"],
-  raw_trace: ["原始分跨数据", "AW1:BM14"],
-  review_base: ["配筋调整复核", "A1:S14"],
-  review_rebar: ["配筋调整复核", "T1:BL14"],
-  review_controls: ["配筋调整复核", "BM1:CU14"],
-  final_schedule: ["整理梁表", "A1:S18"],
+  schedule: ["整理梁表", "A1:L35"],
 };
 if (!(previewKey in previews)) {
   throw new Error(`unknown preview key: ${previewKey}`);

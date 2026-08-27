@@ -1,4 +1,4 @@
-"""Unit tests for the portable openpyxl SB schedule renderer."""
+"""Tests for the SB static single-sheet renderer."""
 
 from __future__ import annotations
 
@@ -7,70 +7,64 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-from src.spreadsheet.render_secondary_beam_xlsx import (
-    _natural_key,
-    render_secondary_beam_xlsx,
-)
+from src.spreadsheet.render_secondary_beam_xlsx import _data_row, _natural_key, render_secondary_beam_xlsx
 
 
-def _sb(no: str, line: str, story: str, span: int = 1) -> dict:
+def _base(no: str = "SB1-1", line: str = "SB1", status: str = "OK") -> dict:
     return {
         "beam_no": no,
         "beam_line": line,
-        "story": story,
-        "span_no": span,
+        "span_no": int(no.rsplit("-", 1)[-1]),
+        "story": "GF",
         "beam_type": "SB",
         "section": "250x450",
         "width_mm": 250,
         "depth_mm": 450,
+        "source_objects": "O1",
+        "engine_status": status,
+        "bottom_reinforcement_strategy": "FULL_SPAN_UNIFORM_PER_SPAN",
+        "bottom_uniform_regions_match": True,
+        "bottom_uniform_text": "3T16",
         "et1": "3T16",
         "t1": "3T16",
         "et2": "3T16",
         "eb1": "3T16",
         "b1": "3T16",
         "eb2": "3T16",
-        "s1": "T8@200",
-        "s2": "T8@200",
-        "stirrups": "T8@200",
+        "s2": "2T8@200",
+        "s1": "2T8@200",
+        "stirrups": "2T8@200",
         "legs": 2,
-        "face": "2T12",
-        "source_objects": ["O1"],
-        "engine_status": "OK",
+        "face": "N.A.",
+        "warnings": "",
+        "engine_warnings": "",
+        "constructability_blocking_statuses": "",
+        "review_note": "",
     }
 
 
-def _payload(**overrides) -> dict:
-    payload = {
+def _payload(rows: list[dict] | None = None) -> dict:
+    rows = rows or [_base("SB1-1", "SB1"), _base("SB2-1", "SB2")]
+    return {
         "metadata": {
-            "schema_version": "2.0",
+            "schema_version": "2.1",
             "schedule_kind": "SECONDARY_BEAM_REINFORCEMENT_SCHEDULE",
-            "secondary_schedule_rows": 2,
-            "secondary_exception_rows": 1,
+            "rebar_workbook_layout_version": "single-sheet-static-v1",
+            "bottom_reinforcement_strategy": "FULL_SPAN_UNIFORM_PER_SPAN",
+            "adjacent_span_bottom_strategy": "INDEPENDENT_PER_SPAN",
         },
-        "schedule_rows": [
-            _sb("F2-1", "F2", "GF", 1),
-            _sb("F10-1", "F10", "GF", 1),
-            _sb("F1-1", "F1", "GF", 1),
-        ],
-        "exception_rows": [
-            {
-                "story": "GF",
-                "beam_line": "X",
-                "beam_no": "X-1",
-                "section": "300x600",
-                "engine_status": "SB_SPAN_STIRRUP_NOT_UNIFIED",
-                "source_objects": ["O9"],
-            }
-        ],
+        "raw_rows": [dict(row) for row in rows],
+        "review_rows": [dict(row) for row in rows],
+        "final_rows": [dict(row) for row in rows],
+        "schedule_rows": [dict(row, stirrups="2T8@200") for row in rows if row.get("engine_status") == "OK"],
+        "exception_rows": [],
     }
-    payload.update(overrides)
-    return payload
 
 
 def _render(tmp_path: Path, payload: dict | None = None) -> Path:
-    out = tmp_path / "secondary.xlsx"
-    render_secondary_beam_xlsx(payload or _payload(), out)
-    return out
+    output = tmp_path / "secondary.xlsx"
+    render_secondary_beam_xlsx(payload or _payload(), output)
+    return output
 
 
 def test_natural_key_sorts_numbers_naturally() -> None:
@@ -78,53 +72,73 @@ def test_natural_key_sorts_numbers_naturally() -> None:
     assert sorted(values, key=_natural_key) == ["F1", "F2", "F10", "F10a"]
 
 
-def test_schedule_sorts_naturally_and_renders(tmp_path: Path) -> None:
-    out = _render(tmp_path)
-    wb = load_workbook(out, data_only=False)
-    ws = wb["SB梁表"]
-    assert ws.freeze_panes == "C4"
-    # One story "GF": title row1, header rows2-3, data rows4-6 ordered F1, F2, F10.
-    assert ws["A4"].value == "F1"
-    assert ws["A5"].value == "F2"
-    assert ws["A6"].value == "F10"
-    assert ws["B4"].value == "F1-1"
-    assert ws["K4"].value == "T8@200"
-    wb.close()
+def test_secondary_has_one_static_eleven_column_sheet(tmp_path: Path) -> None:
+    output = _render(tmp_path)
+    workbook = load_workbook(output, data_only=False)
+    assert workbook.sheetnames == ["整理梁表"]
+    sheet = workbook["整理梁表"]
+    assert sheet.max_column == 11
+    assert sheet["A1"].value == "SECONDARY BEAM REINFORCEMENT SCHEDULE"
+    assert sheet["A5"].value == "BEAM NO."
+    assert sheet["I6"].value == "STIRRUPS"
+    assert sheet["J6"].value == "LEGS"
+    assert sheet.tables == {}
+    assert all(not (isinstance(cell.value, str) and cell.value.startswith("=")) for row in sheet.iter_rows() for cell in row)
+    workbook.close()
 
 
-def test_exception_sheet_renders_rows(tmp_path: Path) -> None:
-    out = _render(tmp_path)
-    wb = load_workbook(out, data_only=False)
-    ws = wb["复核异常"]
-    assert ws["A1"].value == "SB 梁表复核异常"
-    assert ws["A2"].value == "楼层"
-    assert ws["A3"].value == "GF"
-    assert ws["E3"].value == "SB_SPAN_STIRRUP_NOT_UNIFIED"
-    assert ws["F3"].value == "O9"
-    wb.close()
+def test_exception_status_retains_candidate_in_red_row_and_comment(tmp_path: Path) -> None:
+    rows = [_base("SB1-1", "SB1"), _base("SB1-2", "SB1", "SB_SPAN_STIRRUP_NOT_UNIFIED")]
+    rows[1]["bottom_reinforcement_strategy"] = "FULL_SPAN_UNIFORM_PER_SPAN_CANDIDATE_REQUIRES_REVIEW"
+    payload = _payload(rows)
+    payload["exception_rows"] = [{**rows[1], "engine_status": "SB_SPAN_STIRRUP_NOT_UNIFIED"}]
+    output = _render(tmp_path, payload)
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook["整理梁表"]
+    row = next(row for row in range(1, sheet.max_row + 1) if sheet.cell(row=row, column=2).value == "SB1-2")
+    assert sheet.cell(row=row, column=8).value == "3T16"
+    assert sheet.cell(row=row, column=2).comment is not None
+    assert "SB_SPAN_STIRRUP_NOT_UNIFIED" in sheet.cell(row=row, column=2).comment.text
+    workbook.close()
 
 
-def test_empty_schedule_shows_message(tmp_path: Path) -> None:
-    payload = _payload(schedule_rows=[])
-    out = _render(tmp_path, payload)
-    wb = load_workbook(out, data_only=False)
-    ws = wb["SB梁表"]
-    assert ws["A1"].value == "SECONDARY BEAM REINFORCEMENT SCHEDULE"
-    assert "无可交付 SB 行" in str(ws["A2"].value)
-    wb.close()
+def test_legacy_schedule_payload_is_readable_but_marked_candidate(tmp_path: Path) -> None:
+    row = _base()
+    row.pop("bottom_reinforcement_strategy")
+    output = _render(
+        tmp_path,
+        {
+            "metadata": {"schema_version": "2.0"},
+            "schedule_rows": [{**row, "stirrups": "2T8@200"}],
+            "exception_rows": [],
+        },
+    )
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook["整理梁表"]
+    data_row = next(row for row in range(1, sheet.max_row + 1) if sheet.cell(row=row, column=2).value == "SB1-1")
+    assert sheet.cell(row=data_row, column=2).comment is not None
+    assert "LEGACY_REDETAIL_REQUIRED" in sheet.cell(row=data_row, column=2).comment.text
+    workbook.close()
+
+
+def test_data_row_is_eleven_values() -> None:
+    assert len(_data_row(_base())) == 11
+    assert _data_row(_base())[7] == "3T16"
 
 
 def test_non_unified_stirrup_raises(tmp_path: Path) -> None:
-    rows = [_sb("B1-1", "B1", "GF", 1)]
-    rows[0]["s1"] = "T10@200"
-    payload = _payload(schedule_rows=rows)
+    rows = [{**_base(), "stirrups": "2T8@200", "s1": "2T8@200", "s2": "2T10@200"}]
     with pytest.raises(ValueError, match="SB stirrup is not span-unified"):
-        render_secondary_beam_xlsx(payload, tmp_path / "bad.xlsx")
+        render_secondary_beam_xlsx(
+            {"metadata": {}, "schedule_rows": rows, "exception_rows": []},
+            tmp_path / "bad.xlsx",
+        )
 
 
 def test_non_sb_row_raises(tmp_path: Path) -> None:
-    rows = [_sb("B1-1", "B1", "GF", 1)]
-    rows[0]["beam_type"] = "PB"
-    payload = _payload(schedule_rows=rows)
+    row = {**_base(), "beam_type": "PB", "stirrups": "2T8@200"}
     with pytest.raises(ValueError, match="non-SB row"):
-        render_secondary_beam_xlsx(payload, tmp_path / "bad.xlsx")
+        render_secondary_beam_xlsx(
+            {"metadata": {}, "schedule_rows": [row], "exception_rows": []},
+            tmp_path / "bad.xlsx",
+        )

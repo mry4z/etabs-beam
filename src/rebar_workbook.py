@@ -1,9 +1,9 @@
-"""Formal three-sheet reinforcement-workbook data and build workflow.
+"""Build the versioned detailing payload and its static result-table views.
 
 The Python side owns ETABS extraction, span aggregation and detailing.  It
-writes a versioned JSON payload; the tracked artifact-tool builder only owns
-Excel formulas, formatting and rendering.  This keeps numbering/topology and
-the workbook layout independently replaceable.
+writes a versioned JSON payload that retains raw demands, review evidence and
+final rows.  Excel is only a static PB or SB result projection; it is not the
+calculation or audit store.
 """
 
 from __future__ import annotations
@@ -39,10 +39,31 @@ from src.excel_span_adapter import SpanScheduleMapping, build_span_schedule
 
 PAYLOAD_SCHEMA_VERSION = "2.1"
 SUPPORTED_PAYLOAD_SCHEMA_VERSIONS = frozenset({"2.0", PAYLOAD_SCHEMA_VERSION})
+RESULT_WORKBOOK_LAYOUT_VERSION = "single-sheet-static-v1"
+BOTTOM_REINFORCEMENT_STRATEGY = "FULL_SPAN_UNIFORM_PER_SPAN"
+ADJACENT_SPAN_BOTTOM_STRATEGY = "INDEPENDENT_PER_SPAN"
 REGIONS = ("left", "middle", "right")
 BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "build_rebar_workbook.mjs"
 PREVIEW_BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "render_rebar_workbook_preview.mjs"
 SECONDARY_BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "build_secondary_beam_workbook.mjs"
+
+
+def _apply_current_workbook_metadata(metadata: dict[str, Any]) -> None:
+    """Stamp the current result projection and detailing semantics.
+
+    These keys are additive to payload schema 2.1.  They make it impossible
+    for a downstream renderer to mistake a legacy three-station payload for a
+    newly recomputed full-span bottom result.
+    """
+
+    metadata["rebar_workbook_layout_version"] = RESULT_WORKBOOK_LAYOUT_VERSION
+    metadata["rebar_workbook_layout"] = "one-sheet-static-values"
+    metadata["bottom_reinforcement_strategy"] = BOTTOM_REINFORCEMENT_STRATEGY
+    metadata["adjacent_span_bottom_strategy"] = ADJACENT_SPAN_BOTTOM_STRATEGY
+    metadata["top_reinforcement_coordination"] = "EXISTING_BEAM_LINE_RULES"
+    metadata["audit_data_boundary"] = (
+        "raw_rows/review_rows/final_rows retained in JSON; Excel is a filtered static projection"
+    )
 
 
 def build_rebar_workbook_payload(
@@ -480,6 +501,7 @@ def build_payload_from_schedule(
             raw_rows[index]["engine_status"] = "OK"
             raw_rows[index]["engine_mode"] = result.mode.value
             raw_rows[index].update(_constructability_row_fields(result))
+            raw_rows[index].update(_uniform_bottom_fields(result))
             raw_rows[index]["coordination_status"] = result.coordination_status
             raw_rows[index]["continuity_option"] = (
                 result.continuity_option.value if result.continuity_option is not None else ""
@@ -513,6 +535,7 @@ def build_payload_from_schedule(
     payload["metadata"].setdefault("smf_end_max_spacing_mm", engine.project.smf_end_max_spacing_mm)
     payload["metadata"].setdefault("smf_max_longitudinal_ratio", engine.project.smf_max_longitudinal_ratio)
     payload["metadata"].setdefault("hanger_diameter_mm", engine.project.sb_hanger_diameter_mm)
+    _apply_current_workbook_metadata(payload["metadata"])
     return payload
 
 
@@ -646,6 +669,7 @@ def redetail_payload(
         elif result is not None and controls is not None:
             raw_rows[index]["engine_status"] = "OK"
             raw_rows[index]["engine_mode"] = result.mode.value
+            raw_rows[index].update(_uniform_bottom_fields(result))
             raw_rows[index]["coordination_status"] = result.coordination_status
             raw_rows[index]["continuity_option"] = (
                 result.continuity_option.value if result.continuity_option is not None else ""
@@ -662,19 +686,19 @@ def redetail_payload(
     output["metadata"]["smf_end_max_spacing_mm"] = engine.project.smf_end_max_spacing_mm
     output["metadata"]["smf_max_longitudinal_ratio"] = engine.project.smf_max_longitudinal_ratio
     output["metadata"]["hanger_diameter_mm"] = engine.project.sb_hanger_diameter_mm
+    _apply_current_workbook_metadata(output["metadata"])
     return output
 
 
 def build_secondary_schedule_payload(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Create the SB payload while retaining the main workbook's three-table contract.
+    """Create the SB payload while retaining the complete backend audit rows.
 
     ``schedule_rows`` and ``exception_rows`` remain available for diagnostics and
-    backward-compatible consumers. The renderer also receives the filtered
-    ``raw_rows`` / ``review_rows`` / ``final_rows`` so the secondary workbook uses
-    exactly the same three sheets, formulas, references, and visual conventions as
-    the main rebar workbook.
+    backward-compatible consumers. The renderer receives aligned filtered
+    ``raw_rows`` / ``review_rows`` / ``final_rows`` and projects them to one
+    static ``整理梁表`` sheet.
     """
 
     schema_version = str(payload.get("metadata", {}).get("schema_version", ""))
@@ -710,6 +734,13 @@ def build_secondary_schedule_payload(
                 row["engine_status"] = "SB_SPAN_STIRRUP_NOT_UNIFIED"
                 exception_rows.append(row)
                 continue
+            if (
+                row.get("bottom_reinforcement_strategy") != BOTTOM_REINFORCEMENT_STRATEGY
+                or row.get("bottom_uniform_regions_match") is not True
+            ):
+                row["engine_status"] = "LEGACY_REDETAIL_REQUIRED"
+                exception_rows.append(row)
+                continue
             row["stirrups"] = support
             schedule_rows.append(row)
         else:
@@ -722,14 +753,15 @@ def build_secondary_schedule_payload(
             "stirrup_rule": "ONE_SPECIFICATION_PER_STRUCTURAL_SPAN",
             "secondary_schedule_rows": len(schedule_rows),
             "secondary_exception_rows": len(exception_rows),
-            "secondary_workbook_layout": "three-sheet-rebar-workbook",
+            "secondary_workbook_layout": RESULT_WORKBOOK_LAYOUT_VERSION,
         }
     )
+    _apply_current_workbook_metadata(metadata)
 
     # Exceptions can be discovered after the detailing engine has produced a
     # nominal row (for example, a non-unified SB stirrup). Propagate the final
-    # exception status into all three source tables so formulas fail closed and
-    # the整理梁表 does not present that row as deliverable.
+    # exception status into every aligned JSON row so each static projection
+    # fails closed and the整理梁表 does not present that row as deliverable.
     exception_status = {
         str(row.get("beam_no", "")): str(row.get("engine_status", ""))
         for row in exception_rows
@@ -762,6 +794,52 @@ def build_secondary_schedule_payload(
         "final_rows": filtered_final,
         "schedule_rows": schedule_rows,
         "exception_rows": exception_rows,
+    }
+
+
+def project_result_table_payload(
+    payload: Mapping[str, Any],
+    beam_type: str,
+) -> dict[str, Any]:
+    """Return an aligned PB/SB view without mutating the full audit payload."""
+
+    schema_version = str(payload.get("metadata", {}).get("schema_version", ""))
+    if schema_version not in SUPPORTED_PAYLOAD_SCHEMA_VERSIONS:
+        raise DetailingError(
+            f"UNSUPPORTED_PAYLOAD_SCHEMA: expected one of {sorted(SUPPORTED_PAYLOAD_SCHEMA_VERSIONS)}, "
+            f"got {schema_version or 'missing'}"
+        )
+    raw_rows = list(payload.get("raw_rows", []))
+    review_rows = list(payload.get("review_rows", []))
+    final_rows = list(payload.get("final_rows", []))
+    if not (len(raw_rows) == len(review_rows) == len(final_rows)):
+        raise DetailingError("RESULT_PROJECTION_ROW_ALIGNMENT_ERROR")
+    role = str(beam_type).strip().upper()
+    if role not in {"PB", "SB"}:
+        raise DetailingError(f"RESULT_PROJECTION_UNKNOWN_BEAM_TYPE: {beam_type}")
+    indices = [
+        index
+        for index, row in enumerate(final_rows)
+        if str(row.get("beam_type", "")).strip().upper() == role
+    ]
+    metadata = dict(payload.get("metadata", {}))
+    metadata["beam_type_filter"] = role
+    metadata["result_projection"] = "STATIC_SINGLE_SHEET"
+    return {
+        "metadata": metadata,
+        "raw_rows": [dict(raw_rows[index]) for index in indices],
+        "review_rows": [dict(review_rows[index]) for index in indices],
+        "final_rows": [dict(final_rows[index]) for index in indices],
+        "schedule_rows": [
+            dict(row)
+            for row in payload.get("schedule_rows", [])
+            if str(row.get("beam_type", "")).strip().upper() == role
+        ],
+        "exception_rows": [
+            dict(row)
+            for row in payload.get("exception_rows", [])
+            if str(row.get("beam_type", "")).strip().upper() == role
+        ],
     }
 
 
@@ -820,6 +898,30 @@ def _result_layout_signature(result: BeamDetailingResult | None) -> tuple[str, .
     return tuple(value for region in result.regions for value in (region.top.notation, region.bottom.notation))
 
 
+def _uniform_bottom_fields(result: BeamDetailingResult) -> dict[str, Any]:
+    """Flatten the actual full-span bottom layout for audit and projection."""
+
+    bottoms = tuple(region.bottom for region in result.regions)
+    notations = tuple(design.notation for design in bottoms)
+    first = bottoms[0]
+    diameters = tuple(
+        dict.fromkeys(
+            bar.diameter_mm
+            for design in bottoms
+            for bar in design.bars
+        )
+    )
+    return {
+        "bottom_reinforcement_strategy": BOTTOM_REINFORCEMENT_STRATEGY,
+        "bottom_uniform_regions_match": len(set(notations)) == 1,
+        "bottom_uniform_text": first.notation,
+        "bottom_uniform_required_mm2": max(design.required_area_mm2 for design in bottoms),
+        "bottom_uniform_provided_mm2": first.provided_area_mm2,
+        "bottom_uniform_diameters_mm": ",".join(str(value) for value in diameters),
+        "bottom_uniform_layers": first.layers,
+    }
+
+
 def _record_initial_layout(
     raw: dict[str, Any],
     result: BeamDetailingResult,
@@ -827,6 +929,7 @@ def _record_initial_layout(
     raw["iteration_status"] = result.iteration_status
     raw["iteration_count"] = result.iteration_count
     raw["coordination_initial_signature"] = "|".join(_result_layout_signature(result))
+    raw.update(_uniform_bottom_fields(result))
     raw.update(_constructability_row_fields(result))
 
 
@@ -999,12 +1102,11 @@ def run_workbook_builder(
     node_max_old_space_mb: int = 8192,
     builder: str = "python",
 ) -> Path:
-    """Run the workbook builder for the three-sheet rebar workbook.
+    """Run the PB static single-sheet result workbook builder.
 
     ``builder="python"`` uses the portable openpyxl renderer (no node) and
     skips PNG previews.  ``builder="node"`` runs the tracked Node artifact-tool
-    builder plus its preview renderer, kept as the development-machine
-    reference baseline.
+    builder plus its preview renderer.
     """
     if builder == "python":
         from src.spreadsheet.render_rebar_workbook_xlsx import render_rebar_workbook_xlsx
@@ -1024,13 +1126,6 @@ def run_workbook_builder(
         node_modules=node_modules,
         node_max_old_space_mb=node_max_old_space_mb,
     )
-    _run_rebar_preview_builder(
-        output,
-        preview_dir,
-        node_executable=node_executable,
-        node_modules=node_modules,
-        node_max_old_space_mb=node_max_old_space_mb,
-    )
     return output
 
 
@@ -1044,7 +1139,7 @@ def run_secondary_workbook_builder(
     node_max_old_space_mb: int = 8192,
     builder: str = "python",
 ) -> Path:
-    """Generate the SB reinforcement workbook with the primary three-sheet layout.
+    """Generate the SB static single-sheet reinforcement workbook.
 
     ``builder="python"`` uses the portable renderer; ``builder="node"`` keeps
     the Node artifact-tool reference path. Both consume the same filtered SB
@@ -1060,8 +1155,8 @@ def run_secondary_workbook_builder(
         raise ValueError(f"unknown workbook builder: {builder}")
     # The Node reference path intentionally uses the canonical main renderer.
     # The secondary payload is already filtered to SB rows, so both builders
-    # produce the same three sheets and formula/reference contract.
-    return _run_artifact_builder(
+    # produce the same static single-sheet contract.
+    output = _run_artifact_builder(
         BUILDER_PATH,
         payload_path,
         output_path,
@@ -1070,6 +1165,7 @@ def run_secondary_workbook_builder(
         node_modules=node_modules,
         node_max_old_space_mb=node_max_old_space_mb,
     )
+    return output
 
 
 def _run_artifact_builder(
@@ -1157,15 +1253,7 @@ def _run_rebar_preview_builder(
     if not PREVIEW_BUILDER_PATH.is_file():
         raise FileNotFoundError(f"找不到工作簿预览生成器：{PREVIEW_BUILDER_PATH}")
     previews.mkdir(parents=True, exist_ok=True)
-    preview_names = (
-        "raw_left",
-        "raw_demands",
-        "raw_trace",
-        "review_base",
-        "review_rebar",
-        "review_controls",
-        "final_schedule",
-    )
+    preview_names = ("schedule",)
     node_prefix = [
         str(node_executable),
         f"--max-old-space-size={int(node_max_old_space_mb)}",
@@ -1650,6 +1738,7 @@ def _review_row(common: Mapping[str, Any], controls: Mapping[str, Any], result: 
         }
     )
     row.update(_constructability_row_fields(result))
+    row.update(_uniform_bottom_fields(result))
     for field, region_name, face in (
         ("et1", "left", "top"),
         ("t1", "middle", "top"),
@@ -1699,6 +1788,7 @@ def _final_row(common: Mapping[str, Any], result: Any) -> dict[str, Any]:
     return {
         **common,
         **_constructability_row_fields(result),
+        **_uniform_bottom_fields(result),
         "engine_status": "OK",
         "mode": result.mode.value,
         "et1": by_name["left"].top.notation,
@@ -1752,6 +1842,14 @@ def _fallback_stirrup_text(value: Any, *, source: str) -> str:
     return "4T12@100"
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
 def _fallback_region_texts(
     controls: Mapping[str, Any] | None,
     common: Mapping[str, Any] | None = None,
@@ -1781,7 +1879,17 @@ def _fallback_region_texts(
             effective_frame_type=effective_frame_type,
         )
         for field, (region, key) in mapping.items()
+        if field not in {"eb1", "b1", "eb2"}
     }
+    bottom_required = max(
+        (_safe_float(controls.get(region, {}).get("bottom_total_mm2"), 0.0) for region in REGIONS),
+        default=0.0,
+    )
+    bottom_text = _fallback_rebar_notation(
+        bottom_required,
+        effective_frame_type=effective_frame_type,
+    )
+    result.update({"eb1": bottom_text, "b1": bottom_text, "eb2": bottom_text})
     result["s2"] = _fallback_stirrup_text(
         max((controls.get(name, {}).get("av_over_s", 0.0) for name in ("left", "right")), default=None),
         source="ETABS横筋需求",
@@ -1811,6 +1919,9 @@ def _empty_review(
         **common,
         "engine_status": status,
         "mode": "ETABS_READBACK_CANDIDATE",
+        "bottom_reinforcement_strategy": f"{BOTTOM_REINFORCEMENT_STRATEGY}_CANDIDATE_REQUIRES_REVIEW",
+        "bottom_uniform_regions_match": None,
+        "bottom_uniform_text": candidates["b1"],
         "legs": "需复核",
         "face_required_mm2": None,
         "face_text": candidates["face"],
@@ -1844,6 +1955,9 @@ def _empty_final(
         **common,
         "engine_status": status,
         "mode": "ETABS_READBACK_CANDIDATE",
+        "bottom_reinforcement_strategy": f"{BOTTOM_REINFORCEMENT_STRATEGY}_CANDIDATE_REQUIRES_REVIEW",
+        "bottom_uniform_regions_match": None,
+        "bottom_uniform_text": candidates["b1"],
         **{
             field: candidates[field]
             for field in (
