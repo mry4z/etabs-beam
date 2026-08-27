@@ -13,6 +13,19 @@ from enum import Enum
 from typing import Iterable, Sequence
 
 from src.design.bar_layout_capacity import single_layer_max_bars
+from src.design.constructability import (
+    CapacityShearReview,
+    ConstructabilityResult,
+    RebarLayoutGeometry,
+    RuleCheck,
+    SeismicDetailingContext,
+    SupportFaceContext,
+    build_constructability,
+    calculate_smf_capacity_shear,
+    evaluate_smf_capacity_shear,
+    evaluate_ordinary_constructability,
+    evaluate_smf_longitudinal,
+)
 
 
 class DetailingError(ValueError):
@@ -37,53 +50,82 @@ class ContinuityOption(str, Enum):
 
 
 class BeamDetailingProfile(str, Enum):
-    """Explicit project/code profile; topology type alone is not a code system."""
+    """Effective seismic frame type used by the detailing engine.
 
+    ``beam_type`` (PB/SB) is deliberately not encoded in this enum.  It is a
+    usage classification, while ETABS FrameType is the structural-system
+    decision.  The legacy names remain aliases so old payload consumers can
+    import them while new runs emit the exact effective type.
+    """
+
+    NON_SWAY = "NON_SWAY"
+    OMF = "OMF"
+    IMF = "IMF"
+    SMF = "SMF"
+    UNRESOLVED = "UNRESOLVED"
+
+    # Backward-compatible aliases for older callers and snapshots.
     SB_ORDINARY_NO_CH18 = "SB_ORDINARY_NO_CH18"
-    PB_OMF = "PB_OMF"
-    PB_SMF = "PB_SMF"
-    PB_REVIEW_REQUIRED = "PB_REVIEW_REQUIRED"
+    PB_OMF = "OMF"
+    PB_SMF = "SMF"
+    PB_REVIEW_REQUIRED = "UNRESOLVED"
 
     @property
     def is_smf(self) -> bool:
-        return self is BeamDetailingProfile.PB_SMF
+        return self is BeamDetailingProfile.SMF
 
     @property
     def is_secondary(self) -> bool:
+        # Kept for compatibility with manually constructed legacy sections;
+        # live payloads use BeamSection.beam_role as the authority.
         return self is BeamDetailingProfile.SB_ORDINARY_NO_CH18
+
+    @property
+    def is_ordinary(self) -> bool:
+        return self is BeamDetailingProfile.NON_SWAY
+
+    @property
+    def is_omf(self) -> bool:
+        return self is BeamDetailingProfile.OMF
+
+    @property
+    def is_imf(self) -> bool:
+        return self is BeamDetailingProfile.IMF
 
 
 def resolve_detailing_profile(
     beam_type: str,
     frame_types: Iterable[str],
 ) -> tuple[BeamDetailingProfile, str]:
-    """Resolve the confirmed project profile without promoting any SB to Ch. 18.
+    """Resolve ETABS FrameType without allowing PB/SB to override it.
 
-    The user-confirmed project rule treats every non-SMF PB as OMF.  Unknown,
-    mixed, or Program Determined PB inputs remain review-required so an ETABS
-    design option is never silently invented.
+    Explicit model types are preserved exactly.  Only the literal
+    ``Program Determined`` value uses the project policy default of SMF.
+    Missing or mixed source values remain unresolved and are fail-closed by
+    the payload builder.
     """
 
-    normalized_type = str(beam_type).strip().upper()
-    normalized_frames = tuple(dict.fromkeys(str(value).strip() or "Unknown" for value in frame_types))
-    if normalized_type == "SB":
-        return (
-            BeamDetailingProfile.SB_ORDINARY_NO_CH18,
-            "beam_type=SB; ETABS FrameType does not enable Chapter 18",
+    normalized_frames = tuple(
+        dict.fromkeys(
+            str(value).strip().casefold().replace("-", " ") or "unknown"
+            for value in frame_types
         )
-    if normalized_type != "PB":
-        return BeamDetailingProfile.PB_REVIEW_REQUIRED, f"unknown beam_type={beam_type!r}"
-    if len(normalized_frames) != 1:
-        return BeamDetailingProfile.PB_REVIEW_REQUIRED, "PB source FrameType is mixed"
-    frame_type = normalized_frames[0]
-    if frame_type in {"Unknown", "Program Determined"}:
-        return BeamDetailingProfile.PB_REVIEW_REQUIRED, f"PB FrameType={frame_type}"
-    if frame_type == "Sway Special":
-        return BeamDetailingProfile.PB_SMF, "PB FrameType=Sway Special"
-    return (
-        BeamDetailingProfile.PB_OMF,
-        f"PB non-SMF project rule; source FrameType={frame_type}",
     )
+    if len(normalized_frames) != 1:
+        return BeamDetailingProfile.UNRESOLVED, "ETABS FrameType is mixed or missing"
+    frame_type = normalized_frames[0]
+    mapping = {
+        "non sway": (BeamDetailingProfile.NON_SWAY, "model-defined Non Sway"),
+        "non-sway": (BeamDetailingProfile.NON_SWAY, "model-defined Non Sway"),
+        "sway ordinary": (BeamDetailingProfile.OMF, "model-defined Sway Ordinary"),
+        "sway intermediate": (BeamDetailingProfile.IMF, "model-defined Sway Intermediate"),
+        "sway special": (BeamDetailingProfile.SMF, "model-defined Sway Special"),
+        "program determined": (BeamDetailingProfile.SMF, "project default: Program Determined → SMF"),
+    }
+    resolved = mapping.get(frame_type)
+    if resolved is None or frame_type == "unknown":
+        return BeamDetailingProfile.UNRESOLVED, f"unrecognized ETABS FrameType={frame_type!r}"
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -130,7 +172,7 @@ class BarCatalog:
 class ProjectDetailingPolicy:
     """Project choices, separate from code clauses."""
 
-    version: str = "project-2026-07"
+    version: str = "nasiriyah-smf-sb-2026-08-24-r1"
     catalog: BarCatalog = field(default_factory=BarCatalog)
     enabled_diameters_mm: tuple[int, ...] = (10, 12, 16, 20, 25)
     allowed_spacings_mm: tuple[int, ...] = (100, 150, 200)
@@ -143,6 +185,9 @@ class ProjectDetailingPolicy:
     max_main_bar_layers: int = 2
     minimum_bars_per_layer: int = 2
     minimum_main_diameter_mm: int = 16
+    smf_end_zone_min_flexural_diameter_mm: int = 20
+    smf_end_max_spacing_mm: float = 100.0
+    smf_max_longitudinal_ratio: float = 0.01613
     sb_hanger_diameter_mm: int = 12
     minimum_credit_hanger_diameter_mm: int = 12
     prefer_two_leg_max_width_mm: float = 300.0
@@ -171,6 +216,10 @@ class ProjectDetailingPolicy:
             raise DetailingError("SB 架立筋直径必须小于纵向主筋最小直径。")
         if not self.allowed_spacings_mm or any(value <= 0 for value in self.allowed_spacings_mm):
             raise DetailingError("项目箍筋间距目录不能为空且必须为正数。")
+        if self.smf_end_max_spacing_mm <= 0:
+            raise DetailingError("SMF 端部项目箍筋间距上限必须为正数。")
+        if not 0 < self.smf_max_longitudinal_ratio <= 0.025:
+            raise DetailingError("SMF 项目最大纵筋率必须位于 (0, 0.025]。")
         if self.max_main_bar_layers < 1:
             raise DetailingError("最大纵筋排数必须至少为一排。")
         if self.minimum_bars_per_layer < 2:
@@ -190,6 +239,17 @@ class ProjectDetailingPolicy:
                 reverse=True,
             )
         )
+
+    def minimum_main_diameter_for(self, section: Any) -> int:
+        """Return the active primary-flexural diameter floor for one section."""
+
+        if getattr(section, "is_smf", False):
+            return max(self.minimum_main_diameter_mm, self.smf_end_zone_min_flexural_diameter_mm)
+        return self.minimum_main_diameter_mm
+
+    def ordered_longitudinal_diameters_for(self, section: Any) -> tuple[int, ...]:
+        floor = self.minimum_main_diameter_for(section)
+        return tuple(value for value in self.ordered_longitudinal_diameters() if value >= floor)
 
     def ordered_torsion_face_diameters(self) -> tuple[int, ...]:
         return _preferred_order(self.preferred_torsion_face_diameters_mm, self.enabled_diameters_mm)
@@ -241,6 +301,7 @@ class ACI318_14_DetailingPolicy:
         demand: "BeamRegionDemand",
         stirrup_diameter_mm: float,
         main_diameter_mm: float,
+        smf_end_project_limit_mm: float | None = None,
     ) -> tuple[float, str, tuple[tuple[str, float], ...], bool]:
         effective_depth = self.effective_depth(section, stirrup_diameter_mm, main_diameter_mm)
         if effective_depth <= 0:
@@ -251,7 +312,7 @@ class ACI318_14_DetailingPolicy:
             main_diameter_mm,
         )
         high_shear_limit = 0.33 * math.sqrt(section.fc_mpa) * section.width_mm / section.fyt_mpa
-        high_shear = demand.av_over_s_mm2_per_mm > high_shear_limit + 1e-9
+        high_shear = demand.transverse_required_av_over_s_mm2_per_mm > high_shear_limit + 1e-9
         limits: list[tuple[str, float]] = [
             (
                 "SHEAR_HIGH_D_OVER_4" if high_shear else "SHEAR_LOW_D_OVER_2",
@@ -269,6 +330,8 @@ class ACI318_14_DetailingPolicy:
                     ("SMF_ABSOLUTE", 150.0),
                 )
             )
+            if smf_end_project_limit_mm is not None:
+                limits.append(("SMF_PROJECT_ABSOLUTE", smf_end_project_limit_mm))
         governing_reason, maximum = min(limits, key=lambda item: item[1])
         return maximum, governing_reason, tuple(limits), high_shear
 
@@ -281,7 +344,13 @@ class ACI318_14_DetailingPolicy:
         )
 
     def minimum_legs(self, section: "BeamSection", region: str) -> int:
-        return 4 if section.is_smf and region in {"left", "right"} else 2
+        # ACI 318-14 requires closed hoops and lateral support of the
+        # longitudinal bars; it does not prescribe a universal four-leg
+        # minimum.  The actual leg count is selected from shear area and the
+        # layout solver.  Four or more legs are therefore still possible when
+        # the section width/demand requires them, but never imposed as a proxy
+        # for the SMF hoop topology.
+        return 2
 
 
 @dataclass(frozen=True)
@@ -304,6 +373,10 @@ class BeamRegionDemand:
     shear_source: str = "GetSummaryResultsBeam_2.VMajorArea"
     as_flex_top_override_mm2: float | None = None
     as_flex_bottom_override_mm2: float | None = None
+    capacity_shear_av_over_s_mm2_per_mm: float | None = None
+    capacity_shear_demand_kN: float | None = None
+    capacity_shear_source: str = ""
+    capacity_shear_vc_zero: bool = False
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -319,6 +392,8 @@ class BeamRegionDemand:
             raise DetailingError("AsFlexTop override 不能为负数。")
         if self.as_flex_bottom_override_mm2 is not None and self.as_flex_bottom_override_mm2 < 0:
             raise DetailingError("AsFlexBottom override 不能为负数。")
+        if self.capacity_shear_av_over_s_mm2_per_mm is not None and self.capacity_shear_av_over_s_mm2_per_mm < 0:
+            raise DetailingError("capacity shear Av/s 不能为负数。")
 
     @property
     def as_flex_top_mm2(self) -> float:
@@ -331,6 +406,21 @@ class BeamRegionDemand:
         if self.as_flex_bottom_override_mm2 is not None:
             return self.as_flex_bottom_override_mm2
         return max(0.0, self.as_bottom_total_mm2 - self.al_torsion_mm2 / 2.0)
+
+    @property
+    def transverse_required_av_over_s_mm2_per_mm(self) -> float:
+        """Return the governing ETABS/code or SMF capacity-shear Av/s."""
+
+        return max(
+            self.av_over_s_mm2_per_mm,
+            self.capacity_shear_av_over_s_mm2_per_mm or 0.0,
+        )
+
+    @property
+    def transverse_shear_source(self) -> str:
+        if self.capacity_shear_av_over_s_mm2_per_mm is None:
+            return self.shear_source
+        return f"{self.shear_source}; {self.capacity_shear_source or 'SMF capacity shear'}"
 
 
 @dataclass(frozen=True)
@@ -350,6 +440,7 @@ class BeamSection:
     clear_cover_source: str = ""
     max_aggregate_size_source: str = ""
     profile_source: str = ""
+    beam_role: str = "PB"
 
     def __post_init__(self) -> None:
         values = (
@@ -449,13 +540,20 @@ class BeamSection:
 
     @property
     def is_secondary(self) -> bool:
-        return self.detailing_profile.is_secondary
+        return (
+            str(self.beam_role).strip().upper() == "SB"
+            or self.detailing_profile.is_secondary
+        )
 
 
 @dataclass(frozen=True)
 class BeamDetailingInput:
     section: BeamSection
     regions: tuple[BeamRegionDemand, ...]
+    left_support: SupportFaceContext | None = None
+    right_support: SupportFaceContext | None = None
+    seismic_context: SeismicDetailingContext | None = None
+    yield_locations_mm: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         expected = ("left", "middle", "right")
@@ -545,10 +643,16 @@ class BeamDetailingResult:
     iteration_count: int = 1
     continuity_option: ContinuityOption | None = None
     coordination_status: str = "NOT_APPLIED"
+    constructability: ConstructabilityResult | None = None
+    smf_checks: tuple[RuleCheck, ...] = ()
+    capacity_shear_review: CapacityShearReview | None = None
+    seismic_context: SeismicDetailingContext | None = None
 
     @property
     def errors(self) -> tuple[str, ...]:
-        return ()
+        if self.constructability is None:
+            return ()
+        return self.constructability.blocking_statuses
 
 
 class BeamDetailingEngine:
@@ -566,6 +670,10 @@ class BeamDetailingEngine:
         section = input_data.section
         if section.detailing_profile is BeamDetailingProfile.PB_REVIEW_REQUIRED:
             raise DetailingError("DETAILING_PROFILE_REVIEW_REQUIRED")
+        # ETABS Av/s remains the source demand.  SMF capacity shear can add a
+        # separate governing Av/s after the actual end layouts are known.
+        active_regions = tuple(input_data.regions)
+        capacity_review: CapacityShearReview | None = None
         # Use the largest enabled diameter only for the preliminary selection,
         # then re-evaluate every region against the actual final flexural db.
         # A result that cannot satisfy the final-db check fails closed below.
@@ -576,12 +684,12 @@ class BeamDetailingEngine:
             # post-processing independently selected left/middle/right results.
             span_stirrup = self._select_secondary_span_stirrup(
                 section,
-                input_data.regions,
-                (max_main,) * len(input_data.regions),
+                active_regions,
+                (max_main,) * len(active_regions),
             )
-            selected_stirrups = [span_stirrup for _ in input_data.regions]
+            selected_stirrups = [span_stirrup for _ in active_regions]
         else:
-            selected_stirrups = [self._select_stirrup(section, demand, max_main) for demand in input_data.regions]
+            selected_stirrups = [self._select_stirrup(section, demand, max_main) for demand in active_regions]
             # The PB project schedule has one ``Legs`` field while retaining
             # separate support/middle spacings.  Use the controlling legs for
             # the whole span and recalculate provided capacity.
@@ -596,8 +704,9 @@ class BeamDetailingEngine:
         for iteration_count in range(1, max_rounds + 1):
             current_signature = tuple(map(_stirrup_signature, selected_stirrups))
             seen_stirrup_signatures.add(current_signature)
+            active_input = replace(input_data, regions=active_regions)
             mode, regions = self._design_regions_with_stirrups(
-                input_data,
+                active_input,
                 selected_stirrups,
             )
             regions = self._coordinate_intraspan_longitudinal(
@@ -605,18 +714,29 @@ class BeamDetailingEngine:
                 regions,
                 mode,
             )
-            final_diameters = tuple(self._final_main_db(region) for region in regions)
+            capacity_review = self._calculate_capacity_review(
+                section,
+                regions,
+                active_input.seismic_context,
+            )
+            active_regions = self._apply_capacity_shear_demands(
+                input_data.regions,
+                active_regions,
+                capacity_review,
+                input_data,
+            )
+            final_diameters = tuple(self._final_main_db(region, section) for region in regions)
             if section.is_secondary:
                 span_stirrup = self._select_secondary_span_stirrup(
                     section,
-                    input_data.regions,
+                    active_regions,
                     final_diameters,
                 )
-                next_stirrups = [span_stirrup for _ in input_data.regions]
+                next_stirrups = [span_stirrup for _ in active_regions]
             else:
                 next_stirrups = [
                     self._select_stirrup(section, demand, final_db)
-                    for demand, final_db in zip(input_data.regions, final_diameters)
+                    for demand, final_db in zip(active_regions, final_diameters)
                 ]
                 span_legs = max(stirrup.legs for stirrup in next_stirrups)
                 next_stirrups = [self._with_legs(stirrup, span_legs) for stirrup in next_stirrups]
@@ -630,28 +750,149 @@ class BeamDetailingEngine:
                 # which selects larger longitudinal bars. Keep the current
                 # state only if it independently satisfies every final-db
                 # control. This is a conservative joint solution.
-                try:
-                    self._finalize_stirrup_controls(section, regions)
-                except DetailingError:
-                    pass
-                else:
-                    iteration_status = "STABLE_CONSERVATIVE_CYCLE_BREAK"
-                    break
+                # Capacity-shear feedback can legitimately alternate between
+                # a larger primary bar (higher Mpr) and a tighter hoop.  Merge
+                # both states into one conservative catalogue choice so the
+                # final layout cannot oscillate or silently under-design the
+                # SMF end zone.
+                selected_stirrups = [
+                    self._conservative_stirrup(current, following)
+                    for current, following in zip(selected_stirrups, next_stirrups)
+                ]
+                iteration_status = "STABLE_CONSERVATIVE_CYCLE_BREAK"
+                break
             selected_stirrups = next_stirrups
         else:
             raise DetailingError(f"{section.name}: DETAILING_ITERATION_NOT_CONVERGED")
 
         if mode is None:
             raise DetailingError(f"{section.name}: DETAILING_RESULT_MISSING")
+        # The governing capacity-shear Av/s may be equal to the preliminary
+        # stirrup catalogue choice.  In that case the loop legitimately
+        # converges in its first pass, but ``regions`` was built from the
+        # pre-capacity demand snapshot.  Rebuild once from ``active_regions``
+        # so the delivered result and workbook retain the exact demand source
+        # that was used for the final stirrup check.
+        active_input = replace(input_data, regions=active_regions)
+        mode, regions = self._design_regions_with_stirrups(active_input, selected_stirrups)
+        regions = self._coordinate_intraspan_longitudinal(section, regions, mode)
         regions = self._finalize_stirrup_controls(section, regions)
+        capacity_review = self._calculate_capacity_review(
+            section,
+            regions,
+            input_data.seismic_context,
+        )
+        final_seismic_context = self._context_with_capacity_review(
+            input_data.seismic_context,
+            capacity_review,
+        )
 
         face = self._select_face_rebar(section, input_data.regions, mode)
-        warnings = tuple(
-            "FLEXURAL_DEMAND_BELOW_AS_MIN"
+        final_stirrup_diameter = max(region.stirrup.diameter_mm for region in regions)
+        final_main_diameter = min(self._final_main_db(region, section) for region in regions)
+        effective_depth = min(
+            self.code.effective_depth(section, region.stirrup.diameter_mm, self._final_main_db(region, section))
             for region in regions
-            if (
-                region.demand.as_flex_top_mm2 < region.as_min_mm2
-                or region.demand.as_flex_bottom_mm2 < region.as_min_mm2
+        )
+        layout_geometry = RebarLayoutGeometry(
+            width_mm=section.width_mm,
+            depth_mm=section.depth_mm,
+            effective_depth_mm=effective_depth,
+            stirrup_diameter_mm=final_stirrup_diameter,
+            clear_cover_mm=section.clear_cover_for_layout_mm(final_stirrup_diameter, final_main_diameter),
+            top_layers=tuple(tuple(float(value) for value in region.top.bars[0].layers) for region in regions),
+            bottom_layers=tuple(tuple(float(value) for value in region.bottom.bars[0].layers) for region in regions),
+            coordinates_resolved=False,
+        )
+        constructability = build_constructability(
+            is_smf=section.is_smf,
+            span_length_mm=section.length_mm,
+            beam_depth_mm=section.depth_mm,
+            effective_depth_mm=effective_depth,
+            smallest_primary_bar_diameter_mm=min(self._final_main_db(region, section) for region in regions),
+            left_support=input_data.left_support,
+            right_support=input_data.right_support,
+            left_spacing_mm=regions[0].stirrup.spacing_mm,
+            middle_spacing_mm=regions[1].stirrup.spacing_mm,
+            right_spacing_mm=regions[2].stirrup.spacing_mm,
+            allowed_spacings_mm=self.project.allowed_spacings_mm,
+            smf_end_project_limit_mm=self.project.smf_end_max_spacing_mm,
+            yield_locations_mm=(
+                input_data.yield_locations_mm
+                or (
+                    final_seismic_context.likely_yield_locations_mm
+                    if final_seismic_context is not None
+                    else ()
+                )
+            ),
+            seismic_context=final_seismic_context,
+            beam_width_mm=section.width_mm,
+            concrete_strength_mpa=section.fc_mpa,
+            layout_geometry=layout_geometry,
+        )
+        smf_checks = (
+            evaluate_smf_longitudinal(
+                width_mm=section.width_mm,
+                fc_mpa=section.fc_mpa,
+                fy_mpa=section.fy_mpa,
+                effective_depth_mm=effective_depth,
+                left_top=regions[0].top,
+                left_bottom=regions[0].bottom,
+                middle_top=regions[1].top,
+                middle_bottom=regions[1].bottom,
+                right_top=regions[2].top,
+                right_bottom=regions[2].bottom,
+                maximum_ratio=self.project.smf_max_longitudinal_ratio,
+            )
+            if section.is_smf
+            else ()
+        )
+        if not section.is_smf:
+            ordinary_checks = evaluate_ordinary_constructability(
+                depth_mm=section.depth_mm,
+                mode=mode.value,
+                torsion_longitudinal_area_mm2=max(
+                    (region.demand.al_torsion_mm2 for region in regions),
+                    default=0.0,
+                ),
+            )
+            blocking = tuple(
+                check.status
+                for check in ordinary_checks
+                if check.status not in {"PASS", "INFO", "WARN"}
+            )
+            constructability = replace(
+                constructability,
+                status=("REVIEW" if blocking else constructability.status),
+                checks=tuple((*constructability.checks, *ordinary_checks)),
+            )
+        extra_warnings = list(constructability.blocking_statuses)
+        extra_warnings.extend(
+            check.status for check in smf_checks if check.status not in {"PASS", "INFO", "WARN"}
+        )
+        if section.is_smf and (
+            final_seismic_context is None
+            or (
+                capacity_review is not None
+                and capacity_review.status not in {"PASS", "NOT_APPLICABLE"}
+            )
+        ):
+            extra_warnings.append("CAPACITY_SHEAR_SOURCE_UNVERIFIED")
+        warnings = tuple(
+            sorted(
+                set(
+                    (
+                        *(
+                            "FLEXURAL_DEMAND_BELOW_AS_MIN"
+                            for region in regions
+                            if (
+                                region.demand.as_flex_top_mm2 < region.as_min_mm2
+                                or region.demand.as_flex_bottom_mm2 < region.as_min_mm2
+                            )
+                        ),
+                        *extra_warnings,
+                    )
+                )
             )
         )
         return BeamDetailingResult(
@@ -668,6 +909,163 @@ class BeamDetailingEngine:
             profile_source=section.profile_source,
             iteration_status=iteration_status,
             iteration_count=iteration_count,
+            constructability=constructability,
+            smf_checks=tuple(smf_checks),
+            capacity_shear_review=capacity_review,
+            seismic_context=input_data.seismic_context,
+        )
+
+    def refresh_capacity_shear_after_layout_change(
+        self,
+        result: BeamDetailingResult,
+    ) -> BeamDetailingResult:
+        """Recheck SMF capacity shear after adjacent-span bar coordination.
+
+        Coordination changes only longitudinal layouts, so the existing
+        stirrup catalogue choice can be retained only when the new
+        ``Vu_final`` still passes it.  A failed finalization raises and the
+        caller blocks the beam-line result instead of publishing stale
+        capacity-shear evidence.
+        """
+
+        if not result.section.is_smf or result.seismic_context is None:
+            return result
+        review = self._calculate_capacity_review(
+            result.section,
+            result.regions,
+            result.seismic_context,
+        )
+        required = review.required_av_over_s_mm2_per_mm if review is not None else None
+        affected = {"left", "right"}
+        if result.constructability is not None and any(
+            zone.name == "smf_end_hoop_overlap" for zone in result.constructability.zones
+        ):
+            affected = {"left", "middle", "right"}
+        regions: list[RegionDetailing] = []
+        for region in result.regions:
+            demand = replace(
+                region.demand,
+                capacity_shear_av_over_s_mm2_per_mm=(required if required is not None and region.name in affected else None),
+                capacity_shear_demand_kN=(
+                    review.final_capacity_shear_kN
+                    if review is not None and region.name in affected
+                    else None
+                ),
+                capacity_shear_source=(review.control_source if review is not None and region.name in affected else ""),
+                capacity_shear_vc_zero=(review.vc_zero if review is not None and region.name in affected else False),
+            )
+            regions.append(replace(region, demand=demand))
+        finalized = self._finalize_stirrup_controls(result.section, tuple(regions))
+        constructability = result.constructability
+        if constructability is not None:
+            final_context = self._context_with_capacity_review(result.seismic_context, review)
+            capacity_checks = evaluate_smf_capacity_shear(
+                span_length_mm=result.section.length_mm,
+                context=final_context or result.seismic_context,
+            )
+            constructability = replace(
+                constructability,
+                checks=tuple(
+                    check
+                    for check in constructability.checks
+                    if check.rule_id != "SMF-CAPACITY-SHEAR"
+                ) + tuple(capacity_checks),
+            )
+        return replace(
+            result,
+            regions=finalized,
+            capacity_shear_review=review,
+            constructability=constructability,
+        )
+
+    def _calculate_capacity_review(
+        self,
+        section: BeamSection,
+        regions: tuple[RegionDetailing, ...],
+        context: SeismicDetailingContext | None,
+    ) -> CapacityShearReview | None:
+        if not section.is_smf or context is None or len(regions) < 3:
+            return None
+        effective_depth = min(
+            self.code.effective_depth(section, region.stirrup.diameter_mm, self._final_main_db(region, section))
+            for region in regions
+        )
+        return calculate_smf_capacity_shear(
+            span_length_mm=section.length_mm,
+            beam_width_mm=section.width_mm,
+            fc_mpa=section.fc_mpa,
+            fy_mpa=section.fy_mpa,
+            fyt_mpa=section.fyt_mpa,
+            effective_depth_mm=effective_depth,
+            left_region=regions[0],
+            right_region=regions[-1],
+            context=context,
+        )
+
+    @staticmethod
+    def _capacity_region_names(input_data: BeamDetailingInput) -> set[str]:
+        names = {"left", "right"}
+        left = input_data.left_support
+        right = input_data.right_support
+        if (
+            left is not None
+            and right is not None
+            and left.resolved
+            and right.resolved
+            and right.face_location_mm - left.face_location_mm
+            <= 4.0 * input_data.section.depth_mm + 1e-9
+        ):
+            # The two 2h regions overlap; the whole calculated span is an
+            # end-zone demand for the purpose of the three-point selector.
+            names = {"left", "middle", "right"}
+        return names
+
+    def _apply_capacity_shear_demands(
+        self,
+        base_regions: tuple[BeamRegionDemand, ...],
+        _prior_regions: tuple[BeamRegionDemand, ...],
+        review: CapacityShearReview | None,
+        input_data: BeamDetailingInput,
+    ) -> tuple[BeamRegionDemand, ...]:
+        required = review.required_av_over_s_mm2_per_mm if review is not None else None
+        affected = self._capacity_region_names(input_data) if required is not None else set()
+        return tuple(
+            replace(
+                demand,
+                capacity_shear_av_over_s_mm2_per_mm=(required if demand.name in affected else None),
+                capacity_shear_demand_kN=(
+                    review.final_capacity_shear_kN if demand.name in affected and review else None
+                ),
+                capacity_shear_source=(review.control_source if demand.name in affected and review else ""),
+                capacity_shear_vc_zero=(review.vc_zero if demand.name in affected and review else False),
+            )
+            for demand in base_regions
+        )
+
+    @staticmethod
+    def _context_with_capacity_review(
+        context: SeismicDetailingContext | None,
+        review: CapacityShearReview | None,
+    ) -> SeismicDetailingContext | None:
+        if context is None or review is None:
+            return context
+        return replace(
+            context,
+            left_mpr_kNm=(review.left_mpr_kNm if review.left_mpr_kNm is not None else context.left_mpr_kNm),
+            right_mpr_kNm=(review.right_mpr_kNm if review.right_mpr_kNm is not None else context.right_mpr_kNm),
+            capacity_shear_demand_kN=(
+                review.etabs_capacity_shear_kN
+                if review.etabs_capacity_shear_kN is not None
+                else context.capacity_shear_demand_kN
+            ),
+            gravity_shear_kN=(
+                review.gravity_shear_kN
+                if review.gravity_shear_kN is not None
+                else context.gravity_shear_kN
+            ),
+            capacity_shear_final_kN=review.final_capacity_shear_kN,
+            capacity_shear_required_av_over_s_mm2_per_mm=review.required_av_over_s_mm2_per_mm,
+            capacity_shear_control_source=review.control_source,
         )
 
     def _design_regions_with_stirrups(
@@ -683,7 +1081,7 @@ class BeamDetailingEngine:
             effective_depth = self.code.effective_depth(
                 section,
                 stirrup.diameter_mm,
-                self.project.minimum_main_diameter_mm,
+                self.project.minimum_main_diameter_for(section),
             )
             as_min = self.code.minimum_longitudinal_area(
                 section.width_mm, effective_depth, section.fc_mpa, section.fy_mpa
@@ -731,18 +1129,23 @@ class BeamDetailingEngine:
                     section,
                     demand,
                     stirrup,
-                    self.project.minimum_main_diameter_mm,
+                    self.project.minimum_main_diameter_for(section),
                 )
                 for demand, stirrup in zip(input_data.regions, selected_stirrups)
             )
         return mode, regions
 
-    def _final_main_db(self, region: RegionDetailing) -> int:
+    def _final_main_db(self, region: RegionDetailing, section: BeamSection | None = None) -> int:
+        minimum = (
+            self.project.minimum_main_diameter_for(section)
+            if section is not None
+            else self.project.minimum_main_diameter_mm
+        )
         return min(
             bar.diameter_mm
             for design in (region.top, region.bottom)
             for bar in design.bars
-            if bar.diameter_mm >= self.project.minimum_main_diameter_mm
+            if bar.diameter_mm >= minimum
         )
 
     def _finalize_stirrup_controls(
@@ -754,15 +1157,16 @@ class BeamDetailingEngine:
 
         output: list[RegionDetailing] = []
         for region in regions:
-            final_db = self._final_main_db(region)
+            final_db = self._final_main_db(region, section)
             maximum, reason, limits, high_shear = self.code.maximum_stirrup_spacing(
                 section,
                 region.demand,
                 region.stirrup.diameter_mm,
                 final_db,
+                self.project.smf_end_max_spacing_mm,
             )
             minimum_av = self.code.minimum_transverse_area_per_spacing(section)
-            required_av = max(region.demand.av_over_s_mm2_per_mm, minimum_av)
+            required_av = max(region.demand.transverse_required_av_over_s_mm2_per_mm, minimum_av)
             required_combo = required_av + 2.0 * region.demand.at_over_s_mm2_per_mm
             if (
                 region.stirrup.spacing_mm > maximum + 1e-9
@@ -774,7 +1178,7 @@ class BeamDetailingEngine:
                 region.stirrup,
                 maximum_spacing_mm=maximum,
                 governing_reason=reason,
-                required_av_over_s_mm2_per_mm=region.demand.av_over_s_mm2_per_mm,
+                required_av_over_s_mm2_per_mm=region.demand.transverse_required_av_over_s_mm2_per_mm,
                 minimum_av_over_s_mm2_per_mm=minimum_av,
                 required_combo_over_s_mm2_per_mm=required_combo,
                 final_main_bar_diameter_mm=final_db,
@@ -913,9 +1317,14 @@ class BeamDetailingEngine:
             regions[index] = replace(region, bottom=coordinated)
         return regions
 
-    def _through_diameter(self, design: LongitudinalDesign) -> int:
+    def _through_diameter(self, design: LongitudinalDesign, section: BeamSection | None = None) -> int:
+        minimum = (
+            self.project.minimum_main_diameter_for(section)
+            if section is not None
+            else self.project.minimum_main_diameter_mm
+        )
         candidates = [
-            bar.diameter_mm for bar in design.bars if bar.diameter_mm >= self.project.minimum_main_diameter_mm
+            bar.diameter_mm for bar in design.bars if bar.diameter_mm >= minimum
         ]
         if not candidates:
             raise DetailingError("LONGITUDINAL_THROUGH_BAR_MISSING")
@@ -1007,7 +1416,7 @@ class BeamDetailingEngine:
             candidates.append(fixed)
         base_area = self.project.catalog.area(base_diameter)
         capacity = self._capacity_per_layer(section, stirrup_diameter_mm, base_diameter)
-        for supplement_diameter in self.project.ordered_longitudinal_diameters():
+        for supplement_diameter in self.project.ordered_longitudinal_diameters_for(section):
             if supplement_diameter <= base_diameter:
                 continue
             supplement_area = self.project.catalog.area(supplement_diameter)
@@ -1085,6 +1494,28 @@ class BeamDetailingEngine:
             provided_av_over_s_mm2_per_mm=legs * stirrup.provided_at_over_s_mm2_per_mm,
         )
 
+    @staticmethod
+    def _conservative_stirrup(first: StirrupDesign, second: StirrupDesign) -> StirrupDesign:
+        """Merge two oscillating candidates using the stricter geometry."""
+
+        diameter = max(first.diameter_mm, second.diameter_mm)
+        spacing = min(first.spacing_mm, second.spacing_mm)
+        legs = max(first.legs, second.legs)
+        per_leg = math.pi * diameter**2 / 4.0 / spacing
+        return replace(
+            first,
+            diameter_mm=diameter,
+            spacing_mm=spacing,
+            legs=legs,
+            provided_av_over_s_mm2_per_mm=legs * per_leg,
+            provided_at_over_s_mm2_per_mm=per_leg,
+            final_main_bar_diameter_mm=max(
+                first.final_main_bar_diameter_mm or 0,
+                second.final_main_bar_diameter_mm or 0,
+            ) or None,
+            maximum_spacing_mm=min(first.maximum_spacing_mm, second.maximum_spacing_mm),
+        )
+
     def _redesign_face_region(
         self,
         section: BeamSection,
@@ -1130,7 +1561,7 @@ class BeamDetailingEngine:
     def _select_stirrup(self, section: BeamSection, demand: BeamRegionDemand, max_main: int) -> StirrupDesign:
         candidates: list[tuple[int, int, StirrupDesign]] = []
         minimum_av = self.code.minimum_transverse_area_per_spacing(section)
-        required_av = max(demand.av_over_s_mm2_per_mm, minimum_av)
+        required_av = max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av)
         combo = required_av + 2.0 * demand.at_over_s_mm2_per_mm
         for diameter_rank, diameter in enumerate(self.project.ordered_stirrup_diameters()):
             area = self.project.catalog.area(diameter)
@@ -1140,6 +1571,7 @@ class BeamDetailingEngine:
                     demand,
                     diameter,
                     max_main,
+                    self.project.smf_end_max_spacing_mm,
                 )
                 if spacing > maximum + 1e-9:
                     continue
@@ -1164,7 +1596,7 @@ class BeamDetailingEngine:
                             provided_at,
                             maximum,
                             reason,
-                            demand.av_over_s_mm2_per_mm,
+                            demand.transverse_required_av_over_s_mm2_per_mm,
                             minimum_av,
                             combo,
                             max_main,
@@ -1200,6 +1632,7 @@ class BeamDetailingEngine:
                         demand,
                         diameter,
                         main_diameter,
+                        self.project.smf_end_max_spacing_mm,
                     )
                     for demand, main_diameter in zip(demands, main_diameters)
                 )
@@ -1214,7 +1647,7 @@ class BeamDetailingEngine:
                     *(self.code.minimum_legs(section, demand.name) for demand in demands),
                     *(
                         math.ceil(
-                            (max(demand.av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm)
+                            (max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm)
                             * spacing
                             / area
                             - 1e-9
@@ -1229,7 +1662,7 @@ class BeamDetailingEngine:
                 if any(
                     provided_at + 1e-9 < demand.at_over_s_mm2_per_mm
                     or provided_combo + 1e-9
-                    < max(demand.av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm
+                    < max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm
                     for demand in demands
                 ):
                     continue
@@ -1245,10 +1678,10 @@ class BeamDetailingEngine:
                             provided_at,
                             maximum,
                             f"SB_SPAN_ENVELOPE:{reason}",
-                            max(demand.av_over_s_mm2_per_mm for demand in demands),
+                            max(demand.transverse_required_av_over_s_mm2_per_mm for demand in demands),
                             minimum_av,
                             max(
-                                max(demand.av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm
+                                max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm
                                 for demand in demands
                             ),
                             min(main_diameters),
@@ -1291,7 +1724,7 @@ class BeamDetailingEngine:
     ) -> LongitudinalDesign | None:
         if required_area <= 0:
             required_area = 0.0
-        diameters = self.project.ordered_longitudinal_diameters()
+        diameters = self.project.ordered_longitudinal_diameters_for(section)
         candidates: list[LongitudinalDesign] = []
         for diameter in diameters:
             candidate = self._single_diameter_candidate(
@@ -1362,7 +1795,7 @@ class BeamDetailingEngine:
         credit_diameter = self.project.minimum_credit_hanger_diameter_mm
         credit_area = self.project.catalog.area(credit_diameter)
         candidates: list[LongitudinalDesign] = []
-        diameters = main_diameters or self.project.ordered_longitudinal_diameters()
+        diameters = main_diameters or self.project.ordered_longitudinal_diameters_for(section)
         for main_diameter in diameters:
             main_area = self.project.catalog.area(main_diameter)
             main_count = minimum_count
@@ -1642,6 +2075,12 @@ def coordinate_adjacent_spans(
     )
     first_output = coordinate_intraspan_result(first_output, engine)
     second_output = coordinate_intraspan_result(second_output, engine)
+    # Shared-support coordination can increase the actual end Mpr.  Recheck
+    # capacity shear before the result is returned; if the existing hoops no
+    # longer satisfy the new demand, fail closed and let the beam-line caller
+    # publish a coordination-blocked status.
+    first_output = engine.refresh_capacity_shear_after_layout_change(first_output)
+    second_output = engine.refresh_capacity_shear_after_layout_change(second_output)
     return first_output, second_output
 
 
@@ -1672,8 +2111,12 @@ def _common_support_layout(
     exact_count: bool,
     allow_supplement: bool = True,
 ) -> tuple[LongitudinalDesign, LongitudinalDesign]:
-    anchor = engine._through_diameter(first_design)
-    diameters = (anchor,) + tuple(value for value in engine.project.ordered_longitudinal_diameters() if value != anchor)
+    anchor = engine._through_diameter(first_design, first_result.section)
+    diameters = (anchor,) + tuple(
+        value
+        for value in engine.project.ordered_longitudinal_diameters_for(first_result.section)
+        if value != anchor
+    )
     max_layers = (
         None
         if first_result.mode is ReinforcementMode.FACE_TORSION and second_result.mode is ReinforcementMode.FACE_TORSION

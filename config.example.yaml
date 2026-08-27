@@ -49,19 +49,18 @@ design:
   # 当前配筋引擎仅接受 ACI 318-14；其他规范需先实现独立策略。
   standard: "ACI 318-14"
 
-  # 可选：从混凝土表面到箍筋外缘的净保护层（mm）。
+  # 本项目梁措施第 4 节单排容量表按 40 mm 箍筋外缘净保护层计算。
   # 提供时必须同时记录来源，配筋引擎按该显式净保护层计算。
-  # 留空时，按每个截面的 ETABS GetRebarBeam CoverTop/CoverBot
+  # 如需改回模型值，必须同时清空本项和来源，届时按每个截面的 ETABS GetRebarBeam CoverTop/CoverBot
   # （混凝土面至纵筋重心）控制值计算有效高度，并针对候选纵筋/箍筋
   # 反算排布净宽；若 ETABS cover 也缺失则 fail-closed。
-  clear_cover_to_stirrup_outer_mm:
-  clear_cover_source: ""
+  clear_cover_to_stirrup_outer_mm: 40
+  clear_cover_source: "Nasiriyah SMF/SB beam measure rev.1 (2026-08-24), section 4 table basis"
 
-  # 项目最大骨料粒径（mm）及其来源。两项均留空时采用项目默认值
-  # 25 mm，并记录 "Project default: 25 mm maximum aggregate size"。
+  # 本项目梁措施第 4 节单排容量表按最大骨料粒径 25 mm 计算。
   # 若由配置或后续插件菜单显式选择其他值，必须同时写入可追溯来源。
-  max_aggregate_size_mm:
-  max_aggregate_size_source: ""
+  max_aggregate_size_mm: 25
+  max_aggregate_size_source: "Nasiriyah SMF/SB beam measure rev.1 (2026-08-24), section 4 table basis"
 
 # ============================================================================
 # 输出配置

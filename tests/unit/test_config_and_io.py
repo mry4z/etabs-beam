@@ -62,6 +62,16 @@ def test_design_settings_default_to_project_25_mm_aggregate() -> None:
     assert settings.max_aggregate_size_source == DEFAULT_MAX_AGGREGATE_SIZE_SOURCE
 
 
+def test_checked_in_project_config_uses_nasiriyah_measure_geometry_inputs() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    config = load_config(project_root / "config.example.yaml")
+
+    assert config.design.clear_cover_to_stirrup_outer_mm == pytest.approx(40.0)
+    assert "Nasiriyah SMF/SB beam measure" in config.design.clear_cover_source
+    assert config.design.max_aggregate_size_mm == pytest.approx(25.0)
+    assert "Nasiriyah SMF/SB beam measure" in config.design.max_aggregate_size_source
+
+
 def test_config_rejects_non_n_mm_c_export_unit(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

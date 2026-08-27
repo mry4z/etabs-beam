@@ -14,10 +14,10 @@ geometry:
 
 design:
   standard: "ACI 318-14"
-  clear_cover_to_stirrup_outer_mm:
-  clear_cover_source: ""
-  max_aggregate_size_mm:
-  max_aggregate_size_source: ""
+  clear_cover_to_stirrup_outer_mm: 40
+  clear_cover_source: "Nasiriyah SMF/SB beam measure rev.1 (2026-08-24), section 4 table basis"
+  max_aggregate_size_mm: 25
+  max_aggregate_size_source: "Nasiriyah SMF/SB beam measure rev.1 (2026-08-24), section 4 table basis"
 
 output:
   reports_dir: "outputs/reports"

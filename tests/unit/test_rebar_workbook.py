@@ -8,6 +8,7 @@ import pytest
 from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.geometry_extractor import BeamGeometry
 from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
+from src.design.etabs_result import CapacityShearPoint
 from src.excel_span_adapter import (
     SpanScheduleMapping,
     SpanScheduleRecord,
@@ -15,10 +16,14 @@ from src.excel_span_adapter import (
 from src.rebar_workbook import (
     PAYLOAD_SCHEMA_VERSION,
     _frame_types,
+    _derive_support_face_contexts,
     _run_artifact_builder,
     _run_rebar_preview_builder,
     build_payload_from_schedule,
     build_secondary_schedule_payload,
+    _empty_review,
+    _empty_final,
+    write_capacity_shear_audit,
     redetail_payload,
     write_rebar_payload,
 )
@@ -212,12 +217,13 @@ def _section(name: str) -> dict[str, float | str]:
     }
 
 
-def _build_payload(schedule, beams, *, frame_types):
+def _build_payload(schedule, beams, *, frame_types, resolved_frame_types=None):
     return build_payload_from_schedule(
         schedule,
         beams,
         section_loader=_section,
         frame_types=frame_types,
+        resolved_frame_types=resolved_frame_types,
         metadata={"model": "sample.EDB", "units": "N_mm_C"},
         clear_cover_to_stirrup_outer_mm=40.0,
         clear_cover_source="structural-general-notes",
@@ -262,14 +268,17 @@ def test_formal_payload_contains_three_sheet_rows_and_can_redetail(tmp_path: Pat
     assert payload["review_rows"][0]["engine_status"] == "OK"
     assert payload["review_rows"][0]["et1_text"]
     assert payload["final_rows"][0]["beam_no"] == "F1-PB1-1"
-    assert payload["raw_rows"][0]["detailing_profile"] == "PB_OMF"
+    assert payload["raw_rows"][0]["detailing_profile"] == "OMF"
+    assert payload["raw_rows"][0]["effective_frame_type"] == "OMF"
     assert payload["raw_rows"][0]["left_top_total_combo"] == "TOP-C"
     assert payload["raw_rows"][0]["right_top_total_station_mm"] == 6000.0
     assert payload["raw_rows"][0]["etabs_longitudinal_cover_mm"] == 45.0
     assert payload["raw_rows"][0]["clear_cover_to_stirrup_outer_mm"] == 40.0
+    assert payload["metadata"]["smf_end_max_spacing_mm"] == pytest.approx(100.0)
+    assert payload["metadata"]["smf_max_longitudinal_ratio"] == pytest.approx(0.01613)
     assert payload["review_rows"][0]["s2_left_av_required"] == 0.35
     assert payload["review_rows"][0]["s2_left_shear_source"] == (
-        "GetSummaryResultsBeam_2.VMajorArea; PB_SMF capacity shear is not added again"
+        "GetSummaryResultsBeam_2.VMajorArea (Av/s)"
     )
 
     destination = write_rebar_payload(payload, tmp_path / "payload.json")
@@ -278,7 +287,25 @@ def test_formal_payload_contains_three_sheet_rows_and_can_redetail(tmp_path: Pat
     assert redetailed["review_rows"][0]["engine_status"] == "OK"
 
 
-def test_sb_sway_special_frame_type_stays_ordinary_without_chapter_18() -> None:
+def test_support_faces_are_derived_from_column_centres_and_dimensions() -> None:
+    beam = _beam("A", (0, 0, 0), (6000, 0, 0))
+    span = BeamSpan("F1", "PB", 1, 1, ("A",), (beam.start, beam.end), False, False)
+    design = BeamDesignResult("F1-PB1-1", (_station(0.0, 1000.0, 1000.0), _station(6000.0, 1000.0, 1000.0)))
+    schedule = SpanScheduleMapping((SpanScheduleRecord(span, beam, design),), {}, {})
+    contexts = _derive_support_face_contexts(
+        schedule.records,
+        {"C1": (0.0, 0.0, 0.0), "C2": (6000.0, 0.0, 0.0)},
+        {"C1": 600.0, "C2": 800.0},
+        tolerance_mm=1.0,
+    )
+    left, right = contexts[span.span_id]
+    assert left is not None and right is not None
+    assert left.face_location_mm == 300.0
+    assert right.face_location_mm == 5600.0
+    assert "ETABS column support point" in left.source
+
+
+def test_sb_sway_special_frame_type_remains_smf() -> None:
     beam = _beam("SB-A", (0, 0, 0), (6000, 0, 0))
     span = BeamSpan(
         "F1",
@@ -311,16 +338,20 @@ def test_sb_sway_special_frame_type_stays_ordinary_without_chapter_18() -> None:
     )
 
     raw = payload["raw_rows"][0]
-    assert raw["detailing_profile"] == "SB_ORDINARY_NO_CH18"
-    assert raw["is_smf"] is False
+    assert raw["detailing_profile"] == "SMF"
+    assert raw["effective_frame_type"] == "SMF"
+    assert raw["is_smf"] is True
     assert raw["engine_status"] == "OK"
-    assert "SB_ETABS_SWAY_DESIGN_RESULT_REVIEW" in raw["warnings"]
     assert payload["final_rows"][0]["legs"] == 2
     assert payload["final_rows"][0]["s1"] == payload["final_rows"][0]["s2"]
     secondary = build_secondary_schedule_payload(payload)
     assert len(secondary["schedule_rows"]) == 1
     assert secondary["schedule_rows"][0]["stirrups"] == payload["final_rows"][0]["s1"]
     assert secondary["exception_rows"] == []
+    assert len(secondary["raw_rows"]) == 1
+    assert len(secondary["review_rows"]) == 1
+    assert len(secondary["final_rows"]) == 1
+    assert secondary["metadata"]["secondary_workbook_layout"] == "three-sheet-rebar-workbook"
 
 
 def test_secondary_schedule_rejects_non_unified_stirrup_row() -> None:
@@ -331,7 +362,7 @@ def test_secondary_schedule_rejects_non_unified_stirrup_row() -> None:
                 "beam_type": "SB",
                 "beam_no": "F1-SB1-1",
                 "engine_status": "OK",
-                "detailing_profile": "SB_ORDINARY_NO_CH18",
+                "effective_frame_type": "OMF",
                 "s2": "T10@100",
                 "s1": "T10@200",
             },
@@ -352,7 +383,7 @@ def test_secondary_schedule_rejects_non_unified_stirrup_row() -> None:
     assert secondary["exception_rows"][0]["engine_status"] == ("SB_SPAN_STIRRUP_NOT_UNIFIED")
 
 
-def test_program_determined_pb_stays_blocked_after_offline_redetail() -> None:
+def test_program_determined_pb_defaults_to_smf_after_offline_redetail() -> None:
     beam = _beam("PB-PD", (0, 0, 0), (6000, 0, 0))
     span = BeamSpan(
         "F1",
@@ -383,10 +414,56 @@ def test_program_determined_pb_stays_blocked_after_offline_redetail() -> None:
         frame_types={"PB-PD": "Program Determined"},
     )
 
-    assert payload["raw_rows"][0]["engine_status"] == "FRAME_TYPE_UNRESOLVED"
+    assert payload["raw_rows"][0]["effective_frame_type"] == "SMF"
+    assert payload["raw_rows"][0]["engine_status"] == "OK"
     redetailed = redetail_payload(payload)
-    assert redetailed["raw_rows"][0]["engine_status"] == "FRAME_TYPE_UNRESOLVED"
-    assert redetailed["final_rows"][0]["engine_status"] == "FRAME_TYPE_UNRESOLVED"
+    assert redetailed["raw_rows"][0]["engine_status"] == "OK"
+    assert redetailed["final_rows"][0]["engine_status"] == "OK"
+
+
+def test_capacity_shear_audit_is_jsonl_process_output(tmp_path: Path) -> None:
+    beam = _beam("SMF-A", (0, 0, 0), (6000, 0, 0))
+    span = BeamSpan("F1", "PB", 1, 1, ("SMF-A",), (beam.start, beam.end), False, False)
+    design = BeamDesignResult(
+        "F1-PB1-1",
+        (_station(0.0, 1000.0, 1000.0), _station(3000.0, 1000.0, 1000.0), _station(6000.0, 1000.0, 1000.0)),
+    )
+    payload = _build_payload(
+        SpanScheduleMapping((SpanScheduleRecord(span, beam, design),), {}, {}),
+        [beam],
+        frame_types={"SMF-A": "Sway Special"},
+    )
+    path = write_capacity_shear_audit(
+        payload,
+        {
+            "SMF-A": (
+                CapacityShearPoint("SMF-A", 0.0, "EQX", 120.0),
+            )
+        },
+        tmp_path / "capacity.jsonl",
+    )
+    line = path.read_text(encoding="utf-8").strip()
+    assert '"schema":"etabs-beam-generator/capacity-shear@1"' in line
+    assert '"effective_frame_type":"SMF"' in line
+    assert '"shear_kN":120.0' in line
+
+
+def test_program_determined_api_conflict_is_recorded_without_changing_smf() -> None:
+    beam = _beam("SMF-PD", (0, 0, 0), (6000, 0, 0))
+    span = BeamSpan("F1", "PB", 1, 1, ("SMF-PD",), (beam.start, beam.end), False, False)
+    design = BeamDesignResult(
+        "F1-PB1-1",
+        (_station(0.0, 1000.0, 1000.0), _station(3000.0, 1000.0, 1000.0), _station(6000.0, 1000.0, 1000.0)),
+    )
+    payload = _build_payload(
+        SpanScheduleMapping((SpanScheduleRecord(span, beam, design),), {}, {}),
+        [beam],
+        frame_types={"SMF-PD": "Program Determined"},
+        resolved_frame_types={"SMF-PD": "Sway Ordinary"},
+    )
+    row = payload["raw_rows"][0]
+    assert row["effective_frame_type"] == "SMF"
+    assert "PROGRAM_DEFAULT_MODEL_CONFLICT" in row["warnings"]
 
 
 def test_payload_coordinates_adjacent_sb_support_reinforcement_by_beam_line() -> None:
@@ -473,8 +550,27 @@ def test_mixed_section_span_is_fail_closed() -> None:
     )
 
     assert payload["raw_rows"][0]["engine_status"] == ("MIXED_SECTION_REVIEW_REQUIRED")
-    assert payload["review_rows"][0]["et1_text"] == ""
+    assert payload["review_rows"][0]["et1_text"].endswith(("T16", "T18", "T20", "T22", "T25", "T28", "T32"))
+    assert "不得直接用于施工图" in payload["review_rows"][0]["review_note"]
     assert payload["final_rows"][0]["engine_status"] == ("MIXED_SECTION_REVIEW_REQUIRED")
+
+
+def test_empty_candidate_rows_are_never_blank_even_without_area_demands() -> None:
+    common = {
+        "beam_no": "F1-PB1-1",
+        "beam_type": "PB",
+        "effective_frame_type": "SMF",
+    }
+    review = _empty_review(common, "DESIGN_RESULTS_STALE")
+    final = _empty_final(common, "DESIGN_RESULTS_STALE")
+
+    assert review["et1_text"] == "2T20"
+    assert review["t1_text"] == "2T20"
+    assert review["s1_text"] == "2T8@100"
+    assert review["face_text"] == "2T20（面筋候选）"
+    assert final["eb2"] == "2T20"
+    assert final["s2"] == "2T8@100"
+    assert "不得直接用于施工图" in final["review_note"]
 
 
 def test_mixed_pb_frame_type_is_fail_closed_with_spec_status() -> None:

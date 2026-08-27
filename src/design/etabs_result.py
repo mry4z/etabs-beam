@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 from src.core.etabs_connector import EtabsApiError, api_values
 from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
+
+
+@dataclass(frozen=True)
+class CapacityShearPoint:
+    """One normalized row from ETABS' ACI 318-14 beam shear envelope."""
+
+    object_name: str
+    location_mm: float
+    combination: str
+    shear_kN: float
+    status: str = ""
+    table_version: int | None = None
+    source: str = "Concrete Beam Shear Envelope - ACI 318-14"
+    units: str = "N_mm_C"
 
 
 class EtabsResultProvider:
@@ -13,6 +28,115 @@ class EtabsResultProvider:
 
     def __init__(self, sap_model: Any) -> None:
         self.sap = sap_model
+
+    def get_seismic_framing_types(self) -> dict[str, str]:
+        """Read ETABS-resolved seismic frame types through the public OAPI.
+
+        This is an audit companion to the model overwrite table.  Explicit
+        overwrite values remain the detailing input; the resolved values are
+        retained to explain what ETABS itself selected for Program Determined.
+        Hosts/builds without this capability return an empty mapping so the
+        offline and older snapshot paths remain usable.
+        """
+
+        method = getattr(getattr(self.sap, "DesignConcrete", None), "GetSeismicFramingType", None)
+        if method is None:
+            return {}
+        try:
+            from ETABSv1 import eItemType
+
+            item_type = eItemType.Objects
+        except Exception:
+            item_type = None
+        try:
+            result = method(None, 0, None, None, item_type)
+        except TypeError:
+            # A few pythonnet hosts require an empty object name for the bulk
+            # overload even when eItemType.Objects is supplied.
+            result = method("", 0, None, None, item_type)
+        values = api_values(result, "DesignConcrete.GetSeismicFramingType")
+        if len(values) != 3:
+            raise EtabsApiError("DesignConcrete.GetSeismicFramingType: 返回参数数量异常。")
+        count, names, types = int(values[0]), list(values[1] or ()), list(values[2] or ())
+        if count < 0 or len(names) != count or len(types) != count:
+            raise EtabsApiError("DesignConcrete.GetSeismicFramingType: 数组长度不一致。")
+        return {str(name): str(frame_type) for name, frame_type in zip(names, types)}
+
+    def get_beam_shear_envelope(self) -> dict[str, tuple[CapacityShearPoint, ...]]:
+        """Read the public ACI 318-14 beam shear-envelope table.
+
+        ``Shear`` is a force result and ``VRebar`` is an Av/s result; they are
+        intentionally kept as separate normalized fields.  Missing tables or
+        malformed rows raise a checked API error for the caller to record as a
+        process-only fallback condition.
+        """
+
+        table_key = "Concrete Beam Shear Envelope - ACI 318-14"
+        values = api_values(
+            self.sap.DatabaseTables.GetTableForDisplayArray(
+                table_key,
+                None,
+                "",
+                0,
+                None,
+                0,
+                None,
+            ),
+            f"DatabaseTables.GetTableForDisplayArray({table_key})",
+        )
+        if len(values) != 5:
+            raise EtabsApiError(f"{table_key}: 返回参数数量异常。")
+        _requested, table_version, included_fields, record_count, flat_data = values
+        fields = [str(field) for field in list(included_fields or ())]
+        required = ("UniqueName", "Location", "VCombo", "Shear", "Status")
+        if any(field not in fields for field in required):
+            raise EtabsApiError(f"{table_key}: 缺少字段 {required!r}。")
+        data = [str(value) for value in list(flat_data or ())]
+        count = int(record_count)
+        width = len(fields)
+        if count < 0 or len(data) != count * width:
+            raise EtabsApiError(f"{table_key}: 记录数或数据宽度不一致。")
+        index = {field: fields.index(field) for field in required}
+        grouped: dict[str, list[CapacityShearPoint]] = {}
+        for offset in range(0, len(data), width):
+            row = data[offset : offset + width]
+            try:
+                point = CapacityShearPoint(
+                    object_name=row[index["UniqueName"]],
+                    location_mm=float(row[index["Location"]]),
+                    combination=row[index["VCombo"]],
+                    shear_kN=abs(float(row[index["Shear"]])),
+                    status=row[index["Status"]],
+                    table_version=int(table_version),
+                )
+            except (TypeError, ValueError) as exc:
+                raise EtabsApiError(f"{table_key}: 存在无法解析的剪力记录。") from exc
+            grouped.setdefault(point.object_name, []).append(point)
+        return {name: tuple(points) for name, points in grouped.items()}
+
+    def get_design_preferences(self) -> dict[str, str]:
+        """Read model-level ACI 318-14 concrete-frame design preferences."""
+
+        table_key = "Concrete Frame Design Preferences - ACI 318-14"
+        values = api_values(
+            self.sap.DatabaseTables.GetTableForDisplayArray(
+                table_key, None, "", 0, None, 0, None
+            ),
+            f"DatabaseTables.GetTableForDisplayArray({table_key})",
+        )
+        if len(values) != 5:
+            raise EtabsApiError(f"{table_key}: 返回参数数量异常。")
+        _requested, _version, fields, count, flat = values
+        names = [str(field) for field in list(fields or ())]
+        data = [str(value) for value in list(flat or ())]
+        if count < 0 or len(names) == 0 or len(data) != int(count) * len(names):
+            raise EtabsApiError(f"{table_key}: 记录数或数据宽度不一致。")
+        # Preferences are normally one row.  Returning the first row as a
+        # name/value map keeps the model-level context compact and auditable.
+        return {
+            names[index]: data[index]
+            for index in range(len(names))
+        }
 
     def get_beam_design(self, beam_name: str) -> BeamDesignResult:
         try:

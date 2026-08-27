@@ -19,8 +19,8 @@ ALGORITHM_VERSIONS = {
     "topology": "2026.07.22-p01",
     "numbering": "2026.07.22-no-span-s",
     "writeback": "1.0",
-    "detailing": "aci318-14-si-errata+project-2026-07",
-    "rebar_workbook_payload": "2.0",
+    "detailing": "aci318-14-si-errata+nasiriyah-smf-sb-2026-08-24-r1",
+    "rebar_workbook_payload": "2.1",
 }
 
 

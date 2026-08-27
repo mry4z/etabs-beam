@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from dataclasses import asdict, replace
 from pathlib import Path
 import shutil
 import subprocess
@@ -32,10 +33,12 @@ from src.design.detailing import (
     coordinate_adjacent_spans,
     resolve_detailing_profile,
 )
+from src.design.constructability import SeismicDetailingContext, SupportFaceContext
 from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
 from src.excel_span_adapter import SpanScheduleMapping, build_span_schedule
 
-PAYLOAD_SCHEMA_VERSION = "2.0"
+PAYLOAD_SCHEMA_VERSION = "2.1"
+SUPPORTED_PAYLOAD_SCHEMA_VERSIONS = frozenset({"2.0", PAYLOAD_SCHEMA_VERSION})
 REGIONS = ("left", "middle", "right")
 BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "build_rebar_workbook.mjs"
 PREVIEW_BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "render_rebar_workbook_preview.mjs"
@@ -55,6 +58,10 @@ def build_rebar_workbook_payload(
     max_aggregate_size_mm: float | None,
     max_aggregate_size_source: str,
     engine: BeamDetailingEngine | None = None,
+    support_face_contexts: Mapping[str, tuple[SupportFaceContext | None, SupportFaceContext | None]] | None = None,
+    seismic_contexts: Mapping[str, SeismicDetailingContext] | None = None,
+    support_points: Mapping[str, tuple[float, float, float]] | None = None,
+    support_dimensions_mm: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build the complete JSON-ready workbook payload from one ETABS run."""
 
@@ -64,6 +71,8 @@ def build_rebar_workbook_payload(
         designs,
         section_loader=lambda name: _section_info(sap_model, name),
         frame_types=_frame_types(sap_model),
+        resolved_frame_types=_resolved_frame_types(sap_model),
+        capacity_shear_envelope=_capacity_shear_envelope(sap_model),
         model_path=model_path,
         design_code=str(
             api_values(
@@ -77,6 +86,10 @@ def build_rebar_workbook_payload(
         max_aggregate_size_mm=max_aggregate_size_mm,
         max_aggregate_size_source=max_aggregate_size_source,
         engine=engine,
+        support_face_contexts=support_face_contexts,
+        seismic_contexts=seismic_contexts,
+        support_points=support_points,
+        support_dimensions_mm=support_dimensions_mm,
     )
 
 
@@ -87,6 +100,8 @@ def build_rebar_workbook_payload_from_domain(
     *,
     section_loader: Any,
     frame_types: Mapping[str, str],
+    resolved_frame_types: Mapping[str, str] | None = None,
+    capacity_shear_envelope: Mapping[str, tuple[Any, ...]] | None = None,
     model_path: str | Path,
     design_code: str,
     tolerance_mm: float = 1.0,
@@ -95,6 +110,10 @@ def build_rebar_workbook_payload_from_domain(
     max_aggregate_size_mm: float | None,
     max_aggregate_size_source: str,
     engine: BeamDetailingEngine | None = None,
+    support_face_contexts: Mapping[str, tuple[SupportFaceContext | None, SupportFaceContext | None]] | None = None,
+    seismic_contexts: Mapping[str, SeismicDetailingContext] | None = None,
+    support_points: Mapping[str, tuple[float, float, float]] | None = None,
+    support_dimensions_mm: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build the same workbook payload from any normalized read-model source."""
 
@@ -111,6 +130,8 @@ def build_rebar_workbook_payload_from_domain(
         beam_list,
         section_loader=section_loader,
         frame_types=frame_types,
+        resolved_frame_types=resolved_frame_types,
+        capacity_shear_envelope=capacity_shear_envelope,
         metadata={
             "schema_version": PAYLOAD_SCHEMA_VERSION,
             "model": str(Path(model_path)),
@@ -133,18 +154,24 @@ def build_rebar_workbook_payload_from_domain(
                 "concrete face to longitudinal-reinforcement centroid"
             ),
             "detailing_profile_source": (
-                "SB is always ordinary without Chapter 18; PB Sway Special is SMF; "
-                "all other resolved PB types use the project OMF profile"
+                "Explicit ETABS FrameType is preserved; Program Determined defaults to SMF"
             ),
+            "program_determined_default": "SMF",
             "minimum_bars_per_layer": 2,
             "minimum_main_diameter_mm": engine.project.minimum_main_diameter_mm,
             "hanger_diameter_mm": engine.project.sb_hanger_diameter_mm,
+            "smf_end_max_spacing_mm": engine.project.smf_end_max_spacing_mm,
+            "smf_max_longitudinal_ratio": engine.project.smf_max_longitudinal_ratio,
         },
         clear_cover_to_stirrup_outer_mm=clear_cover_to_stirrup_outer_mm,
         clear_cover_source=clear_cover_source,
         max_aggregate_size_mm=max_aggregate_size_mm,
         max_aggregate_size_source=max_aggregate_size_source,
         engine=engine,
+        support_face_contexts=support_face_contexts,
+        seismic_contexts=seismic_contexts,
+        support_points=support_points,
+        support_dimensions_mm=support_dimensions_mm,
     )
 
 
@@ -154,16 +181,30 @@ def build_payload_from_schedule(
     *,
     section_loader: Any,
     frame_types: Mapping[str, str],
+    resolved_frame_types: Mapping[str, str] | None = None,
+    capacity_shear_envelope: Mapping[str, tuple[Any, ...]] | None = None,
     metadata: Mapping[str, Any],
     clear_cover_to_stirrup_outer_mm: float | None,
     clear_cover_source: str,
     max_aggregate_size_mm: float | None,
     max_aggregate_size_source: str,
     engine: BeamDetailingEngine | None = None,
+    support_face_contexts: Mapping[str, tuple[SupportFaceContext | None, SupportFaceContext | None]] | None = None,
+    seismic_contexts: Mapping[str, SeismicDetailingContext] | None = None,
+    support_points: Mapping[str, tuple[float, float, float]] | None = None,
+    support_dimensions_mm: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Pure-ish adapter used by both the ETABS workflow and unit tests."""
 
     engine = engine or BeamDetailingEngine()
+    resolved_frame_types = resolved_frame_types or {}
+    capacity_shear_envelope = capacity_shear_envelope or {}
+    support_face_contexts = support_face_contexts or _derive_support_face_contexts(
+        schedule.records,
+        support_points,
+        support_dimensions_mm,
+        tolerance_mm=1.0,
+    )
     by_name = {beam.name: beam for beam in beams}
     section_cache: dict[str, dict[str, Any]] = {}
     raw_rows: list[dict[str, Any]] = []
@@ -184,21 +225,30 @@ def build_payload_from_schedule(
         if len(source_sections) > 1:
             warnings.append("MIXED_SECTION")
             blocked_reason = "MIXED_SECTION_REVIEW_REQUIRED"
-        if len(source_frame_types) > 1 and span.beam_type == "PB":
+        if len(source_frame_types) > 1:
             warnings.append("MIXED_FRAME_TYPE")
             blocked_reason = blocked_reason or "MIXED_FRAME_TYPE_REVIEW_REQUIRED"
-        elif len(source_frame_types) > 1:
-            warnings.append("SB_FRAME_TYPE_IGNORED_FOR_PROFILE")
-        if "Program Determined" in source_frame_types and span.beam_type == "PB":
+        if "Program Determined" in source_frame_types:
             warnings.append("FRAME_TYPE_PROGRAM_DETERMINED")
-            blocked_reason = blocked_reason or "FRAME_TYPE_UNRESOLVED"
-        elif "Program Determined" in source_frame_types:
-            warnings.append("SB_FRAME_TYPE_IGNORED_FOR_PROFILE")
-        if span.beam_type == "SB" and any(
-            frame_type in {"Sway Ordinary", "Sway Intermediate", "Sway Special"} for frame_type in source_frame_types
-        ):
-            warnings.append("SB_ETABS_SWAY_DESIGN_RESULT_REVIEW")
-        if detailing_profile is BeamDetailingProfile.PB_REVIEW_REQUIRED:
+        resolved_source_types = tuple(
+            dict.fromkeys(
+                str(resolved_frame_types.get(name, "")).strip()
+                for name in span.source_objects
+                if str(resolved_frame_types.get(name, "")).strip()
+            )
+        )
+        if resolved_source_types:
+            if "Program Determined" in source_frame_types:
+                if any(_normalize_frame_type_label(value) not in {"sway special", "program determined"}
+                       for value in resolved_source_types):
+                    warnings.append("PROGRAM_DEFAULT_MODEL_CONFLICT")
+            elif any(
+                _normalize_frame_type_label(value) != _normalize_frame_type_label(source_frame_types[index])
+                for index, value in enumerate(resolved_source_types)
+                if index < len(source_frame_types)
+            ):
+                warnings.append("FRAME_TYPE_API_CONFLICT")
+        if detailing_profile is BeamDetailingProfile.UNRESOLVED:
             warnings.append("DETAILING_PROFILE_REVIEW_REQUIRED")
             blocked_reason = blocked_reason or "FRAME_TYPE_UNRESOLVED"
 
@@ -251,8 +301,22 @@ def build_payload_from_schedule(
             "max_aggregate_size_mm": max_aggregate_size_mm,
             "max_aggregate_size_source": max_aggregate_size_source,
             "frame_type": ", ".join(source_frame_types),
+            "resolved_frame_type": ", ".join(
+                dict.fromkeys(
+                    resolved_frame_types.get(name, "")
+                    for name in span.source_objects
+                    if resolved_frame_types.get(name, "")
+                )
+            ),
             "detailing_profile": detailing_profile.value,
+            "effective_frame_type": detailing_profile.value,
             "profile_source": profile_source,
+            "frame_type_source": (
+                "project default: Program Determined → SMF"
+                if "Program Determined" in source_frame_types
+                else "model-defined overwrite"
+            ),
+            "beam_role": span.beam_type,
             "is_smf": detailing_profile.is_smf,
             "source_objects": ", ".join(span.source_objects),
             "design_status": record.design.status.value,
@@ -288,14 +352,67 @@ def build_payload_from_schedule(
         if status:
             raw["engine_status"] = status
             raw_rows.append(raw)
-            review_rows.append(_empty_review(common, status))
-            final_rows.append(_empty_final(common, status))
+            review_rows.append(_empty_review(common, status, controls))
+            final_rows.append(_empty_final(common, status, controls))
             contexts.append((common, controls))
             detailing_results.append(None)
             continue
 
         try:
             demands = tuple(_engine_demand(name, controls[name]) for name in REGIONS)
+            support_pair = _support_faces_for_span(
+                support_face_contexts,
+                f"{span.beam_line_id}-{span.span_index}",
+                span.span_id,
+            )
+            seismic_context = _seismic_context_for_span(
+                seismic_contexts,
+                f"{span.beam_line_id}-{span.span_index}",
+                span.span_id,
+            )
+            api_points = tuple(
+                point
+                for name in span.source_objects
+                for point in capacity_shear_envelope.get(name, ())
+            )
+            api_demand = max(
+                (abs(float(point.shear_kN)) for point in api_points),
+                default=None,
+            )
+            api_source = (
+                "ETABS API: Concrete Beam Shear Envelope - ACI 318-14"
+                if api_demand is not None
+                else ""
+            )
+            if seismic_context is None and detailing_profile.is_smf:
+                # Keep the ETABS result provenance explicit even when callers
+                # do not provide a custom seismic context.  The capacity
+                # source remains unverified until the design settings prove
+                # that ETABS included 18.6.5 capacity shear.
+                seismic_context = SeismicDetailingContext(
+                    is_smf=True,
+                    frame_type=(source_frame_types[0] if source_frame_types else ""),
+                    design_code=str(metadata.get("design_code", "ACI 318-14")),
+                    capacity_shear_source=(
+                        api_source
+                        or f"{record.design.result_source or 'GetSummaryResultsBeam_2'}.VMajorArea"
+                    ),
+                    capacity_shear_verified=api_demand is not None,
+                    capacity_shear_demand_kN=api_demand,
+                    mpr_strength_factor=1.25,
+                    mpr_strength_source="ACI 318-14 SMF probable-strength screening factor 1.25; automatic selected reinforcement",
+                    source=(
+                        f"ETABS design status={record.design.status.value}; "
+                        f"units={record.design.units or 'N_mm_C'}"
+                    ),
+                )
+            if seismic_context is not None and detailing_profile.is_smf and api_demand is not None:
+                seismic_context = replace(
+                    seismic_context,
+                    capacity_shear_demand_kN=api_demand,
+                    capacity_shear_source=api_source,
+                    capacity_shear_verified=True,
+                )
             result = engine.design(
                 BeamDetailingInput(
                     BeamSection(
@@ -318,8 +435,15 @@ def build_payload_from_schedule(
                         clear_cover_source,
                         max_aggregate_size_source,
                         profile_source,
+                        span.beam_type,
                     ),
                     demands,
+                    left_support=support_pair[0],
+                    right_support=support_pair[1],
+                    seismic_context=seismic_context,
+                    yield_locations_mm=(
+                        seismic_context.likely_yield_locations_mm if seismic_context is not None else ()
+                    ),
                 )
             )
             raw["engine_status"] = "OK"
@@ -330,8 +454,8 @@ def build_payload_from_schedule(
         except (DetailingError, ValueError) as exc:
             status = str(exc)
             raw["engine_status"] = status
-            review = _empty_review(common, status)
-            final = _empty_final(common, status)
+            review = _empty_review(common, status, controls)
+            final = _empty_final(common, status, controls)
             result = None
         raw_rows.append(raw)
         review_rows.append(review)
@@ -350,11 +474,12 @@ def build_payload_from_schedule(
             status = coordination_errors[index]
             raw_rows[index]["engine_status"] = status
             raw_rows[index].pop("engine_mode", None)
-            review_rows[index] = _empty_review(common, status)
-            final_rows[index] = _empty_final(common, status)
+            review_rows[index] = _empty_review(common, status, controls)
+            final_rows[index] = _empty_final(common, status, controls)
         elif result is not None and controls is not None:
             raw_rows[index]["engine_status"] = "OK"
             raw_rows[index]["engine_mode"] = result.mode.value
+            raw_rows[index].update(_constructability_row_fields(result))
             raw_rows[index]["coordination_status"] = result.coordination_status
             raw_rows[index]["continuity_option"] = (
                 result.continuity_option.value if result.continuity_option is not None else ""
@@ -385,6 +510,8 @@ def build_payload_from_schedule(
     )
     payload["metadata"].setdefault("minimum_bars_per_layer", 2)
     payload["metadata"].setdefault("minimum_main_diameter_mm", engine.project.minimum_main_diameter_mm)
+    payload["metadata"].setdefault("smf_end_max_spacing_mm", engine.project.smf_end_max_spacing_mm)
+    payload["metadata"].setdefault("smf_max_longitudinal_ratio", engine.project.smf_max_longitudinal_ratio)
     payload["metadata"].setdefault("hanger_diameter_mm", engine.project.sb_hanger_diameter_mm)
     return payload
 
@@ -398,9 +525,10 @@ def redetail_payload(
 
     engine = engine or BeamDetailingEngine()
     schema_version = str(payload.get("metadata", {}).get("schema_version", ""))
-    if schema_version != PAYLOAD_SCHEMA_VERSION:
+    if schema_version not in SUPPORTED_PAYLOAD_SCHEMA_VERSIONS:
         raise DetailingError(
-            f"UNSUPPORTED_PAYLOAD_SCHEMA: expected {PAYLOAD_SCHEMA_VERSION}, " f"got {schema_version or 'missing'}"
+            f"UNSUPPORTED_PAYLOAD_SCHEMA: expected one of {sorted(SUPPORTED_PAYLOAD_SCHEMA_VERSIONS)}, "
+            f"got {schema_version or 'missing'}"
         )
     output = json.loads(json.dumps(payload, ensure_ascii=False))
     raw_rows: list[dict[str, Any]] = []
@@ -418,7 +546,15 @@ def redetail_payload(
         }
         profile_value = common.get("detailing_profile")
         if profile_value:
-            detailing_profile = BeamDetailingProfile(str(profile_value))
+            try:
+                detailing_profile = BeamDetailingProfile(str(profile_value))
+            except ValueError:
+                detailing_profile = {
+                    "PB_OMF": BeamDetailingProfile.OMF,
+                    "PB_SMF": BeamDetailingProfile.SMF,
+                    "PB_REVIEW_REQUIRED": BeamDetailingProfile.UNRESOLVED,
+                    "SB_ORDINARY_NO_CH18": BeamDetailingProfile.SB_ORDINARY_NO_CH18,
+                }.get(str(profile_value), BeamDetailingProfile.UNRESOLVED)
         elif str(common.get("beam_type", "")).upper() == "SB":
             detailing_profile = BeamDetailingProfile.SB_ORDINARY_NO_CH18
         elif bool(common.get("is_smf")):
@@ -444,8 +580,8 @@ def redetail_payload(
             raw["engine_status"] = status
             raw.pop("engine_mode", None)
             raw_rows.append(raw)
-            review_rows.append(_empty_review(common, status))
-            final_rows.append(_empty_final(common, status))
+            review_rows.append(_empty_review(common, status, controls))
+            final_rows.append(_empty_final(common, status, controls))
             contexts.append((common, controls))
             detailing_results.append(None)
             continue
@@ -472,6 +608,7 @@ def redetail_payload(
                         str(common["clear_cover_source"]),
                         str(common["max_aggregate_size_source"]),
                         str(common.get("profile_source", "")),
+                        str(common.get("beam_role", common.get("beam_type", "PB"))),
                     ),
                     tuple(_engine_demand(region, controls[region]) for region in REGIONS),
                 )
@@ -485,8 +622,8 @@ def redetail_payload(
             status = str(exc)
             raw["engine_status"] = status
             raw.pop("engine_mode", None)
-            review = _empty_review(common, status)
-            final = _empty_final(common, status)
+            review = _empty_review(common, status, controls)
+            final = _empty_final(common, status, controls)
             result = None
         raw_rows.append(raw)
         review_rows.append(review)
@@ -504,8 +641,8 @@ def redetail_payload(
             status = coordination_errors[index]
             raw_rows[index]["engine_status"] = status
             raw_rows[index].pop("engine_mode", None)
-            review_rows[index] = _empty_review(common, status)
-            final_rows[index] = _empty_final(common, status)
+            review_rows[index] = _empty_review(common, status, controls)
+            final_rows[index] = _empty_final(common, status, controls)
         elif result is not None and controls is not None:
             raw_rows[index]["engine_status"] = "OK"
             raw_rows[index]["engine_mode"] = result.mode.value
@@ -522,6 +659,8 @@ def redetail_payload(
     output.setdefault("metadata", {})["minimum_bars_per_layer"] = 2
     output["metadata"]["schema_version"] = PAYLOAD_SCHEMA_VERSION
     output["metadata"]["minimum_main_diameter_mm"] = engine.project.minimum_main_diameter_mm
+    output["metadata"]["smf_end_max_spacing_mm"] = engine.project.smf_end_max_spacing_mm
+    output["metadata"]["smf_max_longitudinal_ratio"] = engine.project.smf_max_longitudinal_ratio
     output["metadata"]["hanger_diameter_mm"] = engine.project.sb_hanger_diameter_mm
     return output
 
@@ -529,23 +668,40 @@ def redetail_payload(
 def build_secondary_schedule_payload(
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Create the presentation payload for the standalone SB schedule."""
+    """Create the SB payload while retaining the main workbook's three-table contract.
+
+    ``schedule_rows`` and ``exception_rows`` remain available for diagnostics and
+    backward-compatible consumers. The renderer also receives the filtered
+    ``raw_rows`` / ``review_rows`` / ``final_rows`` so the secondary workbook uses
+    exactly the same three sheets, formulas, references, and visual conventions as
+    the main rebar workbook.
+    """
 
     schema_version = str(payload.get("metadata", {}).get("schema_version", ""))
-    if schema_version != PAYLOAD_SCHEMA_VERSION:
+    if schema_version not in SUPPORTED_PAYLOAD_SCHEMA_VERSIONS:
         raise DetailingError(
-            f"UNSUPPORTED_PAYLOAD_SCHEMA: expected {PAYLOAD_SCHEMA_VERSION}, " f"got {schema_version or 'missing'}"
+            f"UNSUPPORTED_PAYLOAD_SCHEMA: expected one of {sorted(SUPPORTED_PAYLOAD_SCHEMA_VERSIONS)}, "
+            f"got {schema_version or 'missing'}"
         )
+    has_source_tables = all(key in payload for key in ("raw_rows", "review_rows", "final_rows"))
+    raw_rows = list(payload.get("raw_rows", []))
+    review_rows = list(payload.get("review_rows", []))
+    final_rows = list(payload.get("final_rows", []))
+    if has_source_tables and not (len(raw_rows) == len(review_rows) == len(final_rows)):
+        raise DetailingError("SECONDARY_PAYLOAD_ROW_ALIGNMENT_ERROR")
+
     schedule_rows: list[dict[str, Any]] = []
     exception_rows: list[dict[str, Any]] = []
-    for source in payload.get("final_rows", []):
+    secondary_indices: list[int] = []
+    for index, source in enumerate(final_rows):
         if str(source.get("beam_type", "")).upper() != "SB":
             continue
+        secondary_indices.append(index)
         row = dict(source)
         status = str(row.get("engine_status", ""))
         if status == "OK":
-            if str(row.get("detailing_profile", "")) != BeamDetailingProfile.SB_ORDINARY_NO_CH18.value:
-                row["engine_status"] = "SB_DETAILING_PROFILE_NOT_ORDINARY"
+            if str(row.get("effective_frame_type", row.get("detailing_profile", ""))) == "UNRESOLVED":
+                row["engine_status"] = "SB_FRAME_TYPE_UNRESOLVED"
                 exception_rows.append(row)
                 continue
             support = str(row.get("s2", "")).strip()
@@ -566,10 +722,44 @@ def build_secondary_schedule_payload(
             "stirrup_rule": "ONE_SPECIFICATION_PER_STRUCTURAL_SPAN",
             "secondary_schedule_rows": len(schedule_rows),
             "secondary_exception_rows": len(exception_rows),
+            "secondary_workbook_layout": "three-sheet-rebar-workbook",
         }
     )
+
+    # Exceptions can be discovered after the detailing engine has produced a
+    # nominal row (for example, a non-unified SB stirrup). Propagate the final
+    # exception status into all three source tables so formulas fail closed and
+    # the整理梁表 does not present that row as deliverable.
+    exception_status = {
+        str(row.get("beam_no", "")): str(row.get("engine_status", ""))
+        for row in exception_rows
+        if row.get("beam_no")
+    }
+    filtered_raw: list[dict[str, Any]] = []
+    filtered_review: list[dict[str, Any]] = []
+    filtered_final: list[dict[str, Any]] = []
+    for index in secondary_indices:
+        if not has_source_tables:
+            break
+        final = dict(final_rows[index])
+        beam_no = str(final.get("beam_no", ""))
+        override = exception_status.get(beam_no)
+        if override:
+            final["engine_status"] = override
+        raw = dict(raw_rows[index])
+        review = dict(review_rows[index])
+        if override:
+            raw["engine_status"] = override
+            review["engine_status"] = override
+        filtered_raw.append(raw)
+        filtered_review.append(review)
+        filtered_final.append(final)
+
     return {
         "metadata": metadata,
+        "raw_rows": filtered_raw,
+        "review_rows": filtered_review,
+        "final_rows": filtered_final,
         "schedule_rows": schedule_rows,
         "exception_rows": exception_rows,
     }
@@ -637,6 +827,83 @@ def _record_initial_layout(
     raw["iteration_status"] = result.iteration_status
     raw["iteration_count"] = result.iteration_count
     raw["coordination_initial_signature"] = "|".join(_result_layout_signature(result))
+    raw.update(_constructability_row_fields(result))
+
+
+def _constructability_row_fields(result: BeamDetailingResult) -> dict[str, Any]:
+    """Flatten the spatial detailing contract for JSON/Excel consumers."""
+
+    constructability = result.constructability
+    capacity_review = result.capacity_shear_review
+    capacity_fields = {
+        "capacity_shear_status": capacity_review.status if capacity_review else "",
+        "capacity_shear_left_mpr_positive_kNm": capacity_review.left_mpr_positive_kNm if capacity_review else None,
+        "capacity_shear_left_mpr_negative_kNm": capacity_review.left_mpr_negative_kNm if capacity_review else None,
+        "capacity_shear_right_mpr_positive_kNm": capacity_review.right_mpr_positive_kNm if capacity_review else None,
+        "capacity_shear_right_mpr_negative_kNm": capacity_review.right_mpr_negative_kNm if capacity_review else None,
+        "capacity_shear_actual_kN": capacity_review.actual_capacity_shear_kN if capacity_review else None,
+        "capacity_shear_vu_actual_rebar_kN": capacity_review.vu_from_actual_rebar_kN if capacity_review else None,
+        "capacity_shear_etabs_kN": capacity_review.etabs_capacity_shear_kN if capacity_review else None,
+        "capacity_shear_final_kN": capacity_review.final_capacity_shear_kN if capacity_review else None,
+        "capacity_shear_gravity_kN": capacity_review.gravity_shear_kN if capacity_review else None,
+        "capacity_shear_required_av_over_s": capacity_review.required_av_over_s_mm2_per_mm if capacity_review else None,
+        "capacity_shear_control_source": capacity_review.control_source if capacity_review else "",
+        "capacity_shear_source": capacity_review.source if capacity_review else "",
+        "capacity_shear_vc_zero": capacity_review.vc_zero if capacity_review else None,
+        "capacity_shear_message": capacity_review.message if capacity_review else "",
+        "capacity_shear_review_json": json.dumps(
+            capacity_review.as_mapping() if capacity_review else {},
+            ensure_ascii=False,
+        ),
+    }
+    if constructability is None:
+        return {
+            "constructability_status": "",
+            "constructability_blocking_statuses": "",
+            "constructability_zones_json": "[]",
+            "constructability_hoops_json": "[]",
+            "constructability_checks_json": "[]",
+            "rebar_layout_geometry_json": "{}",
+            "smf_check_statuses": "",
+            **capacity_fields,
+        }
+    zones = {zone.name: zone for zone in constructability.zones}
+    left = zones.get("smf_left_2h")
+    right = zones.get("smf_right_2h")
+    overlap = zones.get("smf_end_hoop_overlap")
+    left_first = next(
+        (hoop.location_mm for hoop in constructability.hoop_positions if hoop.is_first_from_support and hoop.location_mm <= (left.end_mm if left else float("inf"))),
+        None,
+    )
+    right_first = next(
+        (hoop.location_mm for hoop in reversed(constructability.hoop_positions) if hoop.is_first_from_support),
+        None,
+    )
+    return {
+        "constructability_status": constructability.status,
+        "constructability_blocking_statuses": "; ".join(constructability.blocking_statuses),
+        "constructability_zones_json": json.dumps(constructability.as_mapping()["zones"], ensure_ascii=False),
+        "constructability_hoops_json": json.dumps(constructability.as_mapping()["hoop_positions"], ensure_ascii=False),
+        "constructability_checks_json": json.dumps(constructability.as_mapping()["checks"], ensure_ascii=False),
+        "rebar_layout_geometry_json": json.dumps(constructability.as_mapping().get("layout_geometry"), ensure_ascii=False),
+        "smf_check_statuses": "; ".join(
+            f"{check.rule_id}={check.status}" for check in result.smf_checks
+        ),
+        "left_support_face_mm": (
+            left.start_mm if left else overlap.start_mm if overlap else None
+        ),
+        "left_first_hoop_mm": left_first or (overlap.first_hoop_location_mm if overlap else None),
+        "left_2h_end_mm": left.end_mm if left else overlap.end_mm if overlap else None,
+        "right_2h_start_mm": right.start_mm if right else overlap.start_mm if overlap else None,
+        "right_first_hoop_mm": right_first or (overlap.end_mm - 50.0 if overlap else None),
+        "right_support_face_mm": right.end_mm if right else overlap.end_mm if overlap else None,
+        "left_2h_spacing_mm": left.selected_spacing_mm if left else overlap.selected_spacing_mm if overlap else None,
+        "middle_spacing_mm": zones.get("smf_middle").selected_spacing_mm if zones.get("smf_middle") else None,
+        "right_2h_spacing_mm": right.selected_spacing_mm if right else overlap.selected_spacing_mm if overlap else None,
+        "constructability_zone_count": len(constructability.zones),
+        "constructability_hoop_count": len(constructability.hoop_positions),
+        **capacity_fields,
+    }
 
 
 def write_rebar_payload(payload: Mapping[str, Any], path: str | Path) -> Path:
@@ -646,6 +913,79 @@ def write_rebar_payload(payload: Mapping[str, Any], path: str | Path) -> Path:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    return destination
+
+
+def write_capacity_shear_audit(
+    payload: Mapping[str, Any],
+    envelope: Mapping[str, tuple[Any, ...]],
+    path: str | Path,
+    *,
+    api_error: str = "",
+) -> Path:
+    """Write process-only SMF capacity-shear evidence as JSONL.
+
+    The payload retains the numeric review internally so the detailing engine
+    can select hoops, but the workbook renderers have an explicit allowlist
+    that excludes these fields.  This file is therefore the durable audit
+    boundary for API values, actual-rebar recalculation and fallback reasons.
+    """
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    rows_by_beam = {
+        str(row.get("beam_no", "")): row
+        for row in payload.get("raw_rows", ())
+        if row.get("beam_no")
+    }
+    final_by_beam = {
+        str(row.get("beam_no", "")): row
+        for row in payload.get("final_rows", ())
+        if row.get("beam_no")
+    }
+    with destination.open("w", encoding="utf-8", newline="\n") as handle:
+        for beam_no, row in rows_by_beam.items():
+            if str(row.get("effective_frame_type", row.get("detailing_profile", ""))) != "SMF":
+                continue
+            object_names = tuple(
+                name.strip()
+                for name in str(row.get("source_objects", "")).split(",")
+                if name.strip()
+            )
+            points = [
+                asdict(point)
+                for name in object_names
+                for point in envelope.get(name, ())
+            ]
+            final = final_by_beam.get(beam_no, {})
+            record = {
+                "schema": "etabs-beam-generator/capacity-shear@1",
+                "beam_no": beam_no,
+                "beam_line": row.get("beam_line", ""),
+                "span_no": row.get("span_no"),
+                "beam_role": row.get("beam_role", row.get("beam_type", "")),
+                "etabs_frame_type": row.get("frame_type", ""),
+                "resolved_frame_type": row.get("resolved_frame_type", ""),
+                "effective_frame_type": row.get("effective_frame_type", "SMF"),
+                "api_points": points,
+                "api_error": api_error,
+                "review": {
+                    key: final.get(key)
+                    for key in (
+                        "capacity_shear_status",
+                        "capacity_shear_actual_kN",
+                        "capacity_shear_vu_actual_rebar_kN",
+                        "capacity_shear_etabs_kN",
+                        "capacity_shear_final_kN",
+                        "capacity_shear_gravity_kN",
+                        "capacity_shear_required_av_over_s",
+                        "capacity_shear_control_source",
+                        "capacity_shear_source",
+                        "capacity_shear_vc_zero",
+                    )
+                },
+            }
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
     return destination
 
 
@@ -704,10 +1044,11 @@ def run_secondary_workbook_builder(
     node_max_old_space_mb: int = 8192,
     builder: str = "python",
 ) -> Path:
-    """Generate the standalone SB reinforcement schedule workbook.
+    """Generate the SB reinforcement workbook with the primary three-sheet layout.
 
-    ``builder="python"`` uses the portable openpyxl renderer; ``builder="node"``
-    keeps the Node artifact-tool reference path.
+    ``builder="python"`` uses the portable renderer; ``builder="node"`` keeps
+    the Node artifact-tool reference path. Both consume the same filtered SB
+    raw/review/final payload and therefore produce the same workbook contract.
     """
     if builder == "python":
         from src.spreadsheet.render_secondary_beam_xlsx import render_secondary_beam_xlsx
@@ -717,8 +1058,11 @@ def run_secondary_workbook_builder(
         return render_secondary_beam_xlsx(payload, Path(output_path))
     if builder != "node":
         raise ValueError(f"unknown workbook builder: {builder}")
+    # The Node reference path intentionally uses the canonical main renderer.
+    # The secondary payload is already filtered to SB rows, so both builders
+    # produce the same three sheets and formula/reference contract.
     return _run_artifact_builder(
-        SECONDARY_BUILDER_PATH,
+        BUILDER_PATH,
         payload_path,
         output_path,
         preview_dir=preview_dir,
@@ -911,6 +1255,35 @@ def _frame_types(sap_model: Any) -> dict[str, str]:
     return {data[offset + unique_index]: data[offset + type_index] for offset in range(0, len(data), width)}
 
 
+def _resolved_frame_types(sap_model: Any) -> dict[str, str]:
+    """Return ETABS' resolved seismic type when the host exposes it."""
+
+    from src.design.etabs_result import EtabsResultProvider
+
+    try:
+        return EtabsResultProvider(sap_model).get_seismic_framing_types()
+    except Exception:
+        # The raw overwrite table remains the authoritative explicit model
+        # definition.  A missing resolved API is an audit limitation, not a
+        # reason to fail all offline-compatible exports.
+        return {}
+
+
+def _capacity_shear_envelope(sap_model: Any) -> dict[str, tuple[Any, ...]]:
+    """Read the process-only ETABS shear envelope through the adapter."""
+
+    from src.design.etabs_result import EtabsResultProvider
+
+    try:
+        return EtabsResultProvider(sap_model).get_beam_shear_envelope()
+    except Exception:
+        return {}
+
+
+def _normalize_frame_type_label(value: Any) -> str:
+    return " ".join(str(value or "").strip().casefold().replace("-", " ").split())
+
+
 def _section_info(sap_model: Any, section_name: str) -> dict[str, Any]:
     try:
         values = api_values(
@@ -1013,6 +1386,104 @@ def _rebar_material(sap_model: Any, name: str) -> float:
     )
 
 
+def _support_faces_for_span(
+    contexts: Mapping[str, tuple[SupportFaceContext | None, SupportFaceContext | None]] | None,
+    *keys: str,
+) -> tuple[SupportFaceContext | None, SupportFaceContext | None]:
+    if not contexts:
+        return None, None
+    for key in keys:
+        value = contexts.get(key)
+        if value is not None:
+            if len(value) != 2:
+                raise DetailingError(f"支承面上下文必须包含左右两个支承面：{key}")
+            return value
+    return None, None
+
+
+def _seismic_context_for_span(
+    contexts: Mapping[str, SeismicDetailingContext] | None,
+    *keys: str,
+) -> SeismicDetailingContext | None:
+    if not contexts:
+        return None
+    for key in keys:
+        value = contexts.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _derive_support_face_contexts(
+    records: Iterable[Any],
+    support_points: Mapping[str, tuple[float, float, float]] | None,
+    support_dimensions_mm: Mapping[str, float] | None,
+    tolerance_mm: float,
+) -> dict[str, tuple[SupportFaceContext | None, SupportFaceContext | None]]:
+    """Convert ETABS support centres and column dimensions to span-face data."""
+
+    if not support_points or not support_dimensions_mm:
+        return {}
+    points = {
+        str(name): tuple(float(value) for value in point)
+        for name, point in support_points.items()
+    }
+    dimensions = {
+        str(name): float(value)
+        for name, value in support_dimensions_mm.items()
+        if float(value) > 0
+    }
+
+    def nearest(point: tuple[float, float, float]) -> tuple[str, float] | None:
+        candidates = []
+        for name, support in points.items():
+            gap = math.sqrt(sum((point[index] - support[index]) ** 2 for index in range(3)))
+            if gap <= max(tolerance_mm, 5.0):
+                candidates.append((gap, name))
+        if not candidates:
+            return None
+        gap, name = min(candidates)
+        return name, gap
+
+    output: dict[str, tuple[SupportFaceContext | None, SupportFaceContext | None]] = {}
+    for record in records:
+        span = record.span
+        geometry = record.geometry
+        if not span.path_points or len(span.path_points) < 2:
+            continue
+        left = nearest(span.path_points[0])
+        right = nearest(span.path_points[-1])
+        if left is None or right is None:
+            continue
+        left_dim = dimensions.get(left[0])
+        right_dim = dimensions.get(right[0])
+        if left_dim is None or right_dim is None:
+            continue
+        left_face = left_dim / 2.0
+        right_face = geometry.length - right_dim / 2.0
+        if not (0.0 <= left_face < right_face <= geometry.length):
+            continue
+        context = (
+            SupportFaceContext(
+                f"{left[0]}:face",
+                left_face,
+                0.0,
+                left_dim,
+                "ETABS column support point + conservative max T2/T3 dimension",
+            ),
+            SupportFaceContext(
+                f"{right[0]}:face",
+                right_face,
+                geometry.length,
+                right_dim,
+                "ETABS column support point + conservative max T2/T3 dimension",
+            ),
+        )
+        output[span.span_id] = context
+        output[f"{span.beam_line_id}-{span.span_index}"] = context
+    return output
+
+
 def _region_controls(
     design: BeamDesignResult,
     length_mm: float,
@@ -1108,6 +1579,16 @@ def _engine_demand(name: str, control: Mapping[str, Any]) -> BeamRegionDemand:
         av_over_s_mm2_per_mm=float(control["av_over_s"]),
         at_over_s_mm2_per_mm=float(control["at_over_s"]),
         al_torsion_mm2=float(control["al_mm2"]),
+        as_top_etabs_mm2=(
+            float(control["as_provided_top_mm2"])
+            if control.get("as_provided_top_mm2") is not None
+            else None
+        ),
+        as_bottom_etabs_mm2=(
+            float(control["as_provided_bottom_mm2"])
+            if control.get("as_provided_bottom_mm2") is not None
+            else None
+        ),
         top_combo=str(control["top_total_combo"]),
         bottom_combo=str(control["bottom_total_combo"]),
         shear_combo=str(control["av_combo"]),
@@ -1115,8 +1596,7 @@ def _engine_demand(name: str, control: Mapping[str, Any]) -> BeamRegionDemand:
         source_objects=tuple(control.get("source_objects", ())),
         units=str(control.get("units", "N_mm_C")),
         shear_source=(
-            f"{control.get('result_source') or 'GetSummaryResultsBeam_2'}"
-            ".VMajorArea; PB_SMF capacity shear is not added again"
+            f"{control.get('result_source') or 'GetSummaryResultsBeam_2'}.VMajorArea (Av/s)"
         ),
         as_flex_top_override_mm2=float(control["top_flex_mm2"]),
         as_flex_bottom_override_mm2=float(control["bottom_flex_mm2"]),
@@ -1169,6 +1649,7 @@ def _review_row(common: Mapping[str, Any], controls: Mapping[str, Any], result: 
             "continuity_option": (result.continuity_option.value if result.continuity_option is not None else ""),
         }
     )
+    row.update(_constructability_row_fields(result))
     for field, region_name, face in (
         ("et1", "left", "top"),
         ("t1", "middle", "top"),
@@ -1199,7 +1680,7 @@ def _review_row(common: Mapping[str, Any], controls: Mapping[str, Any], result: 
         row[f"{field}_governing_reason"] = stirrup.governing_reason
         row[f"{field}_final_main_db_mm"] = stirrup.final_main_bar_diameter_mm
         row[f"{field}_high_shear"] = stirrup.high_shear
-        row[f"{field}_shear_source"] = by_name[region_name].demand.shear_source
+        row[f"{field}_shear_source"] = by_name[region_name].demand.transverse_shear_source
         row[f"{field}_spacing_limits"] = "; ".join(f"{name}={value:.3f}" for name, value in stirrup.spacing_limits)
     support = max(
         (by_name["left"].stirrup, by_name["right"].stirrup),
@@ -1217,6 +1698,7 @@ def _final_row(common: Mapping[str, Any], result: Any) -> dict[str, Any]:
     )
     return {
         **common,
+        **_constructability_row_fields(result),
         "engine_status": "OK",
         "mode": result.mode.value,
         "et1": by_name["left"].top.notation,
@@ -1237,28 +1719,133 @@ def _final_row(common: Mapping[str, Any], result: Any) -> dict[str, Any]:
     }
 
 
-def _empty_review(common: Mapping[str, Any], status: str) -> dict[str, Any]:
+def _fallback_rebar_notation(area: Any, *, effective_frame_type: str = "") -> str:
+    try:
+        value = float(area)
+    except (TypeError, ValueError):
+        value = 0.0
+    if not math.isfinite(value) or value <= 0:
+        value = 0.0
+    diameters = (20, 22, 25, 28, 32) if str(effective_frame_type).upper() == "SMF" else (16, 18, 20, 22, 25, 28, 32)
+    for diameter in diameters:
+        bar_area = math.pi * diameter * diameter / 4.0
+        count = max(2, math.ceil(value / bar_area))
+        if count <= 8:
+            return f"{count}T{diameter}"
+    diameter = diameters[-1]
+    count = max(2, math.ceil(value / (math.pi * diameter * diameter / 4.0)))
+    return f"{count}T{diameter}"
+
+
+def _fallback_stirrup_text(value: Any, *, source: str) -> str:
+    try:
+        av = float(value)
+    except (TypeError, ValueError):
+        return "2T8@100"
+    if not math.isfinite(av) or av < 0:
+        return "2T8@100"
+    for legs in (2, 4):
+        for diameter in (8, 10, 12):
+            provided = legs * math.pi * diameter * diameter / 4.0 / 100.0
+            if provided + 1e-9 >= av:
+                return f"{legs}T{diameter}@100"
+    return "4T12@100"
+
+
+def _fallback_region_texts(
+    controls: Mapping[str, Any] | None,
+    common: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    if not controls:
+        effective_frame_type = str((common or {}).get("effective_frame_type", ""))
+        minimum_bar = _fallback_rebar_notation(0, effective_frame_type=effective_frame_type)
+        return {
+            "et1": minimum_bar,
+            "t1": minimum_bar,
+            "et2": minimum_bar,
+            "eb1": minimum_bar,
+            "b1": minimum_bar,
+            "eb2": minimum_bar,
+            "s2": "2T8@100",
+            "s1": "2T8@100",
+            "face": f"{minimum_bar}（面筋候选）",
+        }
+    mapping = {
+        "et1": ("left", "top_total_mm2"), "t1": ("middle", "top_total_mm2"), "et2": ("right", "top_total_mm2"),
+        "eb1": ("left", "bottom_total_mm2"), "b1": ("middle", "bottom_total_mm2"), "eb2": ("right", "bottom_total_mm2"),
+    }
+    effective_frame_type = str((common or {}).get("effective_frame_type", ""))
+    result = {
+        field: _fallback_rebar_notation(
+            controls.get(region, {}).get(key),
+            effective_frame_type=effective_frame_type,
+        )
+        for field, (region, key) in mapping.items()
+    }
+    result["s2"] = _fallback_stirrup_text(
+        max((controls.get(name, {}).get("av_over_s", 0.0) for name in ("left", "right")), default=None),
+        source="ETABS横筋需求",
+    )
+    result["s1"] = _fallback_stirrup_text(controls.get("middle", {}).get("av_over_s"), source="ETABS横筋需求")
+    result["face"] = "面筋：按项目规则需人工复核"
+    return result
+
+
+def _empty_review(
+    common: Mapping[str, Any],
+    status: str,
+    controls: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidates = _fallback_region_texts(controls, common)
+    required = {}
+    if controls:
+        required = {
+            "et1_required_mm2": controls["left"].get("top_total_mm2"),
+            "t1_required_mm2": controls["middle"].get("top_total_mm2"),
+            "et2_required_mm2": controls["right"].get("top_total_mm2"),
+            "eb1_required_mm2": controls["left"].get("bottom_total_mm2"),
+            "b1_required_mm2": controls["middle"].get("bottom_total_mm2"),
+            "eb2_required_mm2": controls["right"].get("bottom_total_mm2"),
+        }
     return {
         **common,
         "engine_status": status,
-        "mode": "",
-        "legs": None,
+        "mode": "ETABS_READBACK_CANDIDATE",
+        "legs": "需复核",
         "face_required_mm2": None,
-        "face_text": "",
-        **{f"{field}_required_mm2": None for field in ("et1", "t1", "et2", "eb1", "b1", "eb2")},
-        **{f"{field}_text": "" for field in ("et1", "t1", "et2", "eb1", "b1", "eb2")},
-        **{f"{field}_text": "" for field in ("s2_left", "s1", "s2_right")},
-        "s2_text": "",
+        "face_text": candidates["face"],
+        **{f"{field}_required_mm2": required.get(f"{field}_required_mm2") for field in ("et1", "t1", "et2", "eb1", "b1", "eb2")},
+        **{f"{field}_text": candidates[field] for field in ("et1", "t1", "et2", "eb1", "b1", "eb2")},
+        "s2_left_text": candidates["s2"],
+        "s1_text": candidates["s1"],
+        "s2_right_text": candidates["s2"],
+        "s2_text": candidates["s2"],
+        "engine_warnings": f"配筋候选已保留，但未通过构造校核；原因为：{status}",
+        "review_note": "高亮复核：本行钢筋规格仅按面积要求形成候选，不代表满足净距、锚固、箍筋或抗震构造，不得直接用于施工图。",
+        "constructability_status": status,
+        "constructability_blocking_statuses": status,
+        "constructability_zones_json": "[]",
+        "constructability_hoops_json": "[]",
+        "constructability_checks_json": "[]",
+        "rebar_layout_geometry_json": "{}",
+        "smf_check_statuses": "",
+        "capacity_shear_status": status if status else "",
+        "capacity_shear_review_json": "{}",
     }
 
 
-def _empty_final(common: Mapping[str, Any], status: str) -> dict[str, Any]:
+def _empty_final(
+    common: Mapping[str, Any],
+    status: str,
+    controls: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidates = _fallback_region_texts(controls, common)
     return {
         **common,
         "engine_status": status,
-        "mode": "",
+        "mode": "ETABS_READBACK_CANDIDATE",
         **{
-            field: ""
+            field: candidates[field]
             for field in (
                 "et1",
                 "t1",
@@ -1271,5 +1858,16 @@ def _empty_final(common: Mapping[str, Any], status: str) -> dict[str, Any]:
                 "face",
             )
         },
-        "legs": None,
+        "engine_warnings": f"配筋候选已保留，但未通过构造校核；原因为：{status}",
+        "review_note": "高亮复核：本行钢筋规格仅按面积要求形成候选，不代表满足净距、锚固、箍筋或抗震构造，不得直接用于施工图。",
+        "legs": "需复核",
+        "constructability_status": status,
+        "constructability_blocking_statuses": status,
+        "constructability_zones_json": "[]",
+        "constructability_hoops_json": "[]",
+        "constructability_checks_json": "[]",
+        "rebar_layout_geometry_json": "{}",
+        "smf_check_statuses": "",
+        "capacity_shear_status": status if status else "",
+        "capacity_shear_review_json": "{}",
     }

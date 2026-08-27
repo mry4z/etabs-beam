@@ -24,6 +24,7 @@ from src.design.detailing import (
     coordinate_intraspan_result,
     resolve_detailing_profile,
 )
+from src.design.constructability import SeismicDetailingContext, SupportFaceContext
 from src.design.etabs_result import EtabsResultProvider
 from src.design.provider import DesignResultStatus
 
@@ -100,16 +101,45 @@ def test_main_bar_selection_never_uses_diameter_below_t16() -> None:
     assert all(value >= 16 for value in policy.ordered_longitudinal_diameters())
 
 
-def test_profile_resolver_never_promotes_sb_to_chapter_18() -> None:
+def test_project_policy_matches_nasiriyah_smf_sb_measure() -> None:
+    policy = ProjectDetailingPolicy()
+
+    assert policy.version == "nasiriyah-smf-sb-2026-08-24-r1"
+    assert policy.enabled_diameters_mm == (10, 12, 16, 20, 25)
+    assert policy.allowed_spacings_mm == (100, 150, 200)
+    assert policy.smf_end_max_spacing_mm == pytest.approx(100.0)
+    assert policy.smf_max_longitudinal_ratio == pytest.approx(0.01613)
+    assert policy.face_min_depth_mm == pytest.approx(800.0)
+    assert policy.face_max_spacing_mm == pytest.approx(250.0)
+
+
+def test_project_smf_limits_have_a_legal_catalogue_solution_and_do_not_conflict_with_asmin() -> None:
+    policy = ProjectDetailingPolicy()
+    minimum_smf_db = policy.smf_end_zone_min_flexural_diameter_mm
+    end_limit = min(6.0 * minimum_smf_db, policy.smf_end_max_spacing_mm)
+    minimum_ratio = max(0.25 * 25**0.5 / 420, 1.4 / 420)
+
+    assert any(spacing <= end_limit for spacing in policy.allowed_spacings_mm)
+    assert minimum_ratio < policy.smf_max_longitudinal_ratio < 0.025
+
+
+def test_profile_resolver_preserves_explicit_smf_for_sb() -> None:
     profile, source = resolve_detailing_profile("SB", ("Sway Special",))
-    assert profile is BeamDetailingProfile.SB_ORDINARY_NO_CH18
-    assert "does not enable Chapter 18" in source
+    assert profile is BeamDetailingProfile.SMF
+    assert "model-defined" in source
 
 
-@pytest.mark.parametrize("frame_type", ["Non-Sway", "Sway Ordinary", "Sway Intermediate"])
-def test_profile_resolver_treats_every_non_smf_pb_as_omf(frame_type: str) -> None:
+@pytest.mark.parametrize(
+    ("frame_type", "expected"),
+    [
+        ("Non-Sway", BeamDetailingProfile.NON_SWAY),
+        ("Sway Ordinary", BeamDetailingProfile.OMF),
+        ("Sway Intermediate", BeamDetailingProfile.IMF),
+    ],
+)
+def test_profile_resolver_preserves_explicit_non_smf_type(frame_type: str, expected: BeamDetailingProfile) -> None:
     profile, _ = resolve_detailing_profile("PB", (frame_type,))
-    assert profile is BeamDetailingProfile.PB_OMF
+    assert profile is expected
 
 
 def test_profile_resolver_maps_sway_special_pb_to_smf() -> None:
@@ -117,9 +147,9 @@ def test_profile_resolver_maps_sway_special_pb_to_smf() -> None:
     assert profile is BeamDetailingProfile.PB_SMF
 
 
-def test_profile_resolver_requires_review_for_unresolved_pb() -> None:
+def test_profile_resolver_uses_smf_project_default_for_program_determined() -> None:
     profile, _ = resolve_detailing_profile("PB", ("Program Determined",))
-    assert profile is BeamDetailingProfile.PB_REVIEW_REQUIRED
+    assert profile is BeamDetailingProfile.SMF
 
 
 def test_review_required_profile_is_fail_closed_in_engine() -> None:
@@ -161,10 +191,50 @@ def test_case_one_selects_stirrups_first_and_keeps_shallow_face_na() -> None:
     assert result.mode is ReinforcementMode.NORMAL
     assert result.face_rebar.mode is FaceRebarMode.NOT_APPLICABLE
     assert all(region.stirrup.legs == 4 for region in result.regions)
-    assert result.regions[0].stirrup.notation == "T10@150"
+    assert result.regions[0].stirrup.notation == "T10@100"
     assert result.regions[1].stirrup.notation == "T10@200"
     assert result.regions[0].top.provided_area_mm2 >= 2750
     assert result.regions[1].bottom.provided_area_mm2 >= 2200
+
+
+def test_smf_capacity_shear_enters_stirrup_selection_before_final_result() -> None:
+    data = _input(
+        "SMF-CAPACITY",
+        400,
+        600,
+        (
+            _demand("left", 1800, 1800, 0.05, 0, 0),
+            _demand("middle", 1200, 1200, 0.05, 0, 0),
+            _demand("right", 1800, 1800, 0.05, 0, 0),
+        ),
+    )
+    context = SeismicDetailingContext(
+        is_smf=True,
+        frame_type="Sway Special",
+        left_mpr_kNm=450.0,
+        right_mpr_kNm=500.0,
+        gravity_shear_kN=60.0,
+        capacity_shear_verified=True,
+        capacity_shear_source="fixture capacity Vu",
+    )
+    data = BeamDetailingInput(
+        data.section,
+        data.regions,
+        left_support=SupportFaceContext("L", 300.0, source="fixture"),
+        right_support=SupportFaceContext("R", 5700.0, source="fixture"),
+        seismic_context=context,
+    )
+
+    result = BeamDetailingEngine().design(data)
+
+    assert result.capacity_shear_review is not None
+    assert result.capacity_shear_review.status == "PASS"
+    required = result.capacity_shear_review.required_av_over_s_mm2_per_mm
+    assert required is not None
+    assert result.regions[0].demand.capacity_shear_av_over_s_mm2_per_mm == pytest.approx(required)
+    assert result.regions[2].demand.capacity_shear_av_over_s_mm2_per_mm == pytest.approx(required)
+    assert result.regions[1].demand.capacity_shear_av_over_s_mm2_per_mm is None
+    assert result.regions[0].stirrup.required_av_over_s_mm2_per_mm >= required
 
 
 def test_multilayer_longitudinal_layout_never_leaves_one_bar_in_last_layer() -> None:
@@ -408,7 +478,7 @@ def test_stirrup_records_minimum_quantity_and_final_db_control() -> None:
     assert any(name == "SMF_6DB_FINAL" for name, _ in left.stirrup.spacing_limits)
 
 
-def test_joint_stirrup_bar_preference_cycle_uses_valid_conservative_state() -> None:
+def test_project_end_cap_prevents_stirrup_bar_preference_cycle() -> None:
     section = BeamSection(
         "PB-CYCLE",
         400,
@@ -454,12 +524,14 @@ def test_joint_stirrup_bar_preference_cycle_uses_valid_conservative_state() -> N
 
     result = BeamDetailingEngine().design(BeamDetailingInput(section, demands))
 
-    assert result.iteration_status == "STABLE_CONSERVATIVE_CYCLE_BREAK"
+    assert result.iteration_status == "STABLE"
     assert tuple(region.stirrup.notation for region in result.regions) == (
         "T10@100",
         "T10@150",
         "T10@100",
     )
+    assert result.regions[0].stirrup.governing_reason == "SMF_PROJECT_ABSOLUTE"
+    assert result.regions[2].stirrup.governing_reason == "SMF_PROJECT_ABSOLUTE"
     assert all(region.stirrup.spacing_mm <= region.stirrup.maximum_spacing_mm + 1e-9 for region in result.regions)
 
 

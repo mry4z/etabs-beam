@@ -49,6 +49,13 @@ SQLite 精确等价，但完整 P2 仍为 `in_progress`。
 
 ## 2. 当前工作树边界
 
+2026-08-27 项目策略增量：已按《纳西里耶医疗城项目 SMF 主梁+次梁措施-1版 20260824》更新
+`nasiriyah-smf-sb-2026-08-24-r1`，包括 SMF 最大纵筋率 `0.01613`、端部 `2h` 区 `s<=100 mm`、
+配置表格口径 40 mm 箍筋外缘净保护层和 25 mm 最大骨料；悬挑梁上部纵筋 `1.2` 放大保留人工复核。
+本次提交内容从暂存区独立导出后运行 `python -m pytest tests/unit -q`：`259 passed`，coverage
+`80.73%`。含其他未提交改动的原工作树同命令为 `344 passed`、coverage `77.61%`；两者验证范围不同，
+不得互相替代。尚未以该策略进行 ETABS 22/23 实模重跑或重建发布包。
+
 P1 实模 manifest 对其 dirty 工作树记录：
 
 - tracked diff SHA-256：`2019c1f4f5f03b3452b6039951c6e6ac38c917912bcfe1f53e9e829c3748fdd4`
@@ -109,7 +116,7 @@ v0.3.0 对新增的 DLL 定位、便携配筋渲染器和插件 UI 改动重新�
 | Beam Line / Span 拓扑算法 | `VERIFIED` | 当前 run：4,094 Object、1,215 Line、3,018 Span；0 blocking diagnostic | 30 个 split Object、28 个多截面 Span 保持人工审查 | TASK-P1-008 |
 | fail-closed 方向与编号写回 | `VERIFIED` | 当前 run 返回码 0；4,094 对象全属性和需求等价均 0 failure | 使用受控 partial writeback；审查项未伪装为成功 | TASK-P1-008 |
 | 设计结果 `_2` 字段映射 | `VERIFIED` | 当前 payload 保留 raw Provided、station、组合、单位、来源；单元测试 | 22 个实模 partial 仍需工程处置 | TASK-P1-008 |
-| ACI 318-14 配筋排布 | `PARTIAL` | ETABS 重心 cover +25 mm：2,610/3,018 行 `OK`，130 个保守循环解通过最终控制 | 408 个异常处置和工程签署未完成 | TASK-P1-008 |
+| ACI 318-14 配筋排布 | `PARTIAL` | 历史 ETABS 重心 cover +25 mm：2,610/3,018 行 `OK`；2026-08-27 新策略提交快照 `259 passed`、coverage `80.73%` | 40 mm/25 mm 新配置和 1.613%/100 mm 新控制尚未实模重跑；408 个历史异常及工程签署未完成 | TASK-P1-008 |
 | SB 全跨统一箍筋规格 | `PARTIAL` | 1,402/1,444 个 SB 行同规格通过；42 行保留异常 | 22 混合截面、12 design partial、8 底筋布置异常 | TASK-P1-008 |
 | 三表配筋工作簿 | `PARTIAL` | payload 2.0、主/SB 工作簿；公式错误扫描 0；9 张预览检查通过 | 自动成功行仍需工程签发；异常行未销项 | TASK-P1-008 |
 | 人工拓扑 Override 核心契约 | `PARTIAL` | 单元测试覆盖 JSON、GUID、连通和失效 | ETABS 交互 UI 与第二轮写回未实现 | TASK-NUM-003 |
