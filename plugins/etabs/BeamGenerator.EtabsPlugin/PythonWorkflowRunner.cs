@@ -102,7 +102,7 @@ internal sealed class PythonWorkflowRunner : IDisposable
         Cancel();
     }
 
-    private static ProcessStartInfo BuildStartInfo(WorkflowRunRequest request)
+    internal static ProcessStartInfo BuildStartInfo(WorkflowRunRequest request)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -121,7 +121,19 @@ internal sealed class PythonWorkflowRunner : IDisposable
         startInfo.ArgumentList.Add(request.EtabsApiPath);
         startInfo.ArgumentList.Add("--config");
         startInfo.ArgumentList.Add(request.ConfigPath);
-        startInfo.ArgumentList.Add("--read-only");
+        startInfo.ArgumentList.Add(request.TowerCreateGroups ? "--tower-create-groups" : "--read-only");
+        if (request.TowerCheck) startInfo.ArgumentList.Add("--tower-check");
+        if (request.TowerPreflightOnly) startInfo.ArgumentList.Add("--tower-preflight-only");
+        if (request.TowerContinueOnReview) startInfo.ArgumentList.Add("--tower-continue-on-review");
+        if (request.TowerCreateGroups)
+        {
+            startInfo.ArgumentList.Add("--allow-tower-group-mutation");
+        }
+        if (!string.IsNullOrWhiteSpace(request.TowerPlanPath))
+        {
+            startInfo.ArgumentList.Add("--tower-plan");
+            startInfo.ArgumentList.Add(request.TowerPlanPath);
+        }
         startInfo.ArgumentList.Add("--selection");
         startInfo.ArgumentList.Add(request.SelectionMode);
         startInfo.ArgumentList.Add("--output-dir");

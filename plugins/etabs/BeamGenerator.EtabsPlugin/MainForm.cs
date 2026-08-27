@@ -4,7 +4,7 @@ using ETABSv1;
 
 namespace BeamGenerator.EtabsPlugin;
 
-internal sealed class MainForm : Form
+internal sealed partial class MainForm : Form
 {
     private readonly EtabsModelReader _modelReader;
     private readonly PythonWorkflowRunner _workflowRunner = new();
@@ -70,7 +70,7 @@ internal sealed class MainForm : Form
         _statusLabel.Text = "准备就绪";
         statusStrip.Items.Add(_statusLabel);
         statusStrip.Items.Add(new ToolStripStatusLabel { Spring = true });
-        statusStrip.Items.Add(new ToolStripStatusLabel("只读插件：不修改或保存 ETABS 模型"));
+        statusStrip.Items.Add(new ToolStripStatusLabel("成果只读；审查 Group 需确认；不自动保存模型"));
 
         Controls.Add(tabs);
         Controls.Add(statusStrip);
@@ -158,7 +158,7 @@ internal sealed class MainForm : Form
         {
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         }
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         AddReadOnlyRow(layout, 0, "内置计算引擎", _runtimeModeText);
@@ -212,6 +212,7 @@ internal sealed class MainForm : Form
         _openOutputButton.Click += (_, _) => OpenLastOutput();
         var saveSettingsButton = new Button { Text = "保存设置", AutoSize = true };
         saveSettingsButton.Click += (_, _) => SaveSettings(showConfirmation: true);
+        ConfigureTowerActions(actions);
         actions.Controls.AddRange(new Control[] { _runButton, _cancelButton, _openOutputButton, saveSettingsButton });
         layout.Controls.Add(actions, 1, 6);
         layout.SetColumnSpan(actions, 2);
@@ -312,7 +313,14 @@ internal sealed class MainForm : Form
         UseWaitCursor = true;
         try
         {
+            var previousModel = _snapshot?.ExpectedDurableModelPath;
             _snapshot = _modelReader.Read();
+            if (!string.Equals(previousModel, _snapshot.ExpectedDurableModelPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _towerPreflightConfirmed = false;
+                _towerReportPath = "";
+                _towerGroupsButton.Enabled = false;
+            }
             _hostText.Text = $"{_snapshot.HostVersion} ({(_snapshot.SupportedHost ? "受支持" : "不受支持")})";
             _apiText.Text = $"{_snapshot.ApiAssemblyVersion} — {_snapshot.ApiAssemblyPath}";
             _pidText.Text = _snapshot.ProcessId.ToString();
@@ -408,6 +416,13 @@ internal sealed class MainForm : Form
             return;
         }
 
+        RefreshModel();
+        if (!_towerPreflightConfirmed)
+        {
+            await RunTowerOperationAsync(createGroups: false);
+            if (!_towerPreflightConfirmed) return;
+        }
+
         try
         {
             RefreshModel();
@@ -465,10 +480,14 @@ internal sealed class MainForm : Form
                 _exportExcel.Checked,
                 _exportRebarWorkbook.Checked,
                 _snapshot.ProcessId,
-                expectedModel
+                expectedModel,
+                TowerCheck: true,
+                TowerContinueOnReview: _towerPreflightConfirmed
             );
 
             _runButton.Enabled = false;
+            _towerCheckButton.Enabled = false;
+            _towerGroupsButton.Enabled = false;
             _cancelButton.Enabled = true;
             _openOutputButton.Enabled = false;
             _workflowCancellation = new CancellationTokenSource();
@@ -490,6 +509,7 @@ internal sealed class MainForm : Form
             _workflowCancellation?.Dispose();
             _workflowCancellation = null;
             _runButton.Enabled = true;
+            _towerCheckButton.Enabled = true;
             _cancelButton.Enabled = false;
         }
     }
@@ -546,7 +566,9 @@ internal sealed class MainForm : Form
                 + "• 读取宿主、模型和选择集摘要\n"
                 + "• 导出版本化选择清单 JSON\n"
                 + "• 启动随插件发布的自包含只读工作流\n\n"
-                + "安全边界：不修改对象、Group、单位或选择集；不保存、解锁、分析、设计或写回模型。",
+                + "• 检查 Tower 分配并输出审查报告\n"
+                + "安全边界：普通成果只读；仅明确确认后创建/更新插件所有的审查 Group；"
+                + "不改变 Tower 归属，不自动保存、解锁、分析、设计或编号写回。",
             "关于 ETABS Beam Generator 插件",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information

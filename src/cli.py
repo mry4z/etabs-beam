@@ -54,6 +54,7 @@ from src.rebar_workbook import (
     write_rebar_payload,
 )
 from src.run_manifest import RunManifest, artifact_record, resolve_model_file, sha256_file
+from src.tower_preflight import run_tower_preflight, validate_tower_options
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +128,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[str, Any]:
+    validate_tower_options(args)
     if args.snapshot_input is not None:
         from src.snapshot.workflow import run_snapshot_workflow
 
@@ -187,6 +189,15 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
             expected_model_sha256=model_input_sha256,
         )
         beams = read_source.extract_beams(args.selection)
+        tower_result = run_tower_preflight(args, read_source, beams, output_dir)
+        if tower_result is not None and (args.tower_preflight_only or args.tower_create_groups):
+            return {
+                "status": "OK",
+                "mode": "tower-create-groups" if args.tower_create_groups else "tower-preflight",
+                "model": str(actual_model), "model_input_sha256": model_input_sha256,
+                "environment": environment, "original_units": original_units, "export_units": "N_mm_C",
+                **tower_result,
+            }
         column_supports = read_source.column_supports()
         structural = analyze_beam_lines(
             beams,
@@ -567,6 +578,9 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
         summary["outputs"]["secondary_rebar_workbook_previews"] = str(secondary_rebar_preview_dir)
     if excel_output is not None:
         summary["outputs"]["excel"] = str(excel_output)
+    if tower_result is not None:
+        summary["tower_assignment"] = tower_result["tower_assignment"]
+        summary["outputs"].update(tower_result["outputs"])
     return summary
 
 
@@ -805,6 +819,14 @@ def _parser() -> argparse.ArgumentParser:
         help="选中/高亮一个已创建的多截面审查 Group",
     )
     parser.add_argument("--allow-partial-writeback", action="store_true")
+    mode.add_argument("--tower-create-groups", action="store_true",
+                      help="创建/更新插件所有的 Tower 审查 Group，不修改 Tower 归属或保存模型")
+    parser.add_argument("--tower-check", action="store_true", help="运行前检查 Tower/Story/端点分配")
+    parser.add_argument("--tower-preflight-only", action="store_true", help="只运行 Tower 预检，导出 JSON/CSV")
+    parser.add_argument("--tower-continue-on-review", action="store_true", help="已人工确认 Tower 疑似问题，允许继续")
+    parser.add_argument("--tower-report", type=Path, help="Tower 报告目录，默认本次输出目录")
+    parser.add_argument("--tower-plan", type=Path, help="已确认的 Tower 报告/Group 计划")
+    parser.add_argument("--allow-tower-group-mutation", action="store_true", help="明确允许审查 Group 修改，不自动保存")
     parser.add_argument(
         "--confirmed-multi-section-spans",
         type=Path,

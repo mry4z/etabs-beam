@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from src.core.etabs_connector import api_values, model_paths_match
+from src.core.etabs_tower import EtabsTowerReader
+from src.core.tower_assignment import TowerAssignmentReport
 from src.core.geometry_extractor import BeamGeometry, GeometryExtractor
 from src.core.model_writeback import EtabsWriteback, FrameState
 from src.design.etabs_result import EtabsResultProvider
@@ -78,6 +80,13 @@ class EtabsOapiReadSource:
 
     def extract_beams(self, selection: str = "all") -> list[BeamGeometry]:
         return self._geometry.extract(selection)
+
+    def tower_assignment_report(
+        self, *, selection: str = "all", selected_beams: Iterable[str] | None = None,
+    ) -> TowerAssignmentReport:
+        return EtabsTowerReader(self.sap).read_report(
+            selection=selection, selected_beams=selected_beams, model_identity=self.identity(),
+        )
 
     def column_supports(self) -> dict[str, Point3D]:
         return self._geometry.column_supports()

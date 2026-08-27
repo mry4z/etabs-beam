@@ -111,5 +111,10 @@ internal sealed record WorkflowRunRequest(
     bool ExportExcel,
     bool ExportRebarWorkbook,
     int EtabsProcessId,
-    string ExpectedModelPath
+    string ExpectedModelPath,
+    bool TowerCheck = false,
+    bool TowerPreflightOnly = false,
+    bool TowerContinueOnReview = false,
+    bool TowerCreateGroups = false,
+    string TowerPlanPath = ""
 );
