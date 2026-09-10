@@ -4,7 +4,7 @@ type: task
 status: in_progress
 owner: project
 created: 2026-07-25
-updated: 2026-07-31
+updated: 2026-09-09
 related:
   - ROADMAP-001
   - MS-P1-001
@@ -52,12 +52,13 @@ Parent：[MS-P1-001](../../specs/milestones/MS-P1-001_REBAR_ENGINEERING_CLOSURE.
 | `TASK-NUM-001` | 建立跨通道唯一编号 formatter | [ROADMAP P1-2](../ROADMAP.md) | `TASK-P1-008` | `backlog` | 模型名称、JSON、DXF、基础/三表 Excel 消费同一 formatter；正式跨号不含 `S`；契约测试覆盖 | 当前缺口见 [BASELINE-001](../../state/CURRENT_BASELINE.md)；关闭证据待生成 |
 | `TASK-NUM-002` | 建立 GUID/空间指纹持久映射和编号差异 | [ROADMAP P1-2](../ROADMAP.md) | `TASK-NUM-001` | `backlog` | 局部新增/删除产生 added/removed/renumbered 报告；冲突、重复和失效映射 fail-closed；同输入确定 | 关闭证据待对应 Plan/Validation |
 | `TASK-NUM-003` | 完成 ETABS 内人工分组、差异预览和第二轮写回 | [ROADMAP P1-2](../ROADMAP.md) | `TASK-NUM-002`, `SPEC-TOPO-002` | `backlog` | 选择集可生成/加载 GUID override；显示旧名到新名差异；确认后仅在工作副本执行；Group 不是权威身份 | 当前核心契约状态见 [BASELINE-001](../../state/CURRENT_BASELINE.md)；UI/实模证据待生成 |
-| `TASK-CAD-001` | 冻结版本化 CAD JSON 和严格 I→J 方向契约 | [ROADMAP P1-3](../ROADMAP.md) | `TASK-NUM-001`, `TASK-NUM-002` | `backlog` | schema 含 GUID、源/新名称、楼层、Line/Span、路径、I→J、文字锚点/角度和版本；DXF 为派生物；兼容测试通过 | 当前缺口见 [BASELINE-001](../../state/CURRENT_BASELINE.md)；关闭证据待生成 |
+| `TASK-DRAW-001` | 收口梁组 DXF/CSV 顺序一致性与文字可读性显示 | [ROADMAP P1-3](../ROADMAP.md) | `SPEC-DRAW-001` | `done` | DXF/CSV 共享分类、既有空间顺序和 `-S1` 输出编号；乱序输入结果一致；结构跨默认交付编号不含 `S`；文字 180° 可读性翻转不改变路径顶点顺序 | [VAL-20260908-DRAWING-EXPORT-REVIEW](../../state/validation/VAL-20260908_DRAWING_EXPORT_REVIEW.md)；仅离线输出测试 |
+| `TASK-CAD-001` | 冻结版本化 CAD JSON 和严格 I→J 方向契约 | [ROADMAP P1-3](../ROADMAP.md) | `TASK-NUM-001`, `TASK-NUM-002`, `TASK-DRAW-001` | `backlog` | 持久稳定编号映射、schema 含 GUID/源新名称/楼层/Line/Span/路径/I→J/文字锚点角度/版本；DXF 为派生物；模型截断与 I/J 协调、正式 JSON 和完整出图门禁通过兼容测试 | 本轮只完成 DXF/CSV 派生一致性和文字显示边界；模型截断、I/J 协调、持久映射、正式 JSON 与完整门禁留待后续，不以本轮证据关闭 |
 | `TASK-ART-001` | 收敛 `build/output/` 与 `outputs/` 生命周期 | [ROADMAP P1-3](../ROADMAP.md) | `TASK-P1-007` | `backlog` | 生产源码均受跟踪；生成物、交付物和瞬时 QA 位置明确；ignore/manifest/保留策略有自动检查 | 关闭证据待对应 Plan/Validation |
 | `TASK-P2-SQLITE-SPIKE-001` | 验证公开 OAPI 原始表到项目 SQLite 的安全快照基座 | [ROADMAP P2-1](../ROADMAP.md) | `ADR-0003` | `done` | 可列出并导出显式表键；metadata 保留模型/API/单位/表版本/字段；使用 `.partial`、完整性检查和原子改名；Reader 对缺表和字段漂移 fail-closed；ETABS 22 工作副本只读验证通过 | [VAL-20260730-P2-SQLITE-SNAPSHOT-SPIKE](../../state/validation/VAL-20260730_P2_SQLITE_SNAPSHOT_SPIKE.md)；本 spike 不关闭完整 P2 数据源任务 |
 | `TASK-P2-SQLITE-DOMAIN-001` | 交付 ETABS 22 / ACI 318-14 矩形混凝土梁只读 SQLite profile | [IP-P2-002](../plans/active/IP-P2-002_SQLITE_DOMAIN_SOURCE.md) | `TASK-P2-SQLITE-SPIKE-001` | `done` | 生产 CLI 按 PID/EDB 身份只读导出；梁、支承、全精度设计 station 和 FrameType 可回放；源哈希/文件变化 fail-closed；bundle 非覆盖且验证失败清理；实模领域等价通过 | [OAPI / SQLite 全工作流等价](../../state/validation/VAL-20260730_P2_OAPI_SQLITE_WORKFLOW_PARITY.md) |
 | `TASK-P2-SQLITE-001` | 完成公开 OAPI 表到项目 SQLite 的可切换生产数据源 | [ROADMAP P2-1](../ROADMAP.md) | `ADR-0003`, `TASK-P2-SQLITE-DOMAIN-001`, `TASK-CAD-001`（完整关闭前） | `in_progress` | 在已验证矩形 profile 上补齐真实非矩形样本、OAPI/SQLite 领域协议切换、CAD 共享 schema、写回后自动失效、ETABS 23 等价与 bundle 生命周期；缺表/schema 漂移继续 fail-closed；只读不写 EDB | ETABS 22 矩形梁的拓扑、基础 Excel、主/SB 配筋工作流已精确等价；剩余 Gate 见 [IP-P2-002](../plans/active/IP-P2-002_SQLITE_DOMAIN_SOURCE.md) |
-| `TASK-P2-PLUGIN-001` | 分别建立 CAD 与 ETABS 插件的交互交付 | [ROADMAP P2-2](../ROADMAP.md) | `TASK-NUM-003`, `TASK-CAD-001` | `in_progress` | 每个插件有独立 Plan、安装/卸载、权限、事务、回滚和集成验收；不共享未经版本化的隐式状态 | ETABS v0.3.0 完成 ETABS API DLL 定位（UI 覆盖 + CLI 自动搜索）与便携带公式配筋 xlsx（openpyxl，无 node），见 [VAL-20260731-P2-ETABS-PLUGIN-V03](../../state/validation/VAL-20260731_P2_ETABS_PLUGIN_V03.md)；v0.2.0 封装见 [V02](../../state/validation/VAL-20260731_P2_ETABS_PLUGIN_V02.md)。v0.3.0 的 ETABS 菜单加载、ETABS 23、CAD 插件及正式依赖仍未关闭 |
+| `TASK-P2-PLUGIN-001` | 分别建立 CAD 与 ETABS 插件的交互交付 | [ROADMAP P2-2](../ROADMAP.md) | `TASK-NUM-003`, `TASK-CAD-001` | `in_progress` | 每个插件有独立 Plan、安装/卸载、权限、事务、回滚和集成验收；不共享未经版本化的隐式状态 | 当前 v2 源码职责与受控选择集恢复见 [ARCH-001](../../architecture/ARCH-001_SYSTEM_ARCHITECTURE.md) 和 [VAL-20260827-TOWER-SELECTION-RECOVERY](../../state/validation/VAL-20260827_TOWER_SELECTION_RECOVERY.md)；已有 v0.4.1 包记录见 [RELEASE_NOTES](../../../plugins/etabs/RELEASE_NOTES.md)，本轮未重建包、未实模验收。v0.3.0 发布证据仍为历史：[VAL-20260731-P2-ETABS-PLUGIN-V03](../../state/validation/VAL-20260731_P2_ETABS_PLUGIN_V03.md)。 |
 | `TASK-P2-DELIVERY-001` | 建立脱敏集成模型、CI/CD 和发布基线 | [ROADMAP P2-2](../ROADMAP.md) | P1 交付契约稳定 | `backlog` | 脱敏模型获准入库；CI 明确无 ETABS/有 ETABS 边界；发布包、兼容矩阵和回退流程可复现 | 关闭证据待独立 Milestone/Plan |
 
 ## 4. 状态更新门禁

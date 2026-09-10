@@ -65,10 +65,10 @@ manifest 一致。源 EDB SHA-256 在 OAPI 采集前冻结，并在 SQLite 写�
 
 ## 4. 成果
 
-- [SQLite 快照](../../../build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v2.sqlite)：
+- [SQLite 快照](<F:/2026/Research Study/etabs beam/build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v2.sqlite>)（原工作区历史证据）：
   `249,294,848` bytes，SHA-256
   `5cc6664279906472af0e5a5787ff67651917f5d47475b7aaf8e485dd314caf1f`。
-- [快照 manifest](../../../build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v2.sqlite.manifest.json)：
+- [快照 manifest](<F:/2026/Research Study/etabs beam/build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v2.sqlite.manifest.json>)（原工作区历史证据）：
   `4,069` bytes，SHA-256
   `e76dc9f67a1d3fadd65537ead98af2047082328d79f3c2746c70d18166d728a0`。
 
@@ -111,9 +111,9 @@ manifest 一致。源 EDB SHA-256 在 OAPI 采集前冻结，并在 SQLite 写�
 
 原始离线证据：
 
-- [pytest.xml](../../../build/output/validation/20260730-p2-domain-current/pytest.xml)，SHA-256
+- [pytest.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260730-p2-domain-current/pytest.xml>)（原工作区历史证据），SHA-256
   `a17f8e30362921a861b6935a7e067a7feed320e7591c541032c7e71708159d4e`。
-- [coverage.xml](../../../build/output/validation/20260730-p2-domain-current/coverage.xml)，SHA-256
+- [coverage.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260730-p2-domain-current/coverage.xml>)（原工作区历史证据），SHA-256
   `9a3458cb6ee53ea090bc6224aa5827f2ef39908f9035221b290887e0a1e3c805`。
 
 新增测试覆盖显式 PID 附着与 EDB/`.$et` 身份、全精度设计结果往返、源哈希失效、快照文件变化、

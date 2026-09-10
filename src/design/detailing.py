@@ -172,7 +172,7 @@ class BarCatalog:
 class ProjectDetailingPolicy:
     """Project choices, separate from code clauses."""
 
-    version: str = "nasiriyah-smf-sb-2026-08-24-r1"
+    version: str = "nasiriyah-smf-sb-2026-08-27-r3"
     catalog: BarCatalog = field(default_factory=BarCatalog)
     enabled_diameters_mm: tuple[int, ...] = (10, 12, 16, 20, 25)
     allowed_spacings_mm: tuple[int, ...] = (100, 150, 200)
@@ -190,8 +190,10 @@ class ProjectDetailingPolicy:
     smf_max_longitudinal_ratio: float = 0.01613
     sb_hanger_diameter_mm: int = 12
     minimum_credit_hanger_diameter_mm: int = 12
+    sb_top_preferred_max_diameter_mm: int = 20
     prefer_two_leg_max_width_mm: float = 300.0
     default_continuity_option: ContinuityOption = ContinuityOption.OPTION_1_STRICT_EQUAL
+    pb_preferred_max_stirrup_legs: int = 4
 
     def __post_init__(self) -> None:
         full = set(self.catalog.diameters_mm)
@@ -214,6 +216,8 @@ class ProjectDetailingPolicy:
             raise DetailingError("纵向主筋最小直径必须属于项目启用目录。")
         if self.sb_hanger_diameter_mm >= self.minimum_main_diameter_mm:
             raise DetailingError("SB 架立筋直径必须小于纵向主筋最小直径。")
+        if self.sb_top_preferred_max_diameter_mm <= 0:
+            raise DetailingError("SB 上筋优选直径上限必须为正数。")
         if not self.allowed_spacings_mm or any(value <= 0 for value in self.allowed_spacings_mm):
             raise DetailingError("项目箍筋间距目录不能为空且必须为正数。")
         if self.smf_end_max_spacing_mm <= 0:
@@ -224,6 +228,13 @@ class ProjectDetailingPolicy:
             raise DetailingError("最大纵筋排数必须至少为一排。")
         if self.minimum_bars_per_layer < 2:
             raise DetailingError("纵筋每排最少根数不得小于 2。")
+        if (
+            not isinstance(self.pb_preferred_max_stirrup_legs, int)
+            or isinstance(self.pb_preferred_max_stirrup_legs, bool)
+            or self.pb_preferred_max_stirrup_legs < 2
+            or self.pb_preferred_max_stirrup_legs % 2
+        ):
+            raise DetailingError("主梁优选箍筋肢数上限必须为不小于 2 的偶数。")
 
     def ordered_stirrup_diameters(self) -> tuple[int, ...]:
         return _preferred_order(self.preferred_stirrup_diameters_mm, self.enabled_diameters_mm)
@@ -1094,6 +1105,7 @@ class BeamDetailingEngine:
                 max_layers=self.project.max_main_bar_layers,
                 hanger_support_count=stirrup.legs if section.is_secondary else None,
                 allow_minimum_credit_hanger=(section.is_secondary and demand.as_flex_top_mm2 <= as_min + 1e-9),
+                top_region=demand.name,
             )
             bottom = self._select_longitudinal(
                 section,
@@ -1544,6 +1556,7 @@ class BeamDetailingEngine:
             None,
             hanger_support_count,
             section.is_secondary and demand.as_flex_top_mm2 <= as_min + 1e-9,
+            top_region=demand.name,
         )
         bottom = self._select_longitudinal(
             section,
@@ -1708,7 +1721,7 @@ class BeamDetailingEngine:
         section: BeamSection,
         candidates: Sequence[tuple[int, int, StirrupDesign]],
     ) -> StirrupDesign:
-        """Apply the configured stirrup preference to valid candidates."""
+        """Rank valid hoops without turning project preferences into limits."""
 
         if section.width_mm <= self.project.prefer_two_leg_max_width_mm + 1e-9:
             return min(
@@ -1717,6 +1730,23 @@ class BeamDetailingEngine:
                     item[2].legs,
                     -item[1],
                     item[0],
+                ),
+            )[2]
+        if not section.is_secondary:
+            # A small hoop diameter must not force extra legs and, in turn,
+            # extra longitudinal bars through the existing PB support rule.
+            # Prefer the <=4-leg band, then the largest valid spacing and the
+            # configured diameter order. This tries a larger diameter before
+            # adding legs, but retains feasible two-leg hoops and a >4-leg
+            # fallback. The final longitudinal/capacity-shear iteration still
+            # checks the actual diameter, spacing, layout and provided areas.
+            return min(
+                candidates,
+                key=lambda item: (
+                    max(0, item[2].legs - self.project.pb_preferred_max_stirrup_legs),
+                    -item[1],
+                    item[0],
+                    item[2].legs,
                 ),
             )[2]
         return min(candidates, key=lambda item: (item[0], -item[1], item[2].legs))[2]
@@ -1730,10 +1760,13 @@ class BeamDetailingEngine:
         max_layers: int | None,
         hanger_support_count: int | None = None,
         allow_minimum_credit_hanger: bool = False,
+        *,
+        top_region: str | None = None,
     ) -> LongitudinalDesign | None:
         if required_area <= 0:
             required_area = 0.0
         diameters = self.project.ordered_longitudinal_diameters_for(section)
+        secondary_top = section.is_secondary and top_region is not None
         candidates: list[LongitudinalDesign] = []
         for diameter in diameters:
             candidate = self._single_diameter_candidate(
@@ -1748,7 +1781,8 @@ class BeamDetailingEngine:
         for first_index, first in enumerate(diameters):
             for second in diameters[first_index + 1 :]:
                 candidate = self._mixed_candidate(
-                    section, required_area, minimum_count, stirrup_diameter_mm, first, second, max_layers
+                    section, required_area, minimum_count, stirrup_diameter_mm, first, second, max_layers,
+                    matching_pair=secondary_top and top_region == "middle",
                 )
                 if candidate:
                     supported = self._with_sb_hangers(candidate, section, stirrup_diameter_mm, hanger_support_count)
@@ -1771,6 +1805,17 @@ class BeamDetailingEngine:
                     candidates.append(supported)
         if not candidates:
             return None
+        if secondary_top:
+            # This is a preference, not a new diameter ban.  T25 remains a
+            # fallback when no <=T20 layout fits the active layer/spacing
+            # constraints.  PB and all bottom-bar searches keep their order.
+            preferred = [
+                candidate
+                for candidate in candidates
+                if all(bar.diameter_mm <= self.project.sb_top_preferred_max_diameter_mm for bar in candidate.bars)
+            ]
+            if preferred:
+                candidates = preferred
         if allow_minimum_credit_hanger:
             return min(
                 candidates,
@@ -1895,7 +1940,9 @@ class BeamDetailingEngine:
             (BarSpec(diameter, count, layer_counts, area),), required, count * area, layers, clear
         )
 
-    def _mixed_candidate(self, section, required, minimum_count, stirrup_diameter, first, second, max_layers):
+    def _mixed_candidate(
+        self, section, required, minimum_count, stirrup_diameter, first, second, max_layers, *, matching_pair=False
+    ):
         area_first = self.project.catalog.area(first)
         area_second = self.project.catalog.area(second)
         capacity = self._capacity_per_layer(section, stirrup_diameter, max(first, second))
@@ -1911,6 +1958,8 @@ class BeamDetailingEngine:
             count_second = max(0, minimum_count - count_first)
             while count_first * area_first + count_second * area_second < required - 1e-9:
                 count_second += 1
+            if matching_pair and count_first == count_second == 1:
+                count_second = 2
             total_count = count_first + count_second
             practical_count = _minimum_practical_count(
                 total_count,
@@ -1923,6 +1972,11 @@ class BeamDetailingEngine:
             count_second += practical_count - total_count
             total_count = practical_count
             if total_count < minimum_count or total_count > max_count:
+                continue
+            # Two different one-bar groups cannot form the matching corner
+            # pair required for SB midspan top reinforcement.  Reject inside
+            # the search so a feasible three-bar alternative is still tried.
+            if matching_pair and max(count_first, count_second) < 2:
                 continue
             layers = math.ceil(total_count / capacity)
             if max_layers is not None and layers > max_layers:
@@ -2103,6 +2157,12 @@ def _common_support_layout(
         for value in engine.project.ordered_longitudinal_diameters_for(first_result.section)
         if value != anchor
     )
+    if first_result.section.is_secondary:
+        # A common SB support is still exact-count coordinated, but an old
+        # T25 anchor must not bypass the same <=T20 top-bar preference.
+        diameters = tuple(
+            sorted(diameters, key=lambda value: value > engine.project.sb_top_preferred_max_diameter_mm)
+        )
     max_layers = (
         None
         if first_result.mode is ReinforcementMode.FACE_TORSION and second_result.mode is ReinforcementMode.FACE_TORSION

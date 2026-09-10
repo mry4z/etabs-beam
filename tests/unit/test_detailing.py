@@ -104,7 +104,8 @@ def test_main_bar_selection_never_uses_diameter_below_t16() -> None:
 def test_project_policy_matches_nasiriyah_smf_sb_measure() -> None:
     policy = ProjectDetailingPolicy()
 
-    assert policy.version == "nasiriyah-smf-sb-2026-08-24-r1"
+    assert policy.version == "nasiriyah-smf-sb-2026-08-27-r3"
+    assert policy.pb_preferred_max_stirrup_legs == 4
     assert policy.enabled_diameters_mm == (10, 12, 16, 20, 25)
     assert policy.allowed_spacings_mm == (100, 150, 200)
     assert policy.smf_end_max_spacing_mm == pytest.approx(100.0)
@@ -530,7 +531,7 @@ def test_project_end_cap_prevents_stirrup_bar_preference_cycle() -> None:
     assert result.iteration_status == "STABLE"
     assert tuple(region.stirrup.notation for region in result.regions) == (
         "T10@100",
-        "T10@150",
+        "T12@200",
         "T10@100",
     )
     assert result.regions[0].stirrup.governing_reason == "SMF_PROJECT_ABSOLUTE"

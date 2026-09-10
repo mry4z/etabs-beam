@@ -4,11 +4,13 @@ type: spec
 status: accepted
 owner: project
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-09-09
 related:
   - SPEC-TOPO-001
   - ADR-0001
   - REF-SCHEMA-001
+  - TASK-DRAW-001
+  - TASK-CAD-001
 supersedes:
   - LEGACY-DRAWING-NUMBERING
 superseded_by:
@@ -35,9 +37,12 @@ superseded_by:
 | ID | 要求 |
 |---|---|
 | DRAW-R006 | Beam Line 保存唯一 `i_point/j_point` 和 `local_1_direction`。 |
-| DRAW-R007 | 模型 Object I→J、局部 1 轴、Span 路径、梁表左中右和 CAD 文字基线必须同向。 |
-| DRAW-R008 | CAD 不得为屏幕可读性单独旋转文字 180°。 |
-| DRAW-R009 | 方向缺失、零向量、路径切线不一致或 CAD 基线与 local 1 点积为负时阻止正式出图。 |
+| DRAW-R007 | 模型 Object I→J、局部 1 轴、Span 路径和梁表左中右继续共享结构方向；CAD 文字显示角度属于表现层，可与结构方向分离。 |
+| DRAW-R008 | CAD 文字为保持正向可读可翻转 180°；该显示翻转不得改变路径顶点顺序、I/J、编号、文字锚点或梁表左中右。仅文字反向不构成阻断。 |
+| DRAW-R009 | 几何方向缺失、零向量、路径方向异常或路径顺序无法解释时阻止正式出图。 |
+
+实现必须保持文字表现层与结构方向分离；持久稳定编号、正式 CAD JSON、模型截断及 I/J 协调由
+[TASK-CAD-001](../delivery/tasks/TASK_REGISTER.md) 作为后续交付门禁管理。
 
 ## 4. 交换数据要求
 
@@ -60,6 +65,6 @@ superseded_by:
 1. 拓扑不变量通过。
 2. I→J 与模型写回计划一致。
 3. 编号重复运行稳定。
-4. DXF 一跨一条 polyline，文字方向一致。
+4. DXF 一跨一条 polyline，文字正向可读，顶点顺序保持并与结构 I→J 一致。
 5. JSON schema 和哈希完整。
 6. CAD 导入后与 Excel 左/中/右抽样对照。

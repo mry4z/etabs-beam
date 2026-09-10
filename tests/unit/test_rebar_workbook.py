@@ -271,6 +271,12 @@ def test_formal_payload_contains_audit_rows_and_can_redetail(tmp_path: Path) -> 
     assert payload["metadata"]["rebar_workbook_layout_version"] == "single-sheet-static-v1"
     assert payload["metadata"]["bottom_reinforcement_strategy"] == "FULL_SPAN_UNIFORM_PER_SPAN"
     assert payload["metadata"]["adjacent_span_bottom_strategy"] == "INDEPENDENT_PER_SPAN"
+    assert payload["metadata"]["project_policy_version"] == "nasiriyah-smf-sb-2026-08-27-r3"
+    assert payload["metadata"]["pb_preferred_max_stirrup_legs"] == 4
+    assert payload["metadata"]["pb_stirrup_selection_strategy"] == "PREFERRED_LEG_BAND_THEN_SPACING_THEN_DIAMETER"
+    assert payload["metadata"]["enabled_diameters_mm"] == [10, 12, 16, 20, 25]
+    assert payload["metadata"]["sb_top_preferred_max_diameter_mm"] == 20
+    assert payload["metadata"]["sb_midspan_top_pair_strategy"] == "MATCHING_DIAMETER_PAIR"
     final = payload["final_rows"][0]
     assert final["eb1"] == final["b1"] == final["eb2"]
     assert final["bottom_uniform_regions_match"] is True
@@ -281,8 +287,20 @@ def test_formal_payload_contains_audit_rows_and_can_redetail(tmp_path: Path) -> 
 
     destination = write_rebar_payload(payload, tmp_path / "payload.json")
     assert destination.is_file()
+    payload["metadata"].update(
+        {
+            "project_policy_version": "previous-policy",
+            "pb_preferred_max_stirrup_legs": 6,
+            "pb_stirrup_selection_strategy": "DIAMETER_FIRST",
+        }
+    )
     redetailed = redetail_payload(payload)
     assert redetailed["review_rows"][0]["engine_status"] == "OK"
+    assert redetailed["metadata"]["sb_top_preferred_max_diameter_mm"] == 20
+    assert redetailed["metadata"]["project_policy_version"] == "nasiriyah-smf-sb-2026-08-27-r3"
+    assert redetailed["metadata"]["pb_preferred_max_stirrup_legs"] == 4
+    assert redetailed["metadata"]["pb_stirrup_selection_strategy"] == "PREFERRED_LEG_BAND_THEN_SPACING_THEN_DIAMETER"
+    assert payload["metadata"]["project_policy_version"] == "previous-policy"
 
 
 def test_support_faces_are_derived_from_column_centres_and_dimensions() -> None:

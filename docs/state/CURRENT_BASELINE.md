@@ -4,11 +4,11 @@ type: current-baseline
 status: current
 owner: project
 created: 2026-07-25
-updated: 2026-07-31
-as_of: 2026-07-31T23:55:00+08:00
-git_commit: 7d3862752041fe18eb0201b21671f3575d70b52b
+updated: 2026-09-10
+as_of: 2026-09-10
+git_commit: 59a40b26f99b5dac35fdc7159a01c164e3c3f075
 dirty: true
-accepted_manifest: p1-writeback:20260730T072626Z-5101501d;p1-cover25:20260730T103252Z-d96440dc;p2-offline:20260730T095035Z-d1abb748;p2-plugin-v01:20260730T131855Z-53226a75
+accepted_manifest: "none for current dirty worktree; historical manifests retained below"
 related:
   - MS-P1-001
   - VAL-20260730-P1-P2-OFFLINE-CURRENT
@@ -21,6 +21,8 @@ related:
   - IP-P2-003
   - VAL-20260731-P2-ETABS-PLUGIN-V02
   - VAL-20260731-P2-ETABS-PLUGIN-V03
+  - VAL-20260908-DRAWING-EXPORT-REVIEW
+  - VAL-20260910-REBAR-REVIEW-SCOPE
 supersedes: []
 superseded_by:
 ---
@@ -31,23 +33,26 @@ superseded_by:
 
 | 项目 | 当前值 |
 |---|---|
-| 截止时间 | 2026-07-31 22:40:00 +08:00 |
-| Git HEAD | `7d3862752041fe18eb0201b21671f3575d70b52b` |
-| 工作树 | `dirty: true` |
-| 当前离线门禁 | [VAL-20260730-P2-ETABS-PLUGIN-V01](validation/VAL-20260730_P2_ETABS_PLUGIN_V01.md)，`212 passed, 1 skipped`，三个 .NET 项目 `0 warnings, 0 errors` |
-| 当前实模配筋 | [VAL-20260730-P1-ETABS-COVER-25MM-CURRENT](validation/VAL-20260730_P1_ETABS_COVER_25MM_CURRENT.md)，run `20260730T103252Z-d96440dc`，`partial` |
-| writeback 全链证据 | [VAL-20260730-P1-V645-CURRENT-FULL-CHAIN](validation/VAL-20260730_P1_V645_CURRENT_FULL_CHAIN.md)，较早代码身份 |
-| P2 技术验证 | [VAL-20260730-P2-SQLITE-SNAPSHOT-SPIKE](validation/VAL-20260730_P2_SQLITE_SNAPSHOT_SPIKE.md)，`passed`（spike 范围） |
-| P2 当前领域证据 | [VAL-20260730-P2-OAPI-SQLITE-WORKFLOW-PARITY](validation/VAL-20260730_P2_OAPI_SQLITE_WORKFLOW_PARITY.md)，`passed`（ETABS 22 矩形梁只读工作流） |
-| ETABS 插件 v0.3.0 | [VAL-20260731-P2-ETABS-PLUGIN-V03](validation/VAL-20260731_P2_ETABS_PLUGIN_V03.md)，`partial`（ETABS API DLL 可定位 + 便携无 node 生成带公式配筋 xlsx；菜单加载与 ETABS 23 待人工/环境验收） |
+| 截止时间 | 2026-09-10 |
+| Git HEAD | `59a40b26f99b5dac35fdc7159a01c164e3c3f075` |
+| 分支 / 工作树 | `codex/clean-start` / `dirty: true` |
+| 当前 v2 离线事实 | 梁图导出定向验证见 [VAL-20260908-DRAWING-EXPORT-REVIEW](validation/VAL-20260908_DRAWING_EXPORT_REVIEW.md)；梁表当前复核范围见 [VAL-20260910-REBAR-REVIEW-SCOPE](validation/VAL-20260910_REBAR_REVIEW_SCOPE.md)；分塔选择集、PB/SB 单表 JSON/Excel 分别见对应 Validation，不在本表重复测试计数 |
+| 当前 v2 实模/GUI | `UNVERIFIED`：本轮未连接 ETABS、未截断模型、未写回模型，菜单加载和完整出图门禁仍待人工验收 |
+| 历史实模与全链证据 | [VAL-20260730-P1-ETABS-COVER-25MM-CURRENT](validation/VAL-20260730_P1_ETABS_COVER_25MM_CURRENT.md)、[VAL-20260730-P1-V645-CURRENT-FULL-CHAIN](validation/VAL-20260730_P1_V645_CURRENT_FULL_CHAIN.md)，仅对各自历史代码身份有效 |
+| 历史 P2 技术/插件证据 | [VAL-20260730-P2-SQLITE-SNAPSHOT-SPIKE](validation/VAL-20260730_P2_SQLITE_SNAPSHOT_SPIKE.md)、[VAL-20260730-P2-OAPI-SQLITE-WORKFLOW-PARITY](validation/VAL-20260730_P2_OAPI_SQLITE_WORKFLOW_PARITY.md)、[VAL-20260731-P2-ETABS-PLUGIN-V03](validation/VAL-20260731_P2_ETABS_PLUGIN_V03.md)，不作为当前 v2 验收 |
 | 活动阶段 | [MS-P1-001 配筋工程闭环](../specs/milestones/MS-P1-001_REBAR_ENGINEERING_CLOSURE.md) |
 
-当前代码身份已完成离线门禁、ETABS 22.7 只读配筋链和 ETABS 插件 v0.1 技术垂直切片；run 技术状态为 `SUCCESS`。ETABS 设计保护层与
-25 mm 骨料输入已经解决，P1 工程门禁仍为 `PARTIAL`，因为 408 个异常 Span 尚未全部处置、最新代码身份
-没有重跑 writeback 全链且缺少结构工程师冻结签署。P2-1 的 ETABS 22 矩形梁只读工作流已通过实时 OAPI /
-SQLite 精确等价，但完整 P2 仍为 `in_progress`。
+当前基线只承认 dirty v2 工作树中已有明确 Validation 的能力；历史 run 的 `SUCCESS`、实模等价和发布事实
+不向当前代码身份外推。P1 工程门禁、模型截断/I/J 协调、持久稳定编号、正式 CAD JSON、完整出图门禁和结构工程师签署仍未关闭。
 
 ## 2. 当前工作树边界
+
+当前唯一基线对应 v2 `codex/clean-start` 的 dirty 工作树（HEAD `59a40b26f99b5dac35fdc7159a01c164e3c3f075`）；
+本节以下较早段落中的 run、哈希和测试计数只对各自记录的历史代码身份有效，不构成当前 v2 验收。
+2026-09-10 本轮新增的梁表当前复核范围由 [配筋梁表复核范围记录](validation/VAL-20260910_REBAR_REVIEW_SCOPE.md) 单独记录；
+2026-09-08 本轮新增的当前事实由 [梁图导出验证记录](validation/VAL-20260908_DRAWING_EXPORT_REVIEW.md)
+单独记录；分塔预检/选择集恢复以[对应验证记录](validation/VAL-20260827_TOWER_SELECTION_RECOVERY.md)为准，
+PB/SB 单表静态 Excel 与 JSON 审计以[对应验证记录](validation/VAL-20260827_REBAR_SINGLE_SHEET_STATIC.md)为准。
 
 2026-08-27 项目策略增量：已按《纳西里耶医疗城项目 SMF 主梁+次梁措施-1版 20260824》更新
 `nasiriyah-smf-sb-2026-08-24-r1`，包括 SMF 最大纵筋率 `0.01613`、端部 `2h` 区 `s<=100 mm`、
@@ -111,23 +116,26 @@ v0.3.0 对新增的 DLL 定位、便携配筋渲染器和插件 UI 改动重新�
 
 | Requirement / 能力 | 状态 | Evidence | 已知缺口 | 下一任务 |
 |---|---|---|---|---|
-| 默认离线测试与覆盖率门槛 | `VERIFIED` | `212 passed, 1 skipped`, coverage `79.54%`；当前 Plugin Validation | ETABS 集成测试默认跳过，由实模 Validation 补充 | 后续变更持续门禁 |
-| ETABS 22.7 / 23.3 OAPI 连接与字段兼容 | `PARTIAL` | 当前 ETABS 22.7 run；历史 ETABS 23.3 样本；适配测试 | 当前代码未在 ETABS 23.3 重跑全链路 | 后续兼容矩阵 |
-| Beam Line / Span 拓扑算法 | `VERIFIED` | 当前 run：4,094 Object、1,215 Line、3,018 Span；0 blocking diagnostic | 30 个 split Object、28 个多截面 Span 保持人工审查 | TASK-P1-008 |
-| fail-closed 方向与编号写回 | `VERIFIED` | 当前 run 返回码 0；4,094 对象全属性和需求等价均 0 failure | 使用受控 partial writeback；审查项未伪装为成功 | TASK-P1-008 |
-| 设计结果 `_2` 字段映射 | `VERIFIED` | 当前 payload 保留 raw Provided、station、组合、单位、来源；单元测试 | 22 个实模 partial 仍需工程处置 | TASK-P1-008 |
+| 默认离线测试与覆盖率门槛 | `PARTIAL` | 历史 [VAL-20260730-P1-P2-OFFLINE-CURRENT](validation/VAL-20260730_P1_P2_OFFLINE_CURRENT.md)；当前 v2 不在本基线重复测试计数 | 当前 dirty 身份需按对应 Validation 重跑；ETABS 集成测试默认跳过 | 后续变更持续门禁 |
+| ETABS 22.7 / 23.3 OAPI 连接与字段兼容 | `PARTIAL` | 历史 ETABS 22.7 run、ETABS 23.3 样本和适配测试 | 当前代码未以同一 dirty 身份重跑全链路 | 后续兼容矩阵 |
+| Beam Line / Span 拓扑算法 | `PARTIAL` | 历史 run：4,094 Object、1,215 Line、3,018 Span；0 blocking diagnostic | 历史输入/身份不等于当前 v2；split、多截面和工程复核仍保留 | TASK-P1-008 |
+| fail-closed 方向与编号写回 | `PARTIAL` | 历史 run 返回码 0、对象全属性和需求等价无 failure | 当前 dirty 身份未重跑 writeback 全链；审查项不得外推为当前成功 | TASK-P1-008 |
+| 设计结果 `_2` 字段映射 | `PARTIAL` | 历史 payload 保留 raw Provided、station、组合、单位、来源；单元测试证据 | 当前 dirty 身份的实模 partial 仍需工程处置 | TASK-P1-008 |
 | ACI 318-14 配筋排布 | `PARTIAL` | 历史 ETABS 重心 cover +25 mm：2,610/3,018 行 `OK`；2026-08-27 新策略提交快照 `259 passed`、coverage `80.73%` | 40 mm/25 mm 新配置和 1.613%/100 mm 新控制尚未实模重跑；408 个历史异常及工程签署未完成 | TASK-P1-008 |
 | SB 全跨统一箍筋规格 | `PARTIAL` | 1,402/1,444 个 SB 行同规格通过；42 行保留异常 | 22 混合截面、12 design partial、8 底筋布置异常 | TASK-P1-008 |
-| 三表配筋工作簿 | `PARTIAL` | payload 2.0、主/SB 工作簿；公式错误扫描 0；9 张预览检查通过 | 自动成功行仍需工程签发；异常行未销项 | TASK-P1-008 |
+| 三表配筋工作簿（历史能力） | `UNVERIFIED` | 历史证据见 [VAL-20260730-P1-V645-CURRENT-FULL-CHAIN](validation/VAL-20260730_P1_V645_CURRENT_FULL_CHAIN.md)；不作为当前 v2 能力 | 当前 dirty 身份的三表成果和工程签发未重新验收 | TASK-P1-008 |
 | 人工拓扑 Override 核心契约 | `PARTIAL` | 单元测试覆盖 JSON、GUID、连通和失效 | ETABS 交互 UI 与第二轮写回未实现 | TASK-NUM-003 |
-| 稳定编号和 CAD 正式交换 schema | `PARTIAL` | 当前 formatter、DXF/CSV 和方向测试 | 稳定编号映射、正式 JSON 和 CAD 消费未闭环 | TASK-NUM-001、TASK-CAD-001 |
+| 稳定编号和 CAD 正式交换 schema | `PARTIAL` | 当前 formatter、DXF/CSV 空间顺序一致性、文字显示边界和方向测试；[VAL-20260908-DRAWING-EXPORT-REVIEW](validation/VAL-20260908_DRAWING_EXPORT_REVIEW.md) | 持久稳定编号映射、模型截断/I/J 协调、正式 JSON 和完整 CAD 出图门禁未闭环 | TASK-NUM-001、TASK-CAD-001 |
+| 分塔预检与完整选择集恢复 | `PARTIAL` | [VAL-20260827-TOWER-SELECTION-RECOVERY](validation/VAL-20260827_TOWER_SELECTION_RECOVERY.md)：公共表快路径、`PreviousSelection` 优先、身份/责任交接和离线回归 | ETABS 22/23 实模菜单/GUI 验收仍未完成 | TASK-P2-PLUGIN-001 |
+| PB/SB 单表静态 Excel 与 JSON 审计 | `PARTIAL` | [VAL-20260827-REBAR-SINGLE-SHEET-STATIC](validation/VAL-20260827_REBAR_SINGLE_SHEET_STATIC.md)：静态布局、raw/review/final 审计和离线视觉契约 | 最新 dirty 身份的实模重跑和工程签发未完成 | TASK-P1-008 |
 | SQLite 快照数据源 | `PARTIAL` | ETABS 22 矩形梁：4,094 梁、1,441 支承、65,881 station；六个拓扑成果逐字节一致，3,018 个主/SB payload 行逐字段一致 | 非矩形真实样本、CAD schema、ETABS 23 和 bundle 生命周期未完成 | TASK-P2-SQLITE-001 |
-| ETABS 交互插件 v0.3.0 | `PARTIAL` | v0.3.0 支持 ETABS API DLL 定位（插件 UI 覆盖 + CLI 自动搜索常见安装目录）；便携 `--export-rebar-workbook` 在无 node 下用 openpyxl 生成带公式三表/SB xlsx（239 passed，coverage 80.52%；便携 run 3023 行，公式扫描 0 错误）；v0.2.0 封装证据仍有效 | v0.3.0 的 ETABS Tools 菜单加载、非空选择、ETABS 23、安装签名待验证 | TASK-P2-PLUGIN-001 |
+| ETABS 交互插件 v0.3.0（历史能力） | `UNVERIFIED` | 原始历史证据见 [VAL-20260731-P2-ETABS-PLUGIN-V03](validation/VAL-20260731_P2_ETABS_PLUGIN_V03.md)；不作为当前 v2 能力 | 历史版本的菜单加载、非空选择、ETABS 23 和安装签名仍未形成当前验收 | TASK-P2-PLUGIN-001 |
+| ETABS 交互插件 v2 / 当前源码 | `PARTIAL` | 当前源码职责见 [ARCH-001](../architecture/ARCH-001_SYSTEM_ARCHITECTURE.md) 与 [ETABS 插件指南](../guides/ETABS_PLUGIN.md)；选择集恢复见 [VAL-20260827-TOWER-SELECTION-RECOVERY](validation/VAL-20260827_TOWER_SELECTION_RECOVERY.md)；当前 v0.4.1-r6d 包见 [RELEASE_NOTES](../../plugins/etabs/RELEASE_NOTES.md) | 已完成 ETABS 23 离线编译、运行时自检和插件契约校验；仍未进行 ETABS 22/23 实模菜单/GUI 加载和安装签收 | TASK-P2-PLUGIN-001 |
 | SAP2000、CAD 插件、正式 GUI/安装器、CI/CD | `UNVERIFIED` | 无当前实现证据 | P2 范围 | Roadmap P2 |
 
-## 4. 当前实模基线允许的受控例外
+## 4. 历史实模证据边界（非当前 v2 验收）
 
-writeback run `20260730T072626Z-5101501d` 只对其精确输入有效：
+历史 writeback run `20260730T072626Z-5101501d` 只对其精确输入和代码身份有效：
 
 - 30 个 `REQUIRES_SPLIT` Object / 60 个动作保持审计可见。
 - 28 个多截面 Span 全部未确认。
@@ -135,7 +143,7 @@ writeback run `20260730T072626Z-5101501d` 只对其精确输入有效：
 - 同次需求等价检查 4,094 个 Object，0 failure。
 - 该 run 的配筋输入尚未冻结，因此不能作为当前配筋成果；其 writeback、分析、设计和审计证据继续有效。
 
-当前 read-only 配筋 run `20260730T103252Z-d96440dc`：
+历史 read-only 配筋 run `20260730T103252Z-d96440dc`：
 
 - 2,610 行 `OK`；408 行保留工程状态。
 - 224 行跨 profile 协调边界、104 行无允许间距。
@@ -150,7 +158,7 @@ writeback run `20260730T072626Z-5101501d` 只对其精确输入有效：
 
 - 旧 3,070/3,074 Span 工作簿基于已修正拓扑，只能用于历史 API/工作簿验证。
 - v6.4.1 的 3,009/3,010 Span、v6.4.3 的 3,020 Span 与当前 v6.4.5 的 3,018 Span 不是同一模型事实。
-- 历史文档中的 84 至 208 passed 不能证明当前工作树；本基线只引用当前 212 项通过记录。
+- 历史文档中的 84 至 208 passed 以及历史 212 项门禁都不能证明当前工作树；测试计数只在具体 Validation Record 的精确身份边界内有效。
 - manifest 的 `validity.state=CURRENT` 是注册表输入指纹状态，不是“当前仓库已验收”的同义词。
 - P2 SQLite 的 ETABS 22 矩形梁 profile 与拓扑/Excel/配筋只读工作流已交付并验证；完整 P2 数据源
   仍未完成，不能把该 profile 扩大解释为非矩形截面、ETABS 23、CAD schema 或正式 bundle 生命周期已获支持。

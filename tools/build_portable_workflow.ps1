@@ -15,7 +15,7 @@ $configSource = Join-Path $workspaceRoot "plugins\etabs\portable\config.yaml"
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputDirectory)
 $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot "build\etabs-plugin"))
 
-if (-not $resolvedOutput.StartsWith($allowedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not $resolvedOutput.StartsWith($allowedRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "OutputDirectory must stay within $allowedRoot"
 }
 if (Test-Path -LiteralPath $resolvedOutput) {
@@ -28,8 +28,9 @@ if (-not (Test-Path -LiteralPath $configSource -PathType Leaf)) {
     throw "Portable workflow config not found: $configSource"
 }
 
-$workDirectory = Join-Path (Split-Path -Parent $resolvedOutput) (
-    ".portable-work-" + [System.IO.Path]::GetFileName($resolvedOutput)
+$packageDirectory = Split-Path -Parent $resolvedOutput
+$workDirectory = Join-Path (Split-Path -Parent $packageDirectory) (
+    ".portable-work-" + [System.IO.Path]::GetFileName($packageDirectory)
 )
 if (Test-Path -LiteralPath $workDirectory) {
     throw "Portable workflow work directory already exists: $workDirectory"

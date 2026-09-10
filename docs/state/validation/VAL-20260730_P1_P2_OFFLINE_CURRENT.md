@@ -60,9 +60,9 @@ superseded_by:
 
 ## 4. 原始证据
 
-- [pytest.xml](../../../build/output/validation/20260730-p1-p2-final-current/pytest.xml)，SHA-256
+- [pytest.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260730-p1-p2-final-current/pytest.xml>)（原工作区历史证据），SHA-256
   `063d086ce5f71310d4c1b87494782c99abde36ae2dfedb696bbc6a0a13c61547`
-- [coverage.xml](../../../build/output/validation/20260730-p1-p2-final-current/coverage.xml)，SHA-256
+- [coverage.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260730-p1-p2-final-current/coverage.xml>)（原工作区历史证据），SHA-256
   `63bba69adc17369f9301305f3263b7710a8007406c134994419b90269ceecb91`
 
 ## 5. 覆盖边界

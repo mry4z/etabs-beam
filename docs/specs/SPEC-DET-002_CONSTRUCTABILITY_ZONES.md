@@ -4,11 +4,12 @@ type: spec
 status: review
 owner: project
 created: 2026-08-03
-updated: 2026-08-27
+updated: 2026-09-10
 related:
   - SPEC-DET-001_ACI318_14_DETAILING.md
   - SPEC-DESIGN-001_RESULT_SEMANTICS.md
   - ADR-0006
+  - ADR-0008_ETABS_CAPACITY_SHEAR_PROCESS_ONLY
   - IP-P1-002
 ---
 
@@ -28,9 +29,18 @@ related:
 
 ## 普通梁与 SMF 门禁
 
-普通梁额外输出裂缝间距、抗扭周边布筋、锚固和搭接校核的“已确认/未确认”状态；当前没有使用阶段钢筋应力、完整支承几何或搭接参数时，不把结果标成施工合格。
+普通梁额外输出裂缝间距、抗扭周边布筋、锚固和搭接校核的“已确认/未确认”状态。当前项目阶段不把抗扭周边布筋、锚固和搭接作为梁表红字门禁；这些状态仍写入 JSON 审计，作为超远期工程复核待办，不等同于施工合格确认。
 
-SMF 额外执行净跨/有效高度、梁宽、轴力（若提供）筛查，纵筋至少两根连续、项目最大配筋率 `0.01613` 和正负弯矩强度比例筛查。端部 `2h` 区在 ACI 上限外再叠加项目 `100 mm` 上限。`Sway Special` 标签本身不替代体系确认；设计规范、Frame Type、结果状态或容量剪力来源不一致时保留 `SMF_DESIGN_SOURCE_UNVERIFIED` / `CAPACITY_SHEAR_SOURCE_UNVERIFIED`。
+SMF 额外执行净跨/有效高度、梁宽、轴力（若提供）筛查，纵筋至少两根连续、项目最大配筋率 `0.01613` 和正负弯矩强度比例筛查。端部 `2h` 区在 ACI 上限外再叠加项目 `100 mm` 上限。`Sway Special` 标签本身不替代体系确认。项目已确认 ETABS Frame Design 输出的 `Design Force` 已考虑此前提及的抗震来源；因此 `CAPACITY_SHEAR_SOURCE_UNVERIFIED` 不再作为当前梁表红字门禁。相关 SMF 来源/支承面状态仍保留在 JSON 审计，待后续完整工程复核，不在本阶段阻断梁表生成。
+
+### 当前项目阶段的颜色门禁与超远期待办
+
+梁表只将当前阶段仍需处理的计算、拓扑/协调、结果状态和排布问题显示为红字。以下状态保留原始值和审计上下文，但不触发当前阶段红字：
+
+- 超远期工程待办：`ANCHORAGE_UNVERIFIED`、`SPLICE_UNVERIFIED`、`TORSION_PERIMETER_LAYOUT_UNVERIFIED`。
+- 已确认或相关审计项：`CAPACITY_SHEAR_SOURCE_UNVERIFIED`、`SMF_DESIGN_SOURCE_UNVERIFIED`、`SMF_SUPPORT_FACE_UNRESOLVED`。其中 ETABS Frame Design 设计力来源的确认是本项目既有确认结论；后两项不代表本阶段已经完成全部 SMF 构造签认，只是不作为当前梁表颜色门禁。
+
+这是一项交付范围决策，不删除原始检查字段，也不把黑字解释为完整施工审查通过。详细记录见 [VAL-20260910_REBAR_REVIEW_SCOPE](../state/validation/VAL-20260910_REBAR_REVIEW_SCOPE.md)。
 
 ## 交付字段
 

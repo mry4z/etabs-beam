@@ -16,7 +16,7 @@ import sys
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.config import load_config
 from src.etabs_locate import search_etabs_dll_path
@@ -40,6 +40,7 @@ from src.core.section_review import (
     write_multi_section_span_audit,
 )
 from src.core.topology_audit import build_requires_split_records, write_requires_split_audit
+from src.core.tower_assignment import compact_tower_assignment_summary
 from src.drawing.dxf_export import export_requires_split_dxf, export_structural_spans_csv, export_structural_spans_dxf
 from src.design.etabs_result import EtabsResultProvider
 from src.design.provider import BeamDesignResult, DesignResultStatus
@@ -65,8 +66,40 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # CLI boundary: preserve a concise machine-readable error.
         print(json.dumps({"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
         return 2
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if "tower_assignment" in summary:
+        print(json.dumps(_display_summary(summary), ensure_ascii=False), flush=True)
+    else:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
+
+
+def _tower_progress(percent: int, message: str) -> None:
+    """Render a small phase bar; per-object audit remains in the report file."""
+
+    width = 24
+    bounded = max(0, min(100, int(percent)))
+    filled = round(width * bounded / 100)
+    if filled >= width:
+        bar = "=" * width
+    elif filled <= 0:
+        bar = ">" + "-" * (width - 1)
+    else:
+        bar = "=" * (filled - 1) + ">" + "-" * (width - filled)
+    print(f"[tower] [{bar}] {bounded:3d}% {message}", flush=True)
+
+
+def _display_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Replace the stdout Tower payload with a compact UI-safe summary."""
+
+    displayed = dict(summary)
+    tower = displayed.get("tower_assignment")
+    if isinstance(tower, dict):
+        outputs = displayed.get("outputs") or {}
+        displayed["tower_assignment"] = compact_tower_assignment_summary(
+            tower,
+            report_path=outputs.get("tower_assignment_json"),
+        )
+    return displayed
 
 
 def _ensure_etabs_dll(config: Any, explicit: Any) -> Any:
@@ -111,7 +144,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         arguments=vars(args),
     )
     try:
-        summary = _run_impl(args, config, output_dir)
+        tower_requested = any(
+            getattr(args, key, False)
+            for key in ("tower_check", "tower_preflight_only", "tower_create_groups")
+        )
+        summary = (
+            _run_impl(args, config, output_dir, progress=_tower_progress)
+            if tower_requested
+            else _run_impl(args, config, output_dir)
+        )
     except Exception as exc:
         manifest.finalize(
             status="FAILED",
@@ -127,7 +168,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
-def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[str, Any]:
+def _run_impl(
+    args: argparse.Namespace,
+    config: Any,
+    output_dir: Path,
+    *,
+    progress: Callable[[int, str], None] | None = None,
+) -> dict[str, Any]:
     validate_tower_options(args)
     if args.snapshot_input is not None:
         from src.snapshot.workflow import run_snapshot_workflow
@@ -189,7 +236,7 @@ def _run_impl(args: argparse.Namespace, config: Any, output_dir: Path) -> dict[s
             expected_model_sha256=model_input_sha256,
         )
         beams = read_source.extract_beams(args.selection)
-        tower_result = run_tower_preflight(args, read_source, beams, output_dir)
+        tower_result = run_tower_preflight(args, read_source, beams, output_dir, progress=progress)
         if tower_result is not None and (args.tower_preflight_only or args.tower_create_groups):
             return {
                 "status": "OK",
@@ -857,7 +904,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--export-rebar-workbook",
         action="store_true",
-        help="导出三表配筋评审 Excel，并同时导出独立 SB 梁表 Excel",
+        help="分别导出 PB/SB 单页静态配筋结果 Excel（无公式）",
     )
     parser.add_argument(
         "--workbook-builder",

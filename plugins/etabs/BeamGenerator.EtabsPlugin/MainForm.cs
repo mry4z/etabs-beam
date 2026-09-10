@@ -7,6 +7,7 @@ namespace BeamGenerator.EtabsPlugin;
 internal sealed partial class MainForm : Form
 {
     private readonly EtabsModelReader _modelReader;
+    private readonly IUiSession _uiSession;
     private readonly PythonWorkflowRunner _workflowRunner = new();
     private readonly TextBox _hostText = ReadOnlyTextBox();
     private readonly TextBox _apiText = ReadOnlyTextBox();
@@ -37,6 +38,7 @@ internal sealed partial class MainForm : Form
     public MainForm(cSapModel sapModel)
     {
         _modelReader = new EtabsModelReader(sapModel);
+        _uiSession = new EtabsUiSession(sapModel);
         Text = $"ETABS Beam Generator 插件 v{PluginVersion}";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 650);
@@ -58,7 +60,7 @@ internal sealed partial class MainForm : Form
     public int CompletionErrorFlag => _completionErrorFlag;
 
     private static string PluginVersion =>
-        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.2.0";
+        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "unknown";
 
     private void BuildUi()
     {
@@ -170,6 +172,7 @@ internal sealed partial class MainForm : Form
         _selectionMode.DropDownStyle = ComboBoxStyle.DropDownList;
         _selectionMode.Items.AddRange(new object[] { "selected", "all" });
         _selectionMode.SelectedIndex = 0;
+        _selectionMode.SelectedIndexChanged += (_, _) => ResetTowerReview();
         _selectionMode.Dock = DockStyle.Left;
         _selectionMode.Width = 150;
         layout.Controls.Add(_selectionMode, 1, 4);
@@ -186,7 +189,7 @@ internal sealed partial class MainForm : Form
         _exportExcel.Text = "同时生成基础 Excel（要求当前模型已有设计结果）";
         _exportExcel.AutoSize = true;
         _exportExcel.Anchor = AnchorStyles.Left;
-        _exportRebarWorkbook.Text = "同时生成配筋工作簿（三表 + SB 表，带公式）";
+        _exportRebarWorkbook.Text = "同时生成主/次梁配筋表（单页静态结果）";
         _exportRebarWorkbook.AutoSize = true;
         _exportRebarWorkbook.Anchor = AnchorStyles.Left;
         outputOptions.Controls.AddRange(new Control[] { _exportExcel, _exportRebarWorkbook });
@@ -310,17 +313,12 @@ internal sealed partial class MainForm : Form
 
     private void RefreshModel()
     {
+        if (_workflowUiProtected) return;
         UseWaitCursor = true;
         try
         {
-            var previousModel = _snapshot?.ExpectedDurableModelPath;
             _snapshot = _modelReader.Read();
-            if (!string.Equals(previousModel, _snapshot.ExpectedDurableModelPath, StringComparison.OrdinalIgnoreCase))
-            {
-                _towerPreflightConfirmed = false;
-                _towerReportPath = "";
-                _towerGroupsButton.Enabled = false;
-            }
+            if (_towerReviewScope != CurrentTowerReviewScope()) ResetTowerReview();
             _hostText.Text = $"{_snapshot.HostVersion} ({(_snapshot.SupportedHost ? "受支持" : "不受支持")})";
             _apiText.Text = $"{_snapshot.ApiAssemblyVersion} — {_snapshot.ApiAssemblyPath}";
             _pidText.Text = _snapshot.ProcessId.ToString();
@@ -359,6 +357,8 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception exception)
         {
+            _snapshot = null;
+            ResetTowerReview();
             _completionErrorFlag = 1;
             ShowError("读取 ETABS 模型失败", exception);
         }
@@ -417,11 +417,6 @@ internal sealed partial class MainForm : Form
         }
 
         RefreshModel();
-        if (!_towerPreflightConfirmed)
-        {
-            await RunTowerOperationAsync(createGroups: false);
-            if (!_towerPreflightConfirmed) return;
-        }
 
         try
         {
@@ -469,6 +464,7 @@ internal sealed partial class MainForm : Form
             AppendLog($"ETABS PID：{_snapshot.ProcessId}");
             AppendLog($"期望模型：{expectedModel}");
             AppendLog($"输出目录：{_lastOutputDirectory}");
+            AppendLog("Tower 分配检查是独立可选操作，不阻塞本次梁表生成；如需检查请单独点击“检查 Tower 分配”。");
 
             var request = new WorkflowRunRequest(
                 runnerExecutable,
@@ -481,8 +477,7 @@ internal sealed partial class MainForm : Form
                 _exportRebarWorkbook.Checked,
                 _snapshot.ProcessId,
                 expectedModel,
-                TowerCheck: true,
-                TowerContinueOnReview: _towerPreflightConfirmed
+                TowerCheck: false
             );
 
             _runButton.Enabled = false;
@@ -492,7 +487,8 @@ internal sealed partial class MainForm : Form
             _openOutputButton.Enabled = false;
             _workflowCancellation = new CancellationTokenSource();
             SetStatus("便携只读工作流正在运行……");
-            var result = await _workflowRunner.RunAsync(request, AppendLog, _workflowCancellation.Token);
+            var result = await RunPreservingUiAsync(request, _workflowCancellation.Token);
+            RefreshModel();
             AppendLog(result.Cancelled ? "运行已由用户取消。" : $"运行结束，退出码：{result.ExitCode}");
             _completionErrorFlag = result.ExitCode == 0 ? 0 : 1;
             SetStatus(result.ExitCode == 0 ? "便携只读工作流完成。" : $"便携工作流未成功，退出码 {result.ExitCode}。");
@@ -511,11 +507,17 @@ internal sealed partial class MainForm : Form
             _runButton.Enabled = true;
             _towerCheckButton.Enabled = true;
             _cancelButton.Enabled = false;
+            CloseAfterRecoveryIfRequested();
         }
     }
 
     private void CancelWorkflow()
     {
+        if (_towerGroupMutationInProgress)
+        {
+            SetStatus("正在执行审查 Group 事务，请等待完成；不强制中断写入。");
+            return;
+        }
         _workflowCancellation?.Cancel();
         _workflowRunner.Cancel();
         _cancelButton.Enabled = false;
@@ -535,14 +537,20 @@ internal sealed partial class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
-        if (!_workflowRunner.IsRunning)
+        if (_towerGroupMutationInProgress)
+        {
+            eventArgs.Cancel = true;
+            SetStatus("正在执行审查 Group 事务，完成后可关闭插件。");
+            return;
+        }
+        if (!_workflowRunner.IsRunning && !_workflowUiProtected)
         {
             return;
         }
 
         var answer = MessageBox.Show(
             this,
-            "便携只读工作流仍在运行。关闭插件将终止由本插件启动的进程，是否继续？",
+            "工作流仍在运行。是否取消运行，并在恢复活动塔、单位和选择集后关闭插件？",
             "确认关闭",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning
@@ -554,6 +562,8 @@ internal sealed partial class MainForm : Form
         }
 
         _completionErrorFlag = 1;
+        eventArgs.Cancel = true;
+        _closeAfterRecovery = true;
         CancelWorkflow();
     }
 

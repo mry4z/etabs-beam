@@ -44,8 +44,8 @@ superseded_by:
 
 ## 3. 原始证据
 
-- [pytest.xml](../../../build/output/validation/20260725-doc-restructure/pytest.xml)，SHA-256 `fa58a453af5b2c68d9ac4da2d83158d9c8776c6374088f46fa6be6b538d8d851`
-- [coverage.xml](../../../build/output/validation/20260725-doc-restructure/coverage.xml)，SHA-256 `080fe94b5a18a11d0ff1576f04f2d9f88a5a7faa250ad2cf09786d3bf2bcf348`
+- [pytest.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260725-doc-restructure/pytest.xml>)（原工作区历史证据），SHA-256 `fa58a453af5b2c68d9ac4da2d83158d9c8776c6374088f46fa6be6b538d8d851`
+- [coverage.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260725-doc-restructure/coverage.xml>)（原工作区历史证据），SHA-256 `080fe94b5a18a11d0ff1576f04f2d9f88a5a7faa250ad2cf09786d3bf2bcf348`
 
 ## 4. 限制
 

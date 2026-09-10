@@ -76,9 +76,9 @@ Governance
 
 原始报告：
 
-- [普通文档审计](../../../build/output/validation/20260725-doc-restructure/docs-audit.md)
-- [严格文档审计](../../../build/output/validation/20260725-doc-restructure/docs-audit-strict.md)
-- [pytest JUnit](../../../build/output/validation/20260725-doc-restructure/pytest.xml)及[coverage XML](../../../build/output/validation/20260725-doc-restructure/coverage.xml)
+- [普通文档审计](<F:/2026/Research Study/etabs beam/build/output/validation/20260725-doc-restructure/docs-audit.md>)（原工作区历史证据）
+- [严格文档审计](<F:/2026/Research Study/etabs beam/build/output/validation/20260725-doc-restructure/docs-audit-strict.md>)（原工作区历史证据）
+- [pytest JUnit](<F:/2026/Research Study/etabs beam/build/output/validation/20260725-doc-restructure/pytest.xml>)及[coverage XML](<F:/2026/Research Study/etabs beam/build/output/validation/20260725-doc-restructure/coverage.xml>)（原工作区历史证据）
 
 默认测试在迁移结束后又以 `python -m pytest -q` 复跑并得到相同结果。审计器覆盖 Markdown 文件目标链接，不校验 heading anchor；本次另行确认活动文档没有 heading-anchor 链接，并人工抽查了权威入口和迁移导航。
 

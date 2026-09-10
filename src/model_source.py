@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from src.core.etabs_connector import api_values, model_paths_match
 from src.core.etabs_tower import EtabsTowerReader
@@ -82,10 +82,17 @@ class EtabsOapiReadSource:
         return self._geometry.extract(selection)
 
     def tower_assignment_report(
-        self, *, selection: str = "all", selected_beams: Iterable[str] | None = None,
+        self,
+        *,
+        selection: str = "all",
+        selected_beams: Iterable[str] | None = None,
+        progress: Callable[[int, str], None] | None = None,
     ) -> TowerAssignmentReport:
         return EtabsTowerReader(self.sap).read_report(
-            selection=selection, selected_beams=selected_beams, model_identity=self.identity(),
+            selection=selection,
+            selected_beams=selected_beams,
+            model_identity=self.identity(),
+            progress=progress,
         )
 
     def column_supports(self) -> dict[str, Point3D]:

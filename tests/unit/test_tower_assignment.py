@@ -108,6 +108,94 @@ def test_point_elevation_can_disambiguate_same_story_towers():
     assert report.records[0].candidate_towers == ("T1",)
 
 
+def test_same_elevation_disconnected_regions_use_topology_dominant_tower():
+    story = _table(
+        ("Tower", "Story", "Height"),
+        [("T1", "L1", "3000"), ("T2", "L1", "3000")],
+    )
+    points = _table(
+        ("UniqueName", "Tower", "Story", "Z", "GUID"),
+        [
+            ("P1", "T1", "L1", "0", "GP1"),
+            ("P2", "T1", "L1", "0", "GP2"),
+            ("P3", "T1", "L1", "0", "GP3"),
+            ("P4", "T2", "L1", "0", "GP4"),
+            ("P5", "T2", "L1", "0", "GP5"),
+            ("P6", "T2", "L1", "0", "GP6"),
+        ],
+    )
+    beams = _table(
+        ("UniqueName", "Story", "UniquePtI", "UniquePtJ", "GUID"),
+        [
+            ("B1", "L1", "P1", "P2", "GB1"),
+            ("B2", "L1", "P2", "P3", "GB2"),
+            ("B3", "L1", "P4", "P5", "GB3"),
+            ("B4", "L1", "P5", "P6", "GB4"),
+        ],
+    )
+
+    report = build_tower_assignment_report(story_rows=story, point_rows=points, beam_rows=beams)
+
+    assert report.status == PASS
+    assert report.issue_count == 0
+    assert all(record.expected_tower == record.actual_tower for record in report.records)
+
+
+def test_same_elevation_region_finds_single_misassigned_point():
+    story = _table(
+        ("Tower", "Story", "Height"),
+        [("T1", "L1", "3000"), ("T2", "L1", "3000")],
+    )
+    points = _table(
+        ("UniqueName", "Tower", "Story", "Z", "GUID"),
+        [
+            ("P1", "T2", "L1", "0", "GP1"),
+            ("P2", "T1", "L1", "0", "GP2"),
+            ("P3", "T2", "L1", "0", "GP3"),
+        ],
+    )
+    beams = _table(
+        ("UniqueName", "Story", "UniquePtI", "UniquePtJ", "GUID"),
+        [
+            ("B1", "L1", "P1", "P2", "GB1"),
+            ("B2", "L1", "P1", "P3", "GB2"),
+        ],
+    )
+
+    report = build_tower_assignment_report(story_rows=story, point_rows=points, beam_rows=beams)
+
+    assert report.status == REVIEW_REQUIRED
+    point = next(record for record in report.records if record.name == "P2")
+    assert point.expected_tower == "T2"
+    assert point.actual_tower == "T1"
+    assert point.status == "TOWER_POINT_ASSIGNMENT_MISMATCH"
+    assert any(record.name == "B1" and record.status == "TOWER_MIXED_ENDPOINT_ASSIGNMENT" for record in report.records)
+
+
+def test_same_elevation_tie_stays_review_required_instead_of_guessing():
+    story = _table(
+        ("Tower", "Story", "Height"),
+        [("T1", "L1", "3000"), ("T2", "L1", "3000")],
+    )
+    points = _table(
+        ("UniqueName", "Tower", "Story", "Z", "GUID"),
+        [
+            ("P1", "T1", "L1", "0", "GP1"),
+            ("P2", "T2", "L1", "0", "GP2"),
+        ],
+    )
+    beams = _table(
+        ("UniqueName", "Story", "UniquePtI", "UniquePtJ", "GUID"),
+        [("B1", "L1", "P1", "P2", "GB1")],
+    )
+
+    report = build_tower_assignment_report(story_rows=story, point_rows=points, beam_rows=beams)
+
+    assert report.status == REVIEW_REQUIRED
+    assert any(record.status == "TOWER_MIXED_ENDPOINT_ASSIGNMENT" for record in report.records)
+    assert any(record.status == "TOWER_EXPECTATION_UNRESOLVED" for record in report.records)
+
+
 def test_named_checker_facade_reuses_catalog_and_identity():
     story, points, beams, columns = _base_tables("T1", "T1")
     checker = TowerAssignmentChecker(model_identity={"model": "demo"})

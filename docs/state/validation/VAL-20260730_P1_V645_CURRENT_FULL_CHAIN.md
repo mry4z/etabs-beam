@@ -48,7 +48,7 @@ Frame Type 和未确认多截面跨；ACI 条款与项目规则也没有结构�
 | payload | `2.0` |
 
 原始 manifest：
-[run_manifest_20260730T072626Z-5101501d.json](../../../build/output/p1_v645_final_20260730/final_full_chain_verified/run_manifest_20260730T072626Z-5101501d.json)，
+[run_manifest_20260730T072626Z-5101501d.json](<F:/2026/Research Study/etabs beam/build/output/p1_v645_final_20260730/final_full_chain_verified/run_manifest_20260730T072626Z-5101501d.json>)（原工作区历史证据），
 SHA-256 `abb9fbccccd95963e95e63bdd50452fa8098d9b841432981fea0f5171f4e9f39`。
 
 manifest 的 `validity.state=CURRENT` 只表示其输入指纹未被后续注册 run 取代，不代表 P1 工程门禁已关闭。
@@ -100,13 +100,13 @@ payload 保留 3,018 个 raw/review/final Span 行，没有删除失败行：
 
 ## 6. 主要成果
 
-- [基础梁表](../../../build/output/p1_v645_final_20260730/final_full_chain_verified/beam_schedule_20260730_153909.xlsx)，
+- [基础梁表](<F:/2026/Research Study/etabs beam/build/output/p1_v645_final_20260730/final_full_chain_verified/beam_schedule_20260730_153909.xlsx>)（原工作区历史证据），
   SHA-256 `b248a625d746d020cbe69c1f53bbdead384623d5e0da49386baa0d64e3f5036d`
-- [主配筋复核工作簿](../../../build/output/p1_v645_final_20260730/final_full_chain_verified/beam_rebar_review_20260730_153932.xlsx)，
+- [主配筋复核工作簿](<F:/2026/Research Study/etabs beam/build/output/p1_v645_final_20260730/final_full_chain_verified/beam_rebar_review_20260730_153932.xlsx>)（原工作区历史证据），
   SHA-256 `3da8896d8196145abd3d9fc5d3eb9687885283ba65c51dd724b9a760bfaa43c6`
-- [SB 复核工作簿](../../../build/output/p1_v645_final_20260730/final_full_chain_verified/secondary_beam_schedule_20260730_153932.xlsx)，
+- [SB 复核工作簿](<F:/2026/Research Study/etabs beam/build/output/p1_v645_final_20260730/final_full_chain_verified/secondary_beam_schedule_20260730_153932.xlsx>)（原工作区历史证据），
   SHA-256 `1c353e67c34f48e6de15d2dd58ccd2909065005e25586ed10e31eb6f9f483b00`
-- [配筋 payload](../../../build/output/p1_v645_final_20260730/final_full_chain_verified/rebar_workbook_payload_20260730_153932.json)，
+- [配筋 payload](<F:/2026/Research Study/etabs beam/build/output/p1_v645_final_20260730/final_full_chain_verified/rebar_workbook_payload_20260730_153932.json>)（原工作区历史证据），
   SHA-256 `aabc78b0b388e882a8f88fbc46b28a25f869ae22ea4965d570639224b3459c97`
 
 工作簿已经逐张预览检查；它们是阻断/复核证据，不是可签发的工程配筋成果。

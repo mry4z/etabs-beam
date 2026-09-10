@@ -56,7 +56,7 @@ P1 仍不能关闭：408 个 Span 保持工程阻断或复核状态，ACI 条款
 | payload | `2.0` |
 
 原始 manifest：
-[run_manifest_20260730T103252Z-d96440dc.json](../../../build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/run_manifest_20260730T103252Z-d96440dc.json)，
+[run_manifest_20260730T103252Z-d96440dc.json](<F:/2026/Research Study/etabs beam/build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/run_manifest_20260730T103252Z-d96440dc.json>)（原工作区历史证据），
 SHA-256 `9153866a3b18d25e2b7f7d0c434ac5d9a465f347d41fbf71d489078ecc987fcd`。
 
 manifest 在新增本 Validation 和后续治理 Markdown 前生成；后续仅更新证据文档，不扩大本记录的代码证明范围。
@@ -92,13 +92,13 @@ manifest 在新增本 Validation 和后续治理 Markdown 前生成；后续仅�
 
 ## 5. 工作簿与视觉 QA
 
-- [主配筋 payload](../../../build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/rebar_workbook_payload_20260730_183432.json)，
+- [主配筋 payload](<F:/2026/Research Study/etabs beam/build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/rebar_workbook_payload_20260730_183432.json>)（原工作区历史证据），
   SHA-256 `3c281af18251b8b2245bfee63613200a3980afcd8db6c8679e0787c6ba9fa51e`。
-- [主配筋工作簿](../../../build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/beam_rebar_review_20260730_183432.xlsx)，
+- [主配筋工作簿](<F:/2026/Research Study/etabs beam/build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/beam_rebar_review_20260730_183432.xlsx>)（原工作区历史证据），
   SHA-256 `4bac3bfb736c3f0ef49bb0086502a4c8190e9c450ea2b241eb3d75fce24aeba9`。
-- [SB 工作簿](../../../build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/secondary_beam_schedule_20260730_183432.xlsx)，
+- [SB 工作簿](<F:/2026/Research Study/etabs beam/build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/secondary_beam_schedule_20260730_183432.xlsx>)（原工作区历史证据），
   SHA-256 `1e2df95ef18d630f16b5ed915c613e9697ae1650f02c1e37e20b9d3187328db8`。
-- [基础梁表](../../../build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/beam_schedule_20260730_183412.xlsx)，
+- [基础梁表](<F:/2026/Research Study/etabs beam/build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/beam_schedule_20260730_183412.xlsx>)（原工作区历史证据），
   SHA-256 `afafafce2fc52449050a489233adfd15bfbbbe5125d718b0a89cdc99a02f2a83`。
 
 主工作簿以独立 Node 进程逐张生成 7 张预览；SB 工作簿生成 2 张预览。视觉 QA 已覆盖原始输入、
@@ -116,9 +116,9 @@ SB 独立梁表含 1,402 个可交付自动行，42 个异常行保留在“复�
 | 三个生产 `.mjs` 的 bundled Node `--check` | 通过 |
 | 工作簿公式错误扫描 | 主表 0；SB 表 0 |
 
-- [pytest.xml](../../../build/output/validation/20260730-cover-aggregate-p1-p2-current-final/pytest.xml)，
+- [pytest.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260730-cover-aggregate-p1-p2-current-final/pytest.xml>)（原工作区历史证据），
   SHA-256 `0c9e926ad9d3caed09d117e69098f29b05a0dab12319af25cf5d1f2df7740f73`。
-- [coverage.xml](../../../build/output/validation/20260730-cover-aggregate-p1-p2-current-final/coverage.xml)，
+- [coverage.xml](<F:/2026/Research Study/etabs beam/build/output/validation/20260730-cover-aggregate-p1-p2-current-final/coverage.xml>)（原工作区历史证据），
   SHA-256 `6325d04010a0249719f5f82e4a5d07c72016fffd4bf8a0ee0ddd3a2ae86bcbbb`。
 
 ## 7. P1 Gate

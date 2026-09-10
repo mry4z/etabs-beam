@@ -12,6 +12,7 @@ import csv
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping, Sequence
@@ -84,6 +85,9 @@ class TowerAssignmentReport:
     active_tower_after: str = ""
     diagnostics: tuple[str, ...] = ()
     model_identity: Mapping[str, Any] | None = None
+    selected_objects_before: tuple[tuple[int, str], ...] = ()
+    selected_objects_after: tuple[tuple[int, str], ...] = ()
+    selection_restore_verified: bool | None = None
 
     @property
     def review_required(self) -> bool:
@@ -261,6 +265,68 @@ def _endpoint_graph(
     return graph
 
 
+def _same_level_graph(
+    point_rows: tuple[dict[str, str], ...],
+    graph: Mapping[str, set[str]],
+    *,
+    tolerance: float = 1.0,
+) -> dict[str, set[str]]:
+    """Keep only topology edges whose endpoints lie on the same level.
+
+    Tower regions are inferred from connectivity, not from the current Tower
+    labels.  Vertical members therefore do not merge two levels into one
+    region; horizontal members at the same finite Z do.
+    """
+
+    points = {
+        _first(row, "UniqueName", "Name", "Point"): row
+        for row in point_rows
+        if _first(row, "UniqueName", "Name", "Point")
+    }
+    elevations = {
+        name: _number(row, "Z", "GlobalZ")
+        for name, row in points.items()
+    }
+    result: dict[str, set[str]] = {name: set() for name in points}
+    for name, neighbours in graph.items():
+        z = elevations.get(name)
+        if z is None or not math.isfinite(z):
+            continue
+        for neighbour in neighbours:
+            other_z = elevations.get(neighbour)
+            if other_z is None or not math.isfinite(other_z):
+                continue
+            if abs(z - other_z) <= tolerance and neighbour in result:
+                result[name].add(neighbour)
+                result[neighbour].add(name)
+    return result
+
+
+def _same_level_regions(graph: Mapping[str, set[str]]) -> dict[str, tuple[str, ...]]:
+    """Return connected same-level regions, excluding isolated points."""
+
+    regions: dict[str, tuple[str, ...]] = {}
+    visited: set[str] = set()
+    for start in sorted(graph):
+        if start in visited:
+            continue
+        stack = [start]
+        component: set[str] = set()
+        while stack:
+            name = stack.pop()
+            if name in visited:
+                continue
+            visited.add(name)
+            component.add(name)
+            stack.extend(neighbour for neighbour in graph.get(name, ()) if neighbour not in visited)
+        if len(component) <= 1:
+            continue
+        region = tuple(sorted(component))
+        for name in region:
+            regions[name] = region
+    return regions
+
+
 def _infer_point_expectations(
     point_rows: tuple[dict[str, str], ...],
     catalog: tuple[TowerStoryCatalog, ...],
@@ -279,6 +345,7 @@ def _infer_point_expectations(
         name: _first(row, "Tower", "TowerName")
         for name, row in points.items()
     }
+    regions = _same_level_regions(graph)
     result: dict[str, tuple[str, tuple[str, ...], str]] = {}
     for name, row in points.items():
         story = _first(row, "Story", "StoryName")
@@ -294,28 +361,36 @@ def _infer_point_expectations(
             }
             if elevation_matches:
                 candidates &= elevation_matches
-        votes: dict[str, int] = {tower: 0 for tower in candidates}
-        for neighbour in graph.get(name, ()):
-            neighbour_tower = actual.get(neighbour, "")
-            if neighbour_tower in votes:
-                votes[neighbour_tower] += 1
-        if votes:
-            best = max(votes.values())
-            winners = tuple(sorted(tower for tower, count in votes.items() if count == best and best > 0))
+        region = regions.get(name, ())
+        region_counts: dict[str, int] = {}
+        for member in region:
+            tower = actual.get(member, "")
+            if tower:
+                region_counts[tower] = region_counts.get(tower, 0) + 1
+        if region_counts:
+            best = max(region_counts.values())
+            winners = tuple(sorted(tower for tower, count in region_counts.items() if count == best))
         else:
             winners = ()
-        if len(winners) == 1:
-            expected = winners[0]
-            reason = "由相连梁/柱/支撑端点的 Tower 多数推断。"
-        elif len(candidates) == 1:
+        if len(candidates) == 1:
             expected = next(iter(candidates))
             reason = "Story/标高在 Tower 目录中唯一匹配。"
+        elif len(winners) == 1:
+            if winners[0] in candidates:
+                expected = winners[0]
+                reason = "由同标高拓扑 Region 内 Tower 标签的唯一多数推断。"
+            else:
+                expected = ""
+                reason = "同标高拓扑 Region 的主导 Tower 与 Story 候选不一致。"
         elif not candidates:
             expected = ""
             reason = "Story 或标高无法匹配 Tower 目录。"
+        elif len(winners) > 1:
+            expected = ""
+            reason = "同标高拓扑 Region 内 Tower 标签并列，无法唯一判断。"
         else:
             expected = ""
-            reason = "同名 Story 对应多个 Tower，拓扑多数不足以唯一判断。"
+            reason = "同名 Story 对应多个 Tower，且没有足够的同标高拓扑 Region。"
         result[name] = (expected, tuple(sorted(candidates)), reason)
     return result
 
@@ -361,7 +436,8 @@ def build_tower_assignment_report(
 
     catalog_tuple = tuple(catalog or _catalog_from_rows(story))
     graph = _endpoint_graph((beams, columns, braces))
-    point_expectations = _infer_point_expectations(points, catalog_tuple, graph)
+    same_level_graph = _same_level_graph(points, graph)
+    point_expectations = _infer_point_expectations(points, catalog_tuple, same_level_graph)
     point_by_name = {
         _first(row, "UniqueName", "Name", "Point"): row
         for row in points

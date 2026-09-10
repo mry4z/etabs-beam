@@ -271,7 +271,9 @@ def test_structural_span_dxf_has_one_polyline_and_matching_arial_label(tmp_path)
     assert text.count("\nTEXT\n") == 5  # 2 labels plus 3 legend lines
     assert "7\nARIAL" in text
     csv = export_structural_spans_csv(result.spans, tmp_path / "spans.csv")
-    assert "F2-PB1-S2" in csv.read_text(encoding="utf-8-sig")
+    csv_text = csv.read_text(encoding="utf-8-sig")
+    assert "F2-PB1-2" in csv_text
+    assert "F2-PB1-S2" not in csv_text
 
 
 def test_story_groups_can_be_analyzed_in_parallel_with_same_result() -> None:

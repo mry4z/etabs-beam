@@ -47,7 +47,7 @@ superseded_by:
 ## 3. SQLite 成果
 
 快照：
-[etabs22_v645_public_tables.sqlite](../../../build/output/p2_sqlite_spike_20260730/etabs22_v645_public_tables.sqlite)，
+[etabs22_v645_public_tables.sqlite](<F:/2026/Research Study/etabs beam/build/output/p2_sqlite_spike_20260730/etabs22_v645_public_tables.sqlite>)（原工作区历史证据），
 大小 `22,347,776` bytes，SHA-256
 `2c2d909d057ad684a91ec14eaaf303124cd42a0a87ffa4c2a0f34c3753a5742e`。
 

@@ -8,5 +8,8 @@
   <ItemGroup>
     <Compile Include="../../plugins/etabs/BeamGenerator.EtabsPlugin/PluginModels.cs" Link="PluginModels.cs" />
     <Compile Include="../../plugins/etabs/BeamGenerator.EtabsPlugin/PythonWorkflowRunner.cs" Link="PythonWorkflowRunner.cs" />
+    <Compile Include="../../plugins/etabs/BeamGenerator.EtabsPlugin/UiSessionCheckpoint.cs" Link="UiSessionCheckpoint.cs" />
+    <Compile Include="../../plugins/etabs/BeamGenerator.EtabsPlugin/TowerReviewScope.cs" Link="TowerReviewScope.cs" />
+    <Compile Include="../../plugins/etabs/BeamGenerator.EtabsPlugin/TowerReportSummary.cs" Link="TowerReportSummary.cs" />
   </ItemGroup>
 </Project>

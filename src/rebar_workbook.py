@@ -535,8 +535,24 @@ def build_payload_from_schedule(
     payload["metadata"].setdefault("smf_end_max_spacing_mm", engine.project.smf_end_max_spacing_mm)
     payload["metadata"].setdefault("smf_max_longitudinal_ratio", engine.project.smf_max_longitudinal_ratio)
     payload["metadata"].setdefault("hanger_diameter_mm", engine.project.sb_hanger_diameter_mm)
+    _record_detailing_policy_metadata(payload["metadata"], engine)
     _apply_current_workbook_metadata(payload["metadata"])
     return payload
+
+
+def _record_detailing_policy_metadata(metadata: dict[str, Any], engine: BeamDetailingEngine) -> None:
+    """Record selection policy only after calculation, never just projection."""
+
+    metadata.update(
+        {
+            "project_policy_version": engine.project.version,
+            "enabled_diameters_mm": list(engine.project.enabled_diameters_mm),
+            "sb_top_preferred_max_diameter_mm": engine.project.sb_top_preferred_max_diameter_mm,
+            "sb_midspan_top_pair_strategy": "MATCHING_DIAMETER_PAIR",
+            "pb_preferred_max_stirrup_legs": engine.project.pb_preferred_max_stirrup_legs,
+            "pb_stirrup_selection_strategy": "PREFERRED_LEG_BAND_THEN_SPACING_THEN_DIAMETER",
+        }
+    )
 
 
 def redetail_payload(
@@ -686,6 +702,7 @@ def redetail_payload(
     output["metadata"]["smf_end_max_spacing_mm"] = engine.project.smf_end_max_spacing_mm
     output["metadata"]["smf_max_longitudinal_ratio"] = engine.project.smf_max_longitudinal_ratio
     output["metadata"]["hanger_diameter_mm"] = engine.project.sb_hanger_diameter_mm
+    _record_detailing_policy_metadata(output["metadata"], engine)
     _apply_current_workbook_metadata(output["metadata"])
     return output
 

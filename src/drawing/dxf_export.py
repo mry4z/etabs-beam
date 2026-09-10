@@ -8,12 +8,14 @@ Plan X/Y coordinates are kept in the model's millimetre export unit.
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from math import atan2, degrees
 from pathlib import Path
 from typing import Callable, Iterable
 
 from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.merge_comparison import MergeAngleDifference
+from src.core.section_review import canonical_span_id
 from src.utils.geometry import Point3D, distance
 
 _LAYERS = (
@@ -25,6 +27,14 @@ _LAYERS = (
     ("MERGE3_MID", 4),  # cyan: 3-degree group midpoint
     ("MERGE_LEGEND", 7),  # white: legend and metadata
 )
+
+
+@dataclass(frozen=True)
+class _BeamGroupExport:
+    beam: object
+    primary: bool
+    points: tuple[Point3D, ...]
+    label: str
 
 
 def _pairwise(points: tuple[Point3D, ...]) -> Iterable[tuple[Point3D, Point3D]]:
@@ -361,44 +371,19 @@ def export_beam_groups_dxf(
     otherwise it is secondary (green). IDs use ``[story]-PB/SB<n>-S1`` and are
     deterministic within each story/category for downstream CAD checks.
     """
-    logical_beams = list(logical_beams)
-    source_by_name = {beam.name: beam for beam in source_beams}
-    enriched: list[tuple[object, bool]] = []
-    for beam in logical_beams:
-        source_names = beam.source_names or (beam.name,)
-        primary = any(
-            source_by_name[name].point_i in column_point_names or source_by_name[name].point_j in column_point_names
-            for name in source_names
-            if name in source_by_name
-        )
-        enriched.append((beam, primary))
-    counters: dict[tuple[str, bool], int] = {}
-    ordered = sorted(
-        enriched,
-        key=lambda item: (
-            str(item[0].story),
-            not item[1],
-            min(point[0] for point in (item[0].path_points or (item[0].start, item[0].end))),
-            min(point[1] for point in (item[0].path_points or (item[0].start, item[0].end))),
-            item[0].name,
-        ),
-    )
+    ordered = _classify_and_number_beam_groups(logical_beams, source_beams, column_point_names)
     entities: list[str] = []
-    for beam, primary in ordered:
-        key = (str(beam.story), primary)
-        counters[key] = counters.get(key, 0) + 1
-        prefix = "PB" if primary else "SB"
-        number = counters[key]
-        beam_id = f"{beam.story}-{prefix}{number}-S1"
-        points = beam.path_points or (beam.start, beam.end)
-        color = 2 if primary else 3
-        layer = "BEAM_PRIMARY" if primary else "BEAM_SECONDARY"
+    for record in ordered:
+        beam = record.beam
+        color = 2 if record.primary else 3
+        layer = "BEAM_PRIMARY" if record.primary else "BEAM_SECONDARY"
+        points = record.points
         entities.extend(_polyline(layer, color, points))
-        entities.extend(_text(layer, color, _midpoint(points), beam_id, text_height, _text_angle(points)))
+        entities.extend(_text(layer, color, _midpoint(points), record.label, text_height, _text_angle(points)))
 
-    legend_x, legend_y = _legend_origin([_as_difference_stub(beam) for beam, _ in ordered])  # type: ignore[arg-type]
+    legend_x, legend_y = _legend_origin([_as_difference_stub(record.beam) for record in ordered])  # type: ignore[arg-type]
     legend = [
-        f"FULL BEAM GROUPS | total={len(ordered)} primary={sum(primary for _, primary in ordered)}",
+        f"FULL BEAM GROUPS | total={len(ordered)} primary={sum(record.primary for record in ordered)}",
         "YELLOW BEAM_PRIMARY = source beam touches a column joint",
         "GREEN BEAM_SECONDARY = no column joint at source endpoints",
         "ID format STORY-PB/SB-number-S1; each logical path is one polyline",
@@ -437,32 +422,17 @@ def export_beam_groups_csv(
     output_path: str | Path,
 ) -> Path:
     """Write the generated PB/SB IDs and source/coordinate mapping beside DXF."""
-    logical_beams = list(logical_beams)
-    source_by_name = {beam.name: beam for beam in source_beams}
-    enriched: list[tuple[object, bool]] = []
-    for beam in logical_beams:
-        names = beam.source_names or (beam.name,)
-        primary = any(
-            source_by_name[name].point_i in column_point_names or source_by_name[name].point_j in column_point_names
-            for name in names
-            if name in source_by_name
-        )
-        enriched.append((beam, primary))
-    ordered = sorted(enriched, key=lambda item: (str(item[0].story), not item[1], item[0].name))
-    counters: dict[tuple[str, bool], int] = {}
+    ordered = _classify_and_number_beam_groups(logical_beams, source_beams, column_point_names)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.writer(stream)
         writer.writerow(["梁编号", "楼层", "主次梁", "源对象", "路径点坐标"])
-        for beam, primary in ordered:
-            key = (str(beam.story), primary)
-            counters[key] = counters.get(key, 0) + 1
-            prefix = "PB" if primary else "SB"
-            beam_id = f"{beam.story}-{prefix}{counters[key]}-S1"
-            points = beam.path_points or (beam.start, beam.end)
-            serialized = ";".join(f"{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}" for p in points)
-            writer.writerow([beam_id, beam.story, prefix, "+".join(beam.source_names or (beam.name,)), serialized])
+        for record in ordered:
+            beam = record.beam
+            prefix = "PB" if record.primary else "SB"
+            serialized = ";".join(f"{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}" for p in record.points)
+            writer.writerow([record.label, beam.story, prefix, "+".join(beam.source_names or (beam.name,)), serialized])
     return path
 
 
@@ -482,7 +452,12 @@ def export_structural_spans_dxf(
         layer = "BEAM_PRIMARY" if primary else "BEAM_SECONDARY"
         color = 2 if primary else 3
         entities.extend(_polyline(layer, color, span.path_points))
-        label = span_id_resolver(span) if span_id_resolver else span.span_id
+        label = span_id_resolver(span) if span_id_resolver else canonical_span_id(
+            span.story,
+            span.beam_type,
+            span.line_number,
+            span.span_index,
+        )
         entities.extend(
             _text(layer, color, _midpoint(span.path_points), label, text_height, _text_angle(span.path_points))
         )
@@ -534,7 +509,12 @@ def export_structural_spans_csv(
         writer.writerow(["梁编号", "楼层", "主次梁", "弧形", "悬挑", "源对象", "路径点坐标"])
         for span in spans:
             coordinates = ";".join(f"{p[0]:.3f},{p[1]:.3f},{p[2]:.3f}" for p in span.path_points)
-            label = span_id_resolver(span) if span_id_resolver else span.span_id
+            label = span_id_resolver(span) if span_id_resolver else canonical_span_id(
+                span.story,
+                span.beam_type,
+                span.line_number,
+                span.span_index,
+            )
             source_names = (
                 [source_name_resolver(name) for name in span.source_objects]
                 if source_name_resolver
@@ -602,6 +582,53 @@ def _legend_origin_from_paths(paths: Iterable[tuple[Point3D, ...]]) -> tuple[flo
     if not points:
         return (0.0, 0.0)
     return (min(point[0] for point in points), max(point[1] for point in points))
+
+
+def _classify_and_number_beam_groups(
+    logical_beams: Iterable[object],
+    source_beams: Iterable[object],
+    column_point_names: set[str],
+) -> tuple[_BeamGroupExport, ...]:
+    """Share DXF/CSV classification, spatial order, and legacy ``-S1`` IDs."""
+
+    source_by_name = {beam.name: beam for beam in source_beams}
+    enriched: list[tuple[object, bool, tuple[Point3D, ...]]] = []
+    for beam in logical_beams:
+        source_names = beam.source_names or (beam.name,)
+        primary = any(
+            source_by_name[name].point_i in column_point_names or source_by_name[name].point_j in column_point_names
+            for name in source_names
+            if name in source_by_name
+        )
+        points = tuple(beam.path_points or (beam.start, beam.end))
+        enriched.append((beam, primary, points))
+
+    # Keep the established DXF order as the single order consumed by both exports.
+    ordered = sorted(
+        enriched,
+        key=lambda item: (
+            str(item[0].story),
+            not item[1],
+            min(point[0] for point in item[2]),
+            min(point[1] for point in item[2]),
+            str(item[0].name),
+        ),
+    )
+    counters: dict[tuple[str, bool], int] = {}
+    records: list[_BeamGroupExport] = []
+    for beam, primary, points in ordered:
+        key = (str(beam.story), primary)
+        counters[key] = counters.get(key, 0) + 1
+        prefix = "PB" if primary else "SB"
+        records.append(
+            _BeamGroupExport(
+                beam=beam,
+                primary=primary,
+                points=points,
+                label=f"{beam.story}-{prefix}{counters[key]}-S1",
+            )
+        )
+    return tuple(records)
 
 
 def _as_difference_stub(beam: object) -> MergeAngleDifference:

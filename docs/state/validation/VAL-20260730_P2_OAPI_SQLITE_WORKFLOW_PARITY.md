@@ -43,8 +43,8 @@ JSON/CSV 成果逐字节一致。该结论不扩展到非矩形截面、ETABS 23
 | 源 EDB SHA-256 | `20347ccc0e3960ef10c91b107776b19dc1676648c8b621b79f8925202aff9c41` |
 | ETABS / API | `22.7.0` / `2.10.0.0` |
 
-[快照](../../../build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v5.sqlite)；
-[manifest](../../../build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v5.sqlite.manifest.json)，
+[快照](<F:/2026/Research Study/etabs beam/build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v5.sqlite>)（原工作区历史证据）；
+[manifest](<F:/2026/Research Study/etabs beam/build/output/p2_sqlite_domain_20260730/etabs22_v645_domain_v5.sqlite.manifest.json>)（原工作区历史证据），
 manifest SHA-256 `9b2191a0ebb51fdf41a1fe73de7cdd5b57293da13bbfb482f62bf35376658170`。
 
 v5 含 15 张表：4,094 条精确梁几何、1,441 个精确支承、4,094 个 FrameState、
@@ -62,9 +62,9 @@ v5 含 15 张表：4,094 条精确梁几何、1,441 个精确支承、4,094 个 
 | 阻断级拓扑诊断 | 0 | 0 |
 | 主/SB 公式错误扫描 | 0 / 0 | 0 / 0 |
 
-- [SQLite run manifest](../../../build/output/p2_sqlite_workflow_20260730/offline_v5_accepted/run_manifest_20260730T095035Z-d1abb748.json)，
+- [SQLite run manifest](<F:/2026/Research Study/etabs beam/build/output/p2_sqlite_workflow_20260730/offline_v5_accepted/run_manifest_20260730T095035Z-d1abb748.json>)（原工作区历史证据），
   SHA-256 `8f7e8479175c4ab5f1656f2911572985300f0cbabbbe827f45325d9c055ae2cf`。
-- [OAPI run manifest](../../../build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/run_manifest_20260730T103252Z-d96440dc.json)，
+- [OAPI run manifest](<F:/2026/Research Study/etabs beam/build/output/p1_v645_etabs_cover_25mm_20260730/live_readonly_retry_accepted/run_manifest_20260730T103252Z-d96440dc.json>)（原工作区历史证据），
   SHA-256 `9153866a3b18d25e2b7f7d0c434ac5d9a465f347d41fbf71d489078ecc987fcd`。
 
 离线 run 后仅增加了预览瞬时原生崩溃重试；领域读取、拓扑、payload 和工作簿内容逻辑未变。当前代码身份
