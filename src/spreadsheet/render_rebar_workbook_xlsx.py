@@ -64,7 +64,7 @@ COLORS = {
     "border": "B7C9D6",
     "red": "C00000",
     "pale_red": "FCE4D6",
-    "text": "1F1F1F",
+    "text": "000000",
 }
 THIN_BORDER = Border(
     left=Side(style="thin", color=COLORS["border"]),
@@ -73,6 +73,21 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color=COLORS["border"]),
 )
 _NUMBER_PATTERN = re.compile(r"(\d+)")
+
+# These checks remain in the JSON/audit payload, but are outside the current
+# workbook colour gate.  The project has deferred anchorage, lap splice and
+# torsion-perimeter verification to a future phase, and has already confirmed
+# the ETABS Frame Design design-force source for the current phase.
+NON_CURRENT_REVIEW_CODES = frozenset(
+    {
+        "ANCHORAGE_UNVERIFIED",
+        "SPLICE_UNVERIFIED",
+        "TORSION_PERIMETER_LAYOUT_UNVERIFIED",
+        "CAPACITY_SHEAR_SOURCE_UNVERIFIED",
+        "SMF_DESIGN_SOURCE_UNVERIFIED",
+        "SMF_SUPPORT_FACE_UNRESOLVED",
+    }
+)
 
 
 def _natural_key(value: Any) -> tuple[Any, ...]:
@@ -109,6 +124,15 @@ def _display_face(value: Any) -> str:
     text = str(value or "").strip()
     if not text or text.casefold() in {"n.a.", "n/a", "na", "none", "null"}:
         return "—"
+    return text
+
+
+def _display_stirrup(value: Any) -> str:
+    """Format visible stirrup spacing with the conventional centre-to-centre suffix."""
+
+    text = str(value or "").strip()
+    if text and "@" in text and not re.search(r"c\s*/\s*c\s*$", text, flags=re.IGNORECASE):
+        return f"{text} c/c"
     return text
 
 
@@ -173,15 +197,26 @@ def _merged_row(
     return row
 
 
+def _current_review_tokens(value: Any) -> list[str]:
+    """Return status tokens that still participate in the current colour gate."""
+
+    tokens: list[str] = []
+    for raw_token in re.split(r"[;,|]", str(value or "")):
+        token = raw_token.strip()
+        if token and token.upper() not in NON_CURRENT_REVIEW_CODES:
+            tokens.append(token)
+    return tokens
+
+
 def _exception_reason(*rows: Mapping[str, Any]) -> str:
     values: dict[str, Any] = {}
     for row in rows:
         values.update(row)
     status = str(values.get("engine_status", "")).strip()
     reasons: list[str] = []
-    if status and status.upper() != "OK":
+    if status and status.upper() != "OK" and status.upper() not in NON_CURRENT_REVIEW_CODES:
         reasons.append(status)
-    blocking = str(values.get("constructability_blocking_statuses", "")).strip()
+    blocking = "; ".join(_current_review_tokens(values.get("constructability_blocking_statuses")))
     if blocking:
         reasons.append(blocking)
     if values.get("bottom_reinforcement_strategy") != BOTTOM_REINFORCEMENT_STRATEGY:
@@ -192,6 +227,8 @@ def _exception_reason(*rows: Mapping[str, Any]) -> str:
         str(values.get(key, ""))
         for key in ("warnings", "engine_warnings", "review_note", "capacity_shear_status")
     ).casefold()
+    for code in NON_CURRENT_REVIEW_CODES:
+        warning_text = warning_text.replace(code.casefold(), "")
     warning_tokens = (
         "review",
         "conflict",
@@ -232,12 +269,12 @@ def _row_values(row: Mapping[str, Any], beam_type: str) -> dict[str, Any]:
     if beam_type == "PB":
         values.update(
             {
-                "s2": str(row.get("s2", row.get("s2_text", ""))),
-                "s1": str(row.get("s1", row.get("s1_text", ""))),
+                "s2": _display_stirrup(row.get("s2", row.get("s2_text", ""))),
+                "s1": _display_stirrup(row.get("s1", row.get("s1_text", ""))),
             }
         )
     else:
-        values["stirrups"] = str(
+        values["stirrups"] = _display_stirrup(
             row.get("stirrups")
             or row.get("s1")
             or row.get("s2")
@@ -458,7 +495,7 @@ def render_rebar_workbook_xlsx(
         3,
         1,
         last_column,
-        "All displayed cells are static values. Red rows are retained candidates requiring engineering/manual review; see cell comments and backend JSON audit.",
+        "All displayed cells are static values. Red rows require current-phase review; deferred checks remain in the backend JSON audit.",
         fill=COLORS["gray"],
         font=Font(color="595959", italic=True, size=9),
         alignment=Alignment(vertical="center", wrap_text=True),

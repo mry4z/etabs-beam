@@ -35,6 +35,19 @@ if (!new Set(["PB", "SB"]).has(beamType)) {
   throw new Error(`unknown beam type: ${beamType}`);
 }
 
+// These checks remain in the JSON/audit payload, but are outside the current
+// workbook colour gate.  The project has deferred anchorage, lap splice and
+// torsion-perimeter verification to a future phase, and has already confirmed
+// the ETABS Frame Design design-force source for the current phase.
+const NON_CURRENT_REVIEW_CODES = new Set([
+  "ANCHORAGE_UNVERIFIED",
+  "SPLICE_UNVERIFIED",
+  "TORSION_PERIMETER_LAYOUT_UNVERIFIED",
+  "CAPACITY_SHEAR_SOURCE_UNVERIFIED",
+  "SMF_DESIGN_SOURCE_UNVERIFIED",
+  "SMF_SUPPORT_FACE_UNRESOLVED",
+]);
+
 const columns = beamType === "PB"
   ? [
       ["beam_line", "BEAM LINE"], ["beam_no", "SPAN"],
@@ -108,12 +121,21 @@ function displayFace(value) {
   return !text || ["n.a.", "n/a", "na", "none", "null"].includes(text.toLowerCase()) ? "—" : text;
 }
 
+function displayStirrup(value) {
+  const text = String(value ?? "").trim();
+  return text && text.includes("@") && !/c\s*\/\s*c\s*$/i.test(text) ? `${text} c/c` : text;
+}
+
 function exceptionReason(...rows) {
   const values = Object.assign({}, ...rows);
   const reasons = [];
   const status = String(values.engine_status ?? "").trim();
-  if (status && status.toUpperCase() !== "OK") reasons.push(status);
-  const blocking = String(values.constructability_blocking_statuses ?? "").trim();
+  if (status && status.toUpperCase() !== "OK" && !NON_CURRENT_REVIEW_CODES.has(status.toUpperCase())) reasons.push(status);
+  const blocking = String(values.constructability_blocking_statuses ?? "")
+    .split(/[;,|]/)
+    .map((token) => token.trim())
+    .filter((token) => token && !NON_CURRENT_REVIEW_CODES.has(token.toUpperCase()))
+    .join("; ");
   if (blocking) reasons.push(blocking);
   if (values.bottom_reinforcement_strategy !== "FULL_SPAN_UNIFORM_PER_SPAN") {
     reasons.push("LEGACY_REDETAIL_REQUIRED");
@@ -121,9 +143,10 @@ function exceptionReason(...rows) {
   if (values.bottom_uniform_regions_match === false) {
     reasons.push("BOTTOM_LAYOUT_NOT_UNIFORM_WITHIN_SPAN");
   }
-  const warningText = ["warnings", "engine_warnings", "review_note", "capacity_shear_status"]
+  let warningText = ["warnings", "engine_warnings", "review_note", "capacity_shear_status"]
     .map((key) => String(values[key] ?? "").toLowerCase())
     .join(" ");
+  for (const code of NON_CURRENT_REVIEW_CODES) warningText = warningText.split(code.toLowerCase()).join("");
   for (const token of ["review", "conflict", "failed", "fail", "unverified", "error", "block", "missing", "no_results", "not_unified", "requires", "需复核", "阻断"]) {
     if (warningText.includes(token)) {
       reasons.push(`WARNING:${token}`);
@@ -148,10 +171,10 @@ function rowValues(row) {
     face: displayFace(row.face),
   };
   if (beamType === "PB") {
-    values.s2 = String(row.s2 ?? row.s2_text ?? "");
-    values.s1 = String(row.s1 ?? row.s1_text ?? "");
+    values.s2 = displayStirrup(row.s2 ?? row.s2_text ?? "");
+    values.s1 = displayStirrup(row.s1 ?? row.s1_text ?? "");
   } else {
-    values.stirrups = String(row.stirrups ?? row.s1 ?? row.s2 ?? row.s1_text ?? row.s2_text ?? "");
+    values.stirrups = displayStirrup(row.stirrups ?? row.s1 ?? row.s2 ?? row.s1_text ?? row.s2_text ?? "");
   }
   return values;
 }
@@ -183,7 +206,7 @@ const colors = {
   red: "#C00000",
   paleRed: "#FCE4D6",
   border: "#B7C9D6",
-  text: "#1F1F1F",
+  text: "#000000",
 };
 const border = { preset: "all", style: "thin", color: colors.border };
 const center = {
@@ -244,7 +267,7 @@ styleMergedLabel(sheet, 2, 1, columns.length,
   { fill: colors.lightBlue, font: { color: colors.navy, size: 9 }, wrapText: true, verticalAlignment: "center" });
 sheet.getRange("A2").format.rowHeight = 32;
 styleMergedLabel(sheet, 3, 1, columns.length,
-  "All displayed cells are static values. Red rows are retained candidates requiring engineering/manual review; see cell comments and backend JSON audit.",
+  "All displayed cells are static values. Red rows require current-phase review; deferred checks remain in the backend JSON audit.",
   { fill: colors.gray, font: { color: "#595959", italic: true, size: 9 }, wrapText: true, verticalAlignment: "center" });
 sheet.getRange("A3").format.rowHeight = 28;
 

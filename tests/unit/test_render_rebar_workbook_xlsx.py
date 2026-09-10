@@ -7,6 +7,8 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from src.spreadsheet.render_rebar_workbook_xlsx import (
+    _display_stirrup,
+    _exception_reason,
     _rebar_area_formula,
     _scan_formula_errors,
     _stirrup_at_formula,
@@ -130,6 +132,8 @@ def test_floor_and_numeric_span_sorting_and_merge_scope(tmp_path: Path) -> None:
     assert sheet["B8"].value == "B2-10"
     assert sheet["C7"].value == 300 and isinstance(sheet["C7"].value, int)
     assert sheet["D7"].value == 600 and isinstance(sheet["D7"].value, int)
+    assert sheet["I7"].value == "2T10@100 c/c"
+    assert sheet["J7"].value == "2T10@200 c/c"
     assert sheet["K7"].value == 2 and isinstance(sheet["K7"].value, int)
     assert sheet["L7"].value == "—"
     assert not any(str(value).startswith("B7:B8") for value in sheet.merged_cells.ranges)
@@ -140,6 +144,9 @@ def test_exception_candidate_is_retained_red_and_commented(tmp_path: Path) -> No
     output = _render(tmp_path)
     workbook = load_workbook(output, data_only=False)
     sheet = workbook["整理梁表"]
+    normal_row = next(row for row in _data_rows(sheet) if sheet.cell(row=row, column=2).value == "B2-2")
+    assert sheet.cell(row=normal_row, column=2).font.color.type == "rgb"
+    assert sheet.cell(row=normal_row, column=2).font.color.rgb.endswith("000000")
     row = next(row for row in _data_rows(sheet) if sheet.cell(row=row, column=2).value == "B11-1")
     assert sheet.cell(row=row, column=8).value == "4T25"
     assert sheet.cell(row=row, column=2).comment is not None
@@ -147,6 +154,40 @@ def test_exception_candidate_is_retained_red_and_commented(tmp_path: Path) -> No
     assert sheet.cell(row=row, column=2).font.color.type == "rgb"
     assert sheet.cell(row=row, column=2).font.color.rgb.endswith("C00000")
     workbook.close()
+
+
+def test_stirrup_display_adds_center_to_center_suffix_once() -> None:
+    assert _display_stirrup("T10@200") == "T10@200 c/c"
+    assert _display_stirrup("T10@200 c/c") == "T10@200 c/c"
+    assert _display_stirrup("T10@200 C / C") == "T10@200 C / C"
+
+
+def test_deferred_constructability_and_confirmed_force_source_are_not_current_red_gate() -> None:
+    row = _row()
+    row.update(
+        {
+            "constructability_blocking_statuses": (
+                "ANCHORAGE_UNVERIFIED; SPLICE_UNVERIFIED; "
+                "TORSION_PERIMETER_LAYOUT_UNVERIFIED"
+            ),
+            "engine_warnings": (
+                "CAPACITY_SHEAR_SOURCE_UNVERIFIED; SMF_DESIGN_SOURCE_UNVERIFIED; "
+                "SMF_SUPPORT_FACE_UNRESOLVED"
+            ),
+            "capacity_shear_status": "CAPACITY_SHEAR_SOURCE_UNVERIFIED",
+        }
+    )
+
+    assert _exception_reason(row) == ""
+
+
+def test_current_phase_engine_or_layout_issue_still_marks_row_for_review() -> None:
+    row = _row()
+    row["constructability_blocking_statuses"] = "ANCHORAGE_UNVERIFIED; BEAM_LINE_COORDINATION_BLOCKED"
+
+    reason = _exception_reason(row)
+
+    assert "BEAM_LINE_COORDINATION_BLOCKED" in reason
 
 
 def test_sb_projection_has_exactly_eleven_columns(tmp_path: Path) -> None:
@@ -162,6 +203,7 @@ def test_sb_projection_has_exactly_eleven_columns(tmp_path: Path) -> None:
     assert sheet["I6"].value == "STIRRUPS"
     assert sheet["J6"].value == "LEGS"
     assert sheet["K6"].value == "EACH SIDE"
+    assert sheet["I7"].value == "2T10@200 c/c"
     assert sheet["L1"].value is None
     workbook.close()
 
