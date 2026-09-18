@@ -41,18 +41,21 @@ from src.core.section_review import (
 )
 from src.core.topology_audit import build_requires_split_records, write_requires_split_audit
 from src.core.tower_assignment import compact_tower_assignment_summary
+from src.drawing.beam_result_dxf import export_beam_result_and_section_dxfs
 from src.drawing.dxf_export import export_requires_split_dxf, export_structural_spans_csv, export_structural_spans_dxf
 from src.design.etabs_result import EtabsResultProvider
 from src.design.provider import BeamDesignResult, DesignResultStatus
 from src.excel_export import export_beam_schedule
 from src.excel_span_adapter import build_span_schedule
 from src.model_source import EtabsOapiReadSource
+from src.output_layout import model_name_from_path, resolve_output_layout
 from src.rebar_workbook import (
     build_rebar_workbook_payload_from_domain,
     build_secondary_schedule_payload,
     run_secondary_workbook_builder,
     run_workbook_builder,
     write_rebar_payload,
+    redetail_payload,
 )
 from src.run_manifest import RunManifest, artifact_record, resolve_model_file, sha256_file
 from src.tower_preflight import run_tower_preflight, validate_tower_options
@@ -62,14 +65,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        summary = _runtime_self_test(args) if args.runtime_self_test else run(args)
+        if args.replay_payload is not None:
+            summary = _replay_payload(args)
+        else:
+            summary = _runtime_self_test(args) if args.runtime_self_test else run(args)
     except Exception as exc:  # CLI boundary: preserve a concise machine-readable error.
         print(json.dumps({"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
         return 2
-    if "tower_assignment" in summary:
-        print(json.dumps(_display_summary(summary), ensure_ascii=False), flush=True)
-    else:
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(json.dumps(_display_summary(summary), ensure_ascii=False), flush=True)
     return 0
 
 
@@ -88,6 +91,77 @@ def _tower_progress(percent: int, message: str) -> None:
     print(f"[tower] [{bar}] {bounded:3d}% {message}", flush=True)
 
 
+def _beam_progress(percent: int, message: str) -> None:
+    """Render throttled ordinary-workflow phase progress.
+
+    The callback may be invoked from per-object ETABS reads.  Keeping the
+    last rendered integer here makes those reads visible without producing a
+    line for every beam and prevents a later phase from moving the bar back.
+    """
+
+    state = getattr(_beam_progress, "_state", None)
+    if state is None:
+        state = {"percent": -1}
+        _beam_progress._state = state
+    bounded = max(0, min(100, int(percent)))
+    if bounded < state["percent"] or bounded == state["percent"]:
+        return
+    state["percent"] = bounded
+    width = 24
+    filled = round(width * bounded / 100)
+    if filled >= width:
+        bar = "=" * width
+    elif filled <= 0:
+        bar = ">" + "-" * (width - 1)
+    else:
+        bar = "=" * (filled - 1) + ">" + "-" * (width - filled)
+    print(f"[beam] [{bar}] {bounded:3d}% {message}", flush=True)
+
+
+def _scaled_progress(
+    progress: Callable[[int, str], None] | None,
+    start: int,
+    end: int,
+) -> Callable[[int, str], None] | None:
+    """Map a source-local 0..100 progress callback into one workflow phase."""
+
+    if progress is None:
+        return None
+
+    def emit(percent: int, message: str) -> None:
+        bounded = max(0, min(100, int(percent)))
+        progress(start + round((end - start) * bounded / 100), message)
+
+    return emit
+
+
+def _compact_workflow_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Keep the successful ordinary CLI line useful without dumping audits."""
+
+    dxf_issues = summary.get("beam_result_dxf_issues") or ()
+    error_count = len(dxf_issues) + int(summary.get("blocking_topology_diagnostics", 0) or 0)
+    compact: dict[str, Any] = {
+        "status": summary.get("status"),
+        "mode": summary.get("mode"),
+        "beams": summary.get("beams", 0),
+        "spans": summary.get("spans", 0),
+        "errors": error_count,
+        "outputs": summary.get("outputs") or {},
+    }
+    for key in (
+        "run_id",
+        "beam_lines",
+        "design_result_beams",
+        "requires_split_actions",
+        "unconfirmed_multi_section_spans",
+    ):
+        if key in summary:
+            compact[key] = summary[key]
+    if dxf_issues:
+        compact["beam_result_dxf_errors"] = len(dxf_issues)
+    return compact
+
+
 def _display_summary(summary: dict[str, Any]) -> dict[str, Any]:
     """Replace the stdout Tower payload with a compact UI-safe summary."""
 
@@ -99,6 +173,14 @@ def _display_summary(summary: dict[str, Any]) -> dict[str, Any]:
             tower,
             report_path=outputs.get("tower_assignment_json"),
         )
+        return displayed
+    if summary.get("mode") in {
+        "read-only",
+        "writeback",
+        "read-only-snapshot",
+        "prepare-section-review-groups",
+    }:
+        return _compact_workflow_summary(summary)
     return displayed
 
 
@@ -134,11 +216,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     config = load_config(args.config, etabs_dll_path=args.etabs_api)
     config = _ensure_etabs_dll(config, args.etabs_api)
-    output_dir = Path(args.output_dir or config.output.reports_dir / "topology_run")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    registry_dir = Path(args.manifest_registry or output_dir.parent / "manifests")
+    model_hint = getattr(args, "expected_model", None) or getattr(args, "source_model", None) or "model"
+    layout = resolve_output_layout(
+        args.output_dir or config.output.reports_dir,
+        model_hint,
+    )
+    output_dir = layout.root
+    data_dir = layout.data
+    registry_dir = Path(args.manifest_registry or data_dir / "manifests")
     manifest = RunManifest(
-        output_dir=output_dir,
+        output_dir=data_dir,
         registry_dir=registry_dir,
         config=config,
         arguments=vars(args),
@@ -148,10 +235,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             getattr(args, key, False)
             for key in ("tower_check", "tower_preflight_only", "tower_create_groups")
         )
+        if not tower_requested:
+            _beam_progress._state = {"percent": -1}
+        progress = _tower_progress if tower_requested else _beam_progress
         summary = (
-            _run_impl(args, config, output_dir, progress=_tower_progress)
-            if tower_requested
-            else _run_impl(args, config, output_dir)
+            _run_impl(args, config, output_dir, progress=progress)
         )
     except Exception as exc:
         manifest.finalize(
@@ -162,9 +250,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     manifest_path = manifest.finalize(status="SUCCESS", summary=summary)
     summary["run_id"] = manifest.run_id
     summary["outputs"]["manifest"] = str(manifest_path)
-    (output_dir / "topology_summary.json").write_text(
+    summary.setdefault("outputs", {})["topology_summary"] = str(data_dir / "topology_summary.json")
+    (data_dir / "topology_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    if not tower_requested:
+        _beam_progress(100, "写审计/完成")
     return summary
 
 
@@ -176,10 +267,18 @@ def _run_impl(
     progress: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     validate_tower_options(args)
+    data_dir = output_dir / "_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    # Tower preflight owns the complete 0..100 progress range.  Do not feed
+    # its renderer into the ordinary geometry/design phases before the Tower
+    # reader starts, otherwise the bar would visibly jump back to 0%.
+    phase_progress = None if progress is _tower_progress else progress
     if args.snapshot_input is not None:
         from src.snapshot.workflow import run_snapshot_workflow
 
-        return run_snapshot_workflow(args, config, output_dir)
+        if phase_progress is not None:
+            phase_progress(0, "读取 SQLite 快照")
+        return run_snapshot_workflow(args, config, output_dir, progress=phase_progress)
     if args.pid is None:
         raise ValueError("ETABS OAPI 工作流要求 --pid；离线工作流应提供 --snapshot-input。")
     if args.allow_partial_writeback and not args.writeback:
@@ -190,13 +289,21 @@ def _run_impl(
         raise ValueError("需求等价验证必须同时指定 --run-analysis 和 --run-design。")
     if (
         args.writeback
-        and (args.export_excel or args.export_rebar_workbook)
+        and (
+            args.export_excel
+            or args.export_rebar_workbook
+            or getattr(args, "export_beam_result_dxf", False)
+        )
         and not (args.run_analysis and args.run_design)
     ):
         raise ValueError(
             "写回后导出设计结果必须同时指定 --run-analysis 和 --run-design，" "禁止导出写回前的旧设计结果。"
         )
+    if phase_progress is not None:
+        phase_progress(0, "附加 ETABS")
     sap, actual_model = _attach(args.pid, config.etabs.dll_path)
+    if phase_progress is not None:
+        phase_progress(5, "ETABS 已附加，读取模型身份")
     durable_model = resolve_model_file(actual_model)
     model_input_sha256 = sha256_file(durable_model) if durable_model else None
     environment = {
@@ -235,8 +342,17 @@ def _run_impl(
             durable_model_path=durable_model,
             expected_model_sha256=model_input_sha256,
         )
-        beams = read_source.extract_beams(args.selection)
-        tower_result = run_tower_preflight(args, read_source, beams, output_dir, progress=progress)
+        extraction_progress = _scaled_progress(phase_progress, 5, 20)
+        if extraction_progress is None:
+            beams = read_source.extract_beams(args.selection)
+        else:
+            beams = read_source.extract_beams(
+                args.selection,
+                progress=extraction_progress,
+            )
+        if phase_progress is not None:
+            phase_progress(20, f"读取几何完成（{len(beams)} 梁）")
+        tower_result = run_tower_preflight(args, read_source, beams, data_dir, progress=progress)
         if tower_result is not None and (args.tower_preflight_only or args.tower_create_groups):
             return {
                 "status": "OK",
@@ -246,6 +362,8 @@ def _run_impl(
                 **tower_result,
             }
         column_supports = read_source.column_supports()
+        if phase_progress is not None:
+            phase_progress(23, f"读取支承完成（{len(column_supports)} 个）")
         structural = analyze_beam_lines(
             beams,
             set(column_supports),
@@ -258,6 +376,8 @@ def _run_impl(
             ),
             column_support_coordinates=column_supports,
         )
+        if phase_progress is not None:
+            phase_progress(35, f"拓扑划分完成（{len(structural.spans)} Span）")
         writeback = EtabsWriteback(sap)
         states = read_source.frame_states(beams)
         plan = build_writeback_plan(
@@ -279,32 +399,34 @@ def _run_impl(
             beams,
             confirmed_span_ids=confirmed_section_spans,
         )
+        if phase_progress is not None:
+            phase_progress(42, "拓扑审计记录已构建")
 
         def span_id(span: Any) -> str:
             return f"{span.story}-{span.beam_type}" f"{span.line_number}-{span.span_index}"
 
         spans_csv = export_structural_spans_csv(
             structural.spans,
-            output_dir / "topology_spans.csv",
+            data_dir / "topology_spans.csv",
             span_id_resolver=span_id,
         )
         spans_dxf = export_structural_spans_dxf(
             structural.spans,
-            output_dir / "topology_spans.dxf",
-            model_name=str(actual_model),
+            output_dir / f"{model_name_from_path(durable_model or actual_model)}_span_note.dxf",
+            model_name=model_name_from_path(durable_model or actual_model),
             span_id_resolver=span_id,
         )
-        split_json, split_csv = write_requires_split_audit(records, output_dir, "requires_split_audit")
+        split_json, split_csv = write_requires_split_audit(records, data_dir, "requires_split_audit")
         split_dxf = export_requires_split_dxf(
             records,
-            output_dir / "requires_split_audit.dxf",
-            model_name=str(actual_model),
+            data_dir / "requires_split_audit.dxf",
+            model_name=model_name_from_path(durable_model or actual_model),
         )
         section_json, section_csv = write_multi_section_span_audit(
             section_records,
-            output_dir,
+            data_dir,
         )
-        diagnostics_json = output_dir / "topology_diagnostics.json"
+        diagnostics_json = data_dir / "topology_diagnostics.json"
         diagnostics_json.write_text(
             json.dumps(
                 [asdict(diagnostic) for diagnostic in structural.diagnostics],
@@ -313,13 +435,36 @@ def _run_impl(
             ),
             encoding="utf-8",
         )
+        if phase_progress is not None:
+            phase_progress(50, "拓扑 DXF/审计导出完成")
+        design_exclusions = tuple(
+            getattr(read_source, "design_object_exclusions", lambda: ())()
+        )
+        design_exclusion_path = None
+        if design_exclusions:
+            design_exclusion_path = data_dir / "excluded_non_design_objects.json"
+            design_exclusion_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "etabs-beam-generator/excluded-non-design-objects@1",
+                        "count": len(design_exclusions),
+                        "objects": list(design_exclusions),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
         excel_output = None
+        excel_primary_output = None
+        excel_secondary_output = None
         rebar_payload_path = None
         rebar_workbook_output = None
         rebar_preview_dir = None
         secondary_rebar_payload_path = None
         secondary_rebar_workbook_output = None
         secondary_rebar_preview_dir = None
+        beam_dxf_export = None
 
         blocked = tuple(action for action in plan.renames if action.status != "READY")
         split_actions = tuple(action for action in plan.renames if action.status == "REQUIRES_SPLIT")
@@ -399,7 +544,7 @@ def _run_impl(
                         reversed_guids=reversed_guids,
                     )
                     full_audit_path = write_frame_audit(
-                        output_dir / "writeback_full_attribute_audit.json",
+                        data_dir / "writeback_full_attribute_audit.json",
                         before_audit,
                         after_audit,
                         full_audit_comparison,
@@ -416,7 +561,7 @@ def _run_impl(
                         after_designs,
                         renamed=resolver,
                     )
-                    demand_audit_path = output_dir / "design_demand_equivalence.json"
+                    demand_audit_path = data_dir / "design_demand_equivalence.json"
                     demand_audit_path.write_text(
                         json.dumps(asdict(demand_comparison), ensure_ascii=False, indent=2),
                         encoding="utf-8",
@@ -445,7 +590,7 @@ def _run_impl(
             orientation = rename = after_rename = None
             analysis_status = design_status = save_status = None
 
-        if args.export_excel or args.export_rebar_workbook:
+        if args.export_excel or args.export_rebar_workbook or getattr(args, "export_beam_result_dxf", False):
             if not sap.DesignConcrete.GetResultsAvailable():
                 raise RuntimeError("设计结果导出要求 ETABS 已存在当前模型状态的混凝土设计结果。")
             if args.writeback:
@@ -454,7 +599,18 @@ def _run_impl(
                     actual_model,
                     durable_model_path=durable_model,
                 )
-                export_beams = export_source.extract_beams(args.selection)
+                extraction_progress = _scaled_progress(phase_progress, 50, 56)
+                if extraction_progress is None:
+                    export_beams = export_source.extract_beams(
+                        args.selection,
+                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
+                    )
+                else:
+                    export_beams = export_source.extract_beams(
+                        args.selection,
+                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
+                        progress=extraction_progress,
+                    )
                 export_supports = export_source.column_supports()
                 export_structural = analyze_beam_lines(
                     export_beams,
@@ -470,36 +626,101 @@ def _run_impl(
                 )
             else:
                 export_source = read_source
-                export_beams = beams
-                export_structural = structural
-            designs = export_source.designs(export_beams)
+                extraction_progress = _scaled_progress(phase_progress, 50, 56)
+                if extraction_progress is None:
+                    export_beams = read_source.extract_beams(
+                        args.selection,
+                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
+                    )
+                else:
+                    export_beams = read_source.extract_beams(
+                        args.selection,
+                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
+                        progress=extraction_progress,
+                    )
+                if tuple(beam.name for beam in export_beams) == tuple(beam.name for beam in beams):
+                    export_structural = structural
+                else:
+                    export_supports = export_source.column_supports()
+                    export_structural = analyze_beam_lines(
+                        export_beams,
+                        set(export_supports),
+                        BeamLineSpanSettings(
+                            coordinate_tolerance_mm=config.geometry.coordinate_tolerance_mm,
+                            source_span_overlap_tolerance_mm=config.geometry.source_span_overlap_tolerance_mm,
+                            merge_angle_deg=config.geometry.merge_angle_limit_deg,
+                            intersection_z_tolerance_mm=config.geometry.coordinate_tolerance_mm,
+                            story_workers=4,
+                        ),
+                        column_support_coordinates=export_supports,
+                    )
+            if phase_progress is not None:
+                phase_progress(60, f"导出对象拓扑完成（{len(export_beams)} 梁）")
+            design_progress = _scaled_progress(phase_progress, 60, 72)
+            if design_progress is None:
+                designs = export_source.designs(export_beams)
+            else:
+                designs = export_source.designs(
+                    export_beams,
+                    progress=design_progress,
+                )
+            if phase_progress is not None:
+                phase_progress(73, f"读取设计结果完成（{len(designs)} 梁）")
             span_schedule = build_span_schedule(
                 export_structural,
                 export_beams,
                 designs,
                 config.geometry.coordinate_tolerance_mm,
             )
+            if phase_progress is not None:
+                phase_progress(75, f"Span schedule 完成（{len(span_schedule.records)} 跨）")
+            if getattr(args, "export_beam_result_dxf", False):
+                beam_dxf_export = export_beam_result_and_section_dxfs(
+                    span_schedule,
+                    export_beams,
+                    export_source.section_info,
+                    output_dir,
+                    text_height=float(getattr(args, "dxf_text_height", 50)),
+                )
+                if phase_progress is not None:
+                    phase_progress(82, "梁计算结果/截面 DXF 导出完成")
             if args.export_excel:
                 groups = ContinuityAnalyzer(
                     config.geometry.coordinate_tolerance_mm,
                     config.geometry.slope_limit_deg,
                 ).analyze(export_beams)
-                excel_output = export_beam_schedule(
+                model_name = model_name_from_path(durable_model or actual_model)
+                primary_excel = export_beam_schedule(
                     list(export_beams),
                     groups,
                     designs,
-                    output_dir,
-                    "beam_schedule_{timestamp}.xlsx",
+                    data_dir,
+                    "basic_primarybeam_schedule_{timestamp}.xlsx",
                     span_schedule=span_schedule,
+                    beam_type="PB",
                 )
+                secondary_excel = export_beam_schedule(
+                    list(export_beams),
+                    groups,
+                    designs,
+                    data_dir,
+                    "basic_secondarybeam_schedule_{timestamp}.xlsx",
+                    span_schedule=span_schedule,
+                    beam_type="SB",
+                )
+                excel_output = primary_excel
+                excel_primary_output = primary_excel
+                excel_secondary_output = secondary_excel
+                if phase_progress is not None:
+                    phase_progress(86, "Excel 梁表导出完成")
             if args.export_rebar_workbook:
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                rebar_payload_path = output_dir / f"rebar_workbook_payload_{stamp}.json"
-                rebar_workbook_output = output_dir / f"beam_rebar_review_{stamp}.xlsx"
-                rebar_preview_dir = output_dir / f"rebar_workbook_previews_{stamp}"
-                secondary_rebar_payload_path = output_dir / f"secondary_beam_payload_{stamp}.json"
-                secondary_rebar_workbook_output = output_dir / f"secondary_beam_schedule_{stamp}.xlsx"
-                secondary_rebar_preview_dir = output_dir / f"secondary_beam_previews_{stamp}"
+                rebar_payload_path = data_dir / f"rebar_workbook_payload_{stamp}.json"
+                rebar_workbook_output = output_dir / f"{model_name_from_path(durable_model or actual_model)}_primarybeam_schedule.xlsx"
+                rebar_preview_dir = data_dir / f"rebar_workbook_previews_{stamp}"
+                secondary_rebar_payload_path = data_dir / f"secondary_beam_payload_{stamp}.json"
+                secondary_rebar_workbook_output = output_dir / f"{model_name_from_path(durable_model or actual_model)}_secondarybeam_schedule.xlsx"
+                secondary_rebar_preview_dir = data_dir / f"secondary_beam_previews_{stamp}"
                 payload = build_rebar_workbook_payload_from_domain(
                     export_structural,
                     export_beams,
@@ -519,6 +740,8 @@ def _run_impl(
                     build_secondary_schedule_payload(payload),
                     secondary_rebar_payload_path,
                 )
+                if phase_progress is not None:
+                    phase_progress(92, "配筋表输入文件导出完成")
 
     if not args.writeback and not args.prepare_section_review_groups:
         data_source_identity = dict(read_source.identity())
@@ -548,6 +771,7 @@ def _run_impl(
         "spans": len(structural.spans),
         "primary_spans": sum(span.beam_type == "PB" for span in structural.spans),
         "secondary_spans": sum(span.beam_type == "SB" for span in structural.spans),
+        "excluded_non_design_objects": len(design_exclusions),
         "requires_split_objects": len(records),
         "requires_split_actions": len(split_actions),
         "multi_section_spans": len(section_records),
@@ -557,6 +781,8 @@ def _run_impl(
         "section_review_actions": len(section_review_actions),
         "confirmed_multi_section_spans": sorted(confirmed_section_spans),
         "excluded_writeback_objects": sorted(excluded_writeback_objects),
+        "output_directory": str(output_dir),
+        "data_directory": str(data_dir),
         "outputs": {
             "spans_csv": str(spans_csv),
             "spans_dxf": str(spans_dxf),
@@ -625,6 +851,14 @@ def _run_impl(
         summary["outputs"]["secondary_rebar_workbook_previews"] = str(secondary_rebar_preview_dir)
     if excel_output is not None:
         summary["outputs"]["excel"] = str(excel_output)
+        summary["outputs"]["excel_primary"] = str(excel_primary_output or excel_output)
+        if excel_secondary_output is not None:
+            summary["outputs"]["excel_secondary"] = str(excel_secondary_output)
+    if beam_dxf_export is not None:
+        summary["outputs"]["beam_result_dxf"] = [str(path) for path in beam_dxf_export.result_paths]
+        summary["outputs"]["beam_section_dxf"] = [str(path) for path in beam_dxf_export.section_paths]
+        summary["beam_result_dxf_issues"] = [asdict(issue) for issue in beam_dxf_export.issues]
+        summary["beam_result_dxf_summary"] = [asdict(item) for item in beam_dxf_export.summaries]
     if tower_result is not None:
         summary["tower_assignment"] = tower_result["tower_assignment"]
         summary["outputs"].update(tower_result["outputs"])
@@ -685,6 +919,32 @@ def _runtime_self_test(args: argparse.Namespace) -> dict[str, Any]:
         "pyyaml": yaml.__version__,
         "etabs_api": _api_environment(config.etabs.dll_path),
         "etabs_types": [cHelper.__name__, cPluginContract.__name__],
+    }
+    if design_exclusion_path is not None:
+        summary["outputs"]["excluded_non_design_objects"] = str(design_exclusion_path)
+
+
+def _replay_payload(args: argparse.Namespace) -> dict[str, Any]:
+    """Redetail a frozen payload without ETABS attachment or model writeback."""
+    source = Path(args.replay_payload).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Replay payload not found: {source}")
+    output_dir = Path(args.output_dir or source.parent / "v042-replay").resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    result = redetail_payload(payload)
+    destination = (output_dir / source.name).resolve()
+    if destination == source:
+        raise ValueError("offline replay refuses to overwrite its source payload")
+    destination = write_rebar_payload(result, destination)
+    return {
+        "status": "OK",
+        "mode": "offline-payload-replay",
+        "source_payload": str(source),
+        "output_payload": str(destination),
+        "schema_version": result.get("metadata", {}).get("schema_version"),
+        "row_count": len(result.get("raw_rows", [])),
+        "model_writeback": False,
     }
 
 
@@ -845,6 +1105,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="验证便携 Python/依赖/ETABS API 装载后退出，不附着或修改模型",
     )
+    parser.add_argument(
+        "--replay-payload",
+        type=Path,
+        help="离线重算既有梁表 JSON；不连接 ETABS、不写回模型",
+    )
     parser.add_argument("--selection", choices=["all", "selected"], default="all")
     parser.add_argument("--output-dir", type=Path, help="本次运行输出目录")
     parser.add_argument(
@@ -905,6 +1170,18 @@ def _parser() -> argparse.ArgumentParser:
         "--export-rebar-workbook",
         action="store_true",
         help="分别导出 PB/SB 单页静态配筋结果 Excel（无公式）",
+    )
+    parser.add_argument(
+        "--export-beam-result-dxf",
+        action="store_true",
+        help="按楼层导出梁计算结果 DXF，并同时导出真实截面 width*depth DXF",
+    )
+    parser.add_argument(
+        "--dxf-text-height",
+        type=int,
+        choices=(25, 50, 75, 100),
+        default=50,
+        help="梁结果和截面 DXF 的文字高度（mm）",
     )
     parser.add_argument(
         "--workbook-builder",

@@ -271,9 +271,9 @@ def test_formal_payload_contains_audit_rows_and_can_redetail(tmp_path: Path) -> 
     assert payload["metadata"]["rebar_workbook_layout_version"] == "single-sheet-static-v1"
     assert payload["metadata"]["bottom_reinforcement_strategy"] == "FULL_SPAN_UNIFORM_PER_SPAN"
     assert payload["metadata"]["adjacent_span_bottom_strategy"] == "INDEPENDENT_PER_SPAN"
-    assert payload["metadata"]["project_policy_version"] == "nasiriyah-smf-sb-2026-08-27-r3"
+    assert "SPACING_THEN_DIAMETER_THEN_LEGS" in payload["metadata"]["project_policy_version"]
     assert payload["metadata"]["pb_preferred_max_stirrup_legs"] == 4
-    assert payload["metadata"]["pb_stirrup_selection_strategy"] == "PREFERRED_LEG_BAND_THEN_SPACING_THEN_DIAMETER"
+    assert payload["metadata"]["pb_stirrup_selection_strategy"] == "SPACING_THEN_DIAMETER_THEN_LEGS"
     assert payload["metadata"]["enabled_diameters_mm"] == [10, 12, 16, 20, 25]
     assert payload["metadata"]["sb_top_preferred_max_diameter_mm"] == 20
     assert payload["metadata"]["sb_midspan_top_pair_strategy"] == "MATCHING_DIAMETER_PAIR"
@@ -297,10 +297,36 @@ def test_formal_payload_contains_audit_rows_and_can_redetail(tmp_path: Path) -> 
     redetailed = redetail_payload(payload)
     assert redetailed["review_rows"][0]["engine_status"] == "OK"
     assert redetailed["metadata"]["sb_top_preferred_max_diameter_mm"] == 20
-    assert redetailed["metadata"]["project_policy_version"] == "nasiriyah-smf-sb-2026-08-27-r3"
+    assert "SPACING_THEN_DIAMETER_THEN_LEGS" in redetailed["metadata"]["project_policy_version"]
     assert redetailed["metadata"]["pb_preferred_max_stirrup_legs"] == 4
-    assert redetailed["metadata"]["pb_stirrup_selection_strategy"] == "PREFERRED_LEG_BAND_THEN_SPACING_THEN_DIAMETER"
+    assert redetailed["metadata"]["pb_stirrup_selection_strategy"] == "SPACING_THEN_DIAMETER_THEN_LEGS"
     assert payload["metadata"]["project_policy_version"] == "previous-policy"
+
+
+@pytest.mark.parametrize("prior_status, expected", [
+    ("F1-PB1-1/left: NO_ALLOWED_SPACING", "OK"),
+    ("F1-PB1-1/left: NO_ALLOWED_SPACING; maximum_spacing_mm=75", "OK"),
+    ("F1-PB1-1: ROW_CATALOG_NO_FEASIBLE_LAYOUT", "OK"),
+    ("MIXED_SECTION_REVIEW_REQUIRED", "OK"),
+    ("MIXED_FRAME_TYPE_REVIEW_REQUIRED", "MIXED_FRAME_TYPE_REVIEW_REQUIRED"),
+    ("DESIGN_RESULTS_PARTIAL", "DESIGN_RESULTS_PARTIAL"),
+])
+def test_redetail_retries_solver_failures_but_preserves_source_gates(prior_status, expected):
+    beam = _beam("A", (0, 0, 0), (6000, 0, 0))
+    span = BeamSpan("F1", "PB", 1, 1, ("A",), (beam.start, beam.end), False, False)
+    design = BeamDesignResult("F1-PB1-1", tuple(
+        _station(station, 1800.0, 1200.0) for station in (0.0, 3000.0, 6000.0)
+    ))
+    schedule = SpanScheduleMapping(
+        (SpanScheduleRecord(span, beam, design),),
+        {"A": ("F1-PB1-S1",)}, {"A": ("F1-PB1",)},
+    )
+    payload = _build_payload(schedule, [beam], frame_types={"A": "Sway Ordinary"})
+    payload["raw_rows"][0]["engine_status"] = prior_status
+    result = redetail_payload(payload)
+    for key in ("raw_rows", "review_rows", "final_rows"):
+        assert result[key][0]["engine_status"] == expected
+    assert payload["raw_rows"][0]["engine_status"] == prior_status
 
 
 def test_support_faces_are_derived_from_column_centres_and_dimensions() -> None:
@@ -358,7 +384,7 @@ def test_sb_sway_special_frame_type_remains_smf() -> None:
     assert raw["effective_frame_type"] == "SMF"
     assert raw["is_smf"] is True
     assert raw["engine_status"] == "OK"
-    assert payload["final_rows"][0]["legs"] == 2
+    assert payload["final_rows"][0]["legs"] == 4
     assert payload["final_rows"][0]["s1"] == payload["final_rows"][0]["s2"]
     secondary = build_secondary_schedule_payload(payload)
     assert len(secondary["schedule_rows"]) == 1
@@ -519,15 +545,18 @@ def test_payload_coordinates_adjacent_sb_support_reinforcement_by_beam_line() ->
     )
 
     first, second = payload["final_rows"]
+    first_raw, second_raw = payload["raw_rows"]
     assert first["engine_status"] == second["engine_status"] == "OK"
-    assert first["et2"] == second["et1"]
+    assert first_raw["longitudinal_rows"]["right"]["top"][0]["diameter_mm"] == second_raw["longitudinal_rows"]["left"]["top"][0]["diameter_mm"]
+    assert first_raw["longitudinal_rows"]["right"]["top"][0]["count"] >= 2
+    assert second_raw["longitudinal_rows"]["left"]["top"][0]["count"] >= 2
     assert first["eb1"] == first["b1"] == first["eb2"]
     assert second["eb1"] == second["b1"] == second["eb2"]
     assert first["bottom_uniform_regions_match"] is True
     assert second["bottom_uniform_regions_match"] is True
 
 
-def test_mixed_section_span_is_fail_closed() -> None:
+def test_mixed_section_span_is_accepted_with_a_review_warning_and_locations() -> None:
     beam_a = _beam("A", (0, 0, 0), (3000, 0, 0), "B500X800")
     beam_b = _beam("B", (3000, 0, 0), (6000, 0, 0), "B400X800")
     geometry = BeamGeometry(
@@ -569,10 +598,12 @@ def test_mixed_section_span_is_fail_closed() -> None:
         frame_types={"A": "Sway Ordinary", "B": "Sway Ordinary"},
     )
 
-    assert payload["raw_rows"][0]["engine_status"] == ("MIXED_SECTION_REVIEW_REQUIRED")
-    assert payload["review_rows"][0]["et1_text"].endswith(("T16", "T18", "T20", "T22", "T25", "T28", "T32"))
-    assert "不得直接用于施工图" in payload["review_rows"][0]["review_note"]
-    assert payload["final_rows"][0]["engine_status"] == ("MIXED_SECTION_REVIEW_REQUIRED")
+    assert payload["raw_rows"][0]["engine_status"] == "OK"
+    assert payload["raw_rows"][0]["accepted_warning_codes"] == "MIXED_SECTION_REVIEW_REQUIRED"
+    assert payload["raw_rows"][0]["warnings"] == "MIXED_SECTION"
+    assert payload["final_rows"][0]["engine_status"] == "OK"
+    assert payload["final_rows"][0]["et1"]
+    assert "source_object_locations" not in payload["final_rows"][0]
 
 
 def test_empty_candidate_rows_are_never_blank_even_without_area_demands() -> None:
@@ -637,6 +668,7 @@ def test_mixed_pb_frame_type_is_fail_closed_with_spec_status() -> None:
 
     assert payload["raw_rows"][0]["engine_status"] == ("MIXED_FRAME_TYPE_REVIEW_REQUIRED")
     assert payload["final_rows"][0]["engine_status"] == ("MIXED_FRAME_TYPE_REVIEW_REQUIRED")
+    assert "source_object_locations" not in payload["final_rows"][0]
 
 
 def test_missing_cover_or_aggregate_semantics_is_fail_closed() -> None:

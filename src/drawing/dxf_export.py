@@ -216,9 +216,10 @@ def _header() -> list[str]:
     ]
 
 
-def _tables() -> list[str]:
-    values = ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", str(len(_LAYERS))]
-    for name, color in _LAYERS:
+def _tables(layers: Iterable[tuple[str, int]] = _LAYERS) -> list[str]:
+    layers = tuple(layers)
+    values = ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", str(len(layers))]
+    for name, color in layers:
         values.extend(["0", "LAYER", "2", name, "70", "0", "62", str(color), "6", "CONTINUOUS"])
     values.extend(
         [

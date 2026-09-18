@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.core.beam_line_span_analyzer import BeamLineSpanSettings, analyze_beam_lines
 from src.core.continuity_analyzer import ContinuityAnalyzer
@@ -18,9 +18,11 @@ from src.drawing.dxf_export import (
     export_structural_spans_csv,
     export_structural_spans_dxf,
 )
+from src.drawing.beam_result_dxf import export_beam_result_and_section_dxfs
 from src.excel_export import export_beam_schedule
 from src.excel_span_adapter import build_span_schedule
 from src.model_source import SqliteReadSource
+from src.output_layout import model_name_from_path, resolve_output_layout
 from src.rebar_workbook import (
     build_rebar_workbook_payload_from_domain,
     build_secondary_schedule_payload,
@@ -30,15 +32,35 @@ from src.rebar_workbook import (
 )
 
 
+def _scaled_progress(
+    progress: Callable[[int, str], None] | None,
+    start: int,
+    end: int,
+) -> Callable[[int, str], None] | None:
+    if progress is None:
+        return None
+
+    def emit(percent: int, message: str) -> None:
+        bounded = max(0, min(100, int(percent)))
+        progress(start + round((end - start) * bounded / 100), message)
+
+    return emit
+
+
 def run_snapshot_workflow(
     args: Any,
     config: Any,
     output_dir: Path,
+    *,
+    progress: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run the production read-only consumers without attaching to ETABS."""
 
     _validate_snapshot_arguments(args)
     model_path = Path(args.expected_model).resolve()
+    layout = resolve_output_layout(output_dir, model_path)
+    output_dir = layout.root
+    data_dir = layout.data
     source = SqliteReadSource(args.snapshot_input, model_path)
     source_hash = source.assert_current()
     source_identity = dict(source.identity())
@@ -53,8 +75,19 @@ def run_snapshot_workflow(
         description="写回排除对象",
     )
 
-    beams = source.extract_beams(args.selection)
+    extraction_progress = _scaled_progress(progress, 0, 15)
+    if extraction_progress is None:
+        beams = source.extract_beams(args.selection)
+    else:
+        beams = source.extract_beams(
+            args.selection,
+            progress=extraction_progress,
+        )
+    if progress is not None:
+        progress(15, f"读取几何完成（{len(beams)} 梁）")
     column_supports = source.column_supports()
+    if progress is not None:
+        progress(20, f"读取支承完成（{len(column_supports)} 个）")
     states = source.frame_states(beams)
     structural = analyze_beam_lines(
         beams,
@@ -68,6 +101,8 @@ def run_snapshot_workflow(
         ),
         column_support_coordinates=column_supports,
     )
+    if progress is not None:
+        progress(35, f"拓扑划分完成（{len(structural.spans)} Span）")
     plan = build_writeback_plan(
         structural,
         beams,
@@ -88,23 +123,23 @@ def run_snapshot_workflow(
 
     spans_csv = export_structural_spans_csv(
         structural.spans,
-        output_dir / "topology_spans.csv",
+        data_dir / "topology_spans.csv",
         span_id_resolver=span_id,
     )
     spans_dxf = export_structural_spans_dxf(
         structural.spans,
-        output_dir / "topology_spans.dxf",
-        model_name=str(model_path),
+        layout.span_note,
+        model_name=layout.model_name,
         span_id_resolver=span_id,
     )
-    split_json, split_csv = write_requires_split_audit(records, output_dir, "requires_split_audit")
+    split_json, split_csv = write_requires_split_audit(records, data_dir, "requires_split_audit")
     split_dxf = export_requires_split_dxf(
         records,
-        output_dir / "requires_split_audit.dxf",
-        model_name=str(model_path),
+        data_dir / "requires_split_audit.dxf",
+        model_name=layout.model_name,
     )
-    section_json, section_csv = write_multi_section_span_audit(section_records, output_dir)
-    diagnostics_json = output_dir / "topology_diagnostics.json"
+    section_json, section_csv = write_multi_section_span_audit(section_records, data_dir)
+    diagnostics_json = data_dir / "topology_diagnostics.json"
     diagnostics_json.write_text(
         json.dumps(
             [asdict(diagnostic) for diagnostic in structural.diagnostics],
@@ -113,6 +148,8 @@ def run_snapshot_workflow(
         ),
         encoding="utf-8",
     )
+    if progress is not None:
+        progress(50, "拓扑 DXF/审计导出完成")
 
     outputs = {
         "spans_csv": str(spans_csv),
@@ -125,14 +162,38 @@ def run_snapshot_workflow(
         "topology_diagnostics_json": str(diagnostics_json),
     }
     designs = None
-    if args.export_excel or args.export_rebar_workbook:
-        designs = source.designs(beams)
+    beam_dxf_export = None
+    if args.export_excel or args.export_rebar_workbook or getattr(args, "export_beam_result_dxf", False):
+        design_progress = _scaled_progress(progress, 55, 70)
+        if design_progress is None:
+            designs = source.designs(beams)
+        else:
+            designs = source.designs(
+                beams,
+                progress=design_progress,
+            )
+        if progress is not None:
+            progress(71, f"读取设计结果完成（{len(designs)} 梁）")
         span_schedule = build_span_schedule(
             structural,
             beams,
             designs,
             config.geometry.coordinate_tolerance_mm,
         )
+        if progress is not None:
+            progress(73, f"Span schedule 完成（{len(span_schedule.records)} 跨）")
+        if getattr(args, "export_beam_result_dxf", False):
+            beam_dxf_export = export_beam_result_and_section_dxfs(
+                span_schedule,
+                beams,
+                source.section_info,
+                output_dir,
+                text_height=float(getattr(args, "dxf_text_height", 50)),
+            )
+            if progress is not None:
+                progress(82, "梁计算结果/截面 DXF 导出完成")
+            outputs["beam_result_dxf"] = [str(path) for path in beam_dxf_export.result_paths]
+            outputs["beam_section_dxf"] = [str(path) for path in beam_dxf_export.section_paths]
         if args.export_excel:
             groups = ContinuityAnalyzer(
                 config.geometry.coordinate_tolerance_mm,
@@ -143,19 +204,34 @@ def run_snapshot_workflow(
                     list(beams),
                     groups,
                     designs,
-                    output_dir,
-                    "beam_schedule_{timestamp}.xlsx",
+                    data_dir,
+                    "basic_primarybeam_schedule_{timestamp}.xlsx",
                     span_schedule=span_schedule,
+                    beam_type="PB",
                 )
             )
+            outputs["excel_primary"] = outputs["excel"]
+            outputs["excel_secondary"] = str(
+                export_beam_schedule(
+                    list(beams),
+                    groups,
+                    designs,
+                    data_dir,
+                    "basic_secondarybeam_schedule_{timestamp}.xlsx",
+                    span_schedule=span_schedule,
+                    beam_type="SB",
+                )
+            )
+            if progress is not None:
+                progress(86, "Excel 梁表导出完成")
         if args.export_rebar_workbook:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            payload_path = output_dir / f"rebar_workbook_payload_{stamp}.json"
-            workbook_path = output_dir / f"beam_rebar_review_{stamp}.xlsx"
-            preview_dir = output_dir / f"rebar_workbook_previews_{stamp}"
-            secondary_payload_path = output_dir / f"secondary_beam_payload_{stamp}.json"
-            secondary_workbook_path = output_dir / f"secondary_beam_schedule_{stamp}.xlsx"
-            secondary_preview_dir = output_dir / f"secondary_beam_previews_{stamp}"
+            payload_path = data_dir / f"rebar_workbook_payload_{stamp}.json"
+            workbook_path = layout.primary_schedule
+            preview_dir = data_dir / f"rebar_workbook_previews_{stamp}"
+            secondary_payload_path = data_dir / f"secondary_beam_payload_{stamp}.json"
+            secondary_workbook_path = layout.secondary_schedule
+            secondary_preview_dir = data_dir / f"secondary_beam_previews_{stamp}"
             payload = build_rebar_workbook_payload_from_domain(
                 structural,
                 beams,
@@ -194,6 +270,8 @@ def run_snapshot_workflow(
                 node_max_old_space_mb=args.artifact_node_max_old_space_mb,
                 builder=getattr(args, "workbook_builder", "python"),
             )
+            if progress is not None:
+                progress(92, "配筋表输入文件导出完成")
             outputs.update(
                 {
                     "rebar_payload_json": str(payload_path),
@@ -214,7 +292,7 @@ def run_snapshot_workflow(
     split_actions = tuple(action for action in plan.renames if action.status == "REQUIRES_SPLIT")
     section_review_actions = tuple(action for action in plan.renames if action.status == "REQUIRES_SECTION_REVIEW")
     metadata = source.reader.metadata()
-    return {
+    summary = {
         "status": "OK",
         "mode": "read-only-snapshot",
         "model": str(model_path),
@@ -249,12 +327,18 @@ def run_snapshot_workflow(
         "section_review_actions": len(section_review_actions),
         "confirmed_multi_section_spans": sorted(confirmed_section_spans),
         "excluded_writeback_objects": sorted(excluded_writeback_objects),
+        "output_directory": str(output_dir),
+        "data_directory": str(data_dir),
         "outputs": outputs,
         "blocking_topology_diagnostics": len(blocking_diagnostics),
         "record_count": len(structural.records),
         "record_sample": list(structural.records[:5]),
         "design_result_beams": 0 if designs is None else len(designs),
     }
+    if beam_dxf_export is not None:
+        summary["beam_result_dxf_issues"] = [asdict(issue) for issue in beam_dxf_export.issues]
+        summary["beam_result_dxf_summary"] = [asdict(item) for item in beam_dxf_export.summaries]
+    return summary
 
 
 def _validate_snapshot_arguments(args: Any) -> None:

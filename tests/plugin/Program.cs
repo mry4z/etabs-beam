@@ -16,6 +16,8 @@ static void Check(bool condition, string message)
 
 var baseline = new WorkflowRunRequest("runner.exe", "work", "config.yaml", "ETABSv1.dll",
     "output", "selected", true, true, 123, "model.EDB");
+Check(new PluginSettings().DxfTextHeight == 100, "plugin UI DXF text height default");
+Check(baseline.DxfTextHeight == 100, "workflow request DXF text height default");
 var cases = new[]
 {
     baseline,
@@ -37,7 +39,36 @@ foreach (var request in cases)
     Check(!arguments.Intersect(new[] { "--writeback", "--run-analysis", "--run-design", "--save" }).Any(), "no unrelated mutation flags");
     if (request.TowerCreateGroups) Check(arguments.Contains(request.TowerPlanPath), "plan path must remain a single argument");
 }
+var dxfRequest = baseline with { ExportBeamResultDxf = true, DxfTextHeight = 75 };
+var dxfArguments = PythonWorkflowRunner.BuildStartInfo(dxfRequest).ArgumentList;
+Check(dxfArguments.Contains("--export-beam-result-dxf"), "beam DXF export flag");
+var dxfHeightIndex = dxfArguments.IndexOf("--dxf-text-height");
+Check(dxfHeightIndex >= 0 && dxfArguments[dxfHeightIndex + 1] == "75", "beam DXF text height");
+Check(!PythonWorkflowRunner.BuildStartInfo(baseline).ArgumentList.Contains("--export-beam-result-dxf"), "baseline omits DXF flag");
 Console.WriteLine($"PASS: {cases.Length} offline plugin request cases (no ETABS attachment).");
+
+var previousSettingsPath = Environment.GetEnvironmentVariable("ETABS_BEAM_PLUGIN_SETTINGS_PATH");
+var settingsPath = Path.Combine(Path.GetTempPath(), $"etabs-beam-plugin-settings-{Guid.NewGuid():N}.json");
+try
+{
+    Environment.SetEnvironmentVariable("ETABS_BEAM_PLUGIN_SETTINGS_PATH", settingsPath);
+    var defaults = PluginSettingsStore.Load(out _);
+    Check(defaults.DxfTextHeight == 100, "new settings DXF text height default");
+    PluginSettingsStore.Save(new PluginSettings { SchemaVersion = 3, DxfTextHeight = 17 });
+    Check(PluginSettingsStore.Load(out _).DxfTextHeight == 100, "invalid settings fallback to 100");
+    foreach (var validHeight in new[] { 25, 50, 75, 100 })
+    {
+        PluginSettingsStore.Save(new PluginSettings { SchemaVersion = 3, DxfTextHeight = validHeight });
+        Check(PluginSettingsStore.Load(out _).DxfTextHeight == validHeight,
+            $"valid settings height preserved: {validHeight}");
+    }
+}
+finally
+{
+    Environment.SetEnvironmentVariable("ETABS_BEAM_PLUGIN_SETTINGS_PATH", previousSettingsPath);
+    if (File.Exists(settingsPath)) File.Delete(settingsPath);
+}
+Console.WriteLine("PASS: DXF text height defaults and settings migration.");
 
 var normalBeamRequest = new WorkflowRunRequest("runner.exe", "work", "config.yaml", "ETABSv1.dll",
     "output", "selected", true, true, 123, "model.EDB", TowerCheck: false);

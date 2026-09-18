@@ -20,7 +20,7 @@ ALGORITHM_VERSIONS = {
     "numbering": "2026.07.22-no-span-s",
     "writeback": "1.0",
     "detailing": "aci318-14-si-errata+nasiriyah-smf-sb-2026-08-24-r1",
-    "rebar_workbook_payload": "2.1",
+    "rebar_workbook_payload": "2.2",
 }
 
 
@@ -211,7 +211,15 @@ class RunManifest:
             "export_units": summary_data.get("export_units"),
         }
         input_fingerprint = fingerprint(identity)
-        outputs = {name: artifact_record(path) for name, path in (summary_data.get("outputs") or {}).items() if path}
+        outputs = {
+            name: (
+                [artifact_record(item) for item in path]
+                if isinstance(path, (list, tuple))
+                else artifact_record(path)
+            )
+            for name, path in (summary_data.get("outputs") or {}).items()
+            if path
+        }
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "run_id": self.run_id,

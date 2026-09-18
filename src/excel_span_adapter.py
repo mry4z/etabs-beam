@@ -134,13 +134,15 @@ def _clip_design_to_span(
         dict.fromkeys(source for result in source_results for source in (result.source_objects or (result.beam_name,)))
     )
     result_source = ",".join(dict.fromkeys(result.result_source for result in source_results if result.result_source))
+    units = tuple(dict.fromkeys(result.units for result in source_results if result.units))
+    normalized_units = units[0] if len(units) == 1 else ("MIXED" if units else "")
     return BeamDesignResult(
         span.span_id,
         tuple(deduped),
         status,
         message,
         sources,
-        "N_mm_C",
+        normalized_units,
         result_source,
     )
 

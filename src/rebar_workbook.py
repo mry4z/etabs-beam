@@ -30,22 +30,30 @@ from src.design.detailing import (
     BeamSection,
     BeamDetailingResult,
     DetailingError,
-    coordinate_adjacent_spans,
+    coordinate_span_segment,
     resolve_detailing_profile,
 )
-from src.design.constructability import SeismicDetailingContext, SupportFaceContext
-from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
+from src.design.constructability import DesignResultProvenance, SeismicDetailingContext, SupportFaceContext
+from src.design.provider import BeamDesignResult, DesignResultStatus
+from src.design.region_results import build_region_controls as _region_controls
 from src.excel_span_adapter import SpanScheduleMapping, build_span_schedule
 
-PAYLOAD_SCHEMA_VERSION = "2.1"
-SUPPORTED_PAYLOAD_SCHEMA_VERSIONS = frozenset({"2.0", PAYLOAD_SCHEMA_VERSION})
+PAYLOAD_SCHEMA_VERSION = "2.2"
+SUPPORTED_PAYLOAD_SCHEMA_VERSIONS = frozenset({"2.0", "2.1", PAYLOAD_SCHEMA_VERSION})
 RESULT_WORKBOOK_LAYOUT_VERSION = "single-sheet-static-v1"
 BOTTOM_REINFORCEMENT_STRATEGY = "FULL_SPAN_UNIFORM_PER_SPAN"
 ADJACENT_SPAN_BOTTOM_STRATEGY = "INDEPENDENT_PER_SPAN"
 REGIONS = ("left", "middle", "right")
+ACCEPTED_WARNING_CODES = ("MIXED_SECTION_REVIEW_REQUIRED",)
 BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "build_rebar_workbook.mjs"
 PREVIEW_BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "render_rebar_workbook_preview.mjs"
 SECONDARY_BUILDER_PATH = Path(__file__).resolve().parent / "spreadsheet" / "build_secondary_beam_workbook.mjs"
+
+
+def _engine_warning_text(common: Mapping[str, Any], warnings: Iterable[str]) -> str:
+    accepted = str(common.get("accepted_warning_codes", "")).strip()
+    current = "; ".join(str(value) for value in warnings if str(value).strip())
+    return "; ".join(value for value in (accepted, current) if value)
 
 
 def _apply_current_workbook_metadata(metadata: dict[str, Any]) -> None:
@@ -245,7 +253,6 @@ def build_payload_from_schedule(
         blocked_reason = ""
         if len(source_sections) > 1:
             warnings.append("MIXED_SECTION")
-            blocked_reason = "MIXED_SECTION_REVIEW_REQUIRED"
         if len(source_frame_types) > 1:
             warnings.append("MIXED_FRAME_TYPE")
             blocked_reason = blocked_reason or "MIXED_FRAME_TYPE_REVIEW_REQUIRED"
@@ -345,6 +352,9 @@ def build_payload_from_schedule(
             "design_result_source": record.design.result_source,
             "design_units": record.design.units,
             "warnings": "; ".join(warnings),
+            "accepted_warning_codes": "; ".join(
+                ACCEPTED_WARNING_CODES if len(source_sections) > 1 else ()
+            ),
         }
         controls = _region_controls(
             record.design,
@@ -434,6 +444,11 @@ def build_payload_from_schedule(
                     capacity_shear_source=api_source,
                     capacity_shear_verified=True,
                 )
+            raw["detailing_context"] = {
+                "left_support": asdict(support_pair[0]) if support_pair[0] else None,
+                "right_support": asdict(support_pair[1]) if support_pair[1] else None,
+                "seismic_context": asdict(seismic_context) if seismic_context else None,
+            }
             result = engine.design(
                 BeamDetailingInput(
                     BeamSection(
@@ -469,6 +484,7 @@ def build_payload_from_schedule(
             )
             raw["engine_status"] = "OK"
             raw["engine_mode"] = result.mode.value
+            raw["engine_warnings"] = _engine_warning_text(common, result.warnings)
             _record_initial_layout(raw, result)
             review = _review_row(common, controls, result)
             final = _final_row(common, result)
@@ -500,6 +516,8 @@ def build_payload_from_schedule(
         elif result is not None and controls is not None:
             raw_rows[index]["engine_status"] = "OK"
             raw_rows[index]["engine_mode"] = result.mode.value
+            raw_rows[index]["engine_warnings"] = _engine_warning_text(common, result.warnings)
+            raw_rows[index].update(_row_layout_fields(result))
             raw_rows[index].update(_constructability_row_fields(result))
             raw_rows[index].update(_uniform_bottom_fields(result))
             raw_rows[index]["coordination_status"] = result.coordination_status
@@ -547,12 +565,62 @@ def _record_detailing_policy_metadata(metadata: dict[str, Any], engine: BeamDeta
         {
             "project_policy_version": engine.project.version,
             "enabled_diameters_mm": list(engine.project.enabled_diameters_mm),
+            "allowed_spacings_mm": list(engine.project.allowed_spacings_mm),
+            "smf_allowed_spacings_mm": list(engine.project.smf_allowed_spacings_mm),
+            "smf_shallow_min_stirrup_diameter_mm": engine.project.smf_shallow_min_stirrup_diameter_mm,
+            "smf_spacing_depth_policy": "NOMINAL_BEAM_DEPTH_PROJECT_OVERRIDE",
+            "preferred_stirrup_diameters_mm": list(engine.project.preferred_stirrup_diameters_mm),
             "sb_top_preferred_max_diameter_mm": engine.project.sb_top_preferred_max_diameter_mm,
             "sb_midspan_top_pair_strategy": "MATCHING_DIAMETER_PAIR",
+            "top_first_row_strategy": "COMMON_DIAMETER_INDEPENDENT_COUNT_LOCAL_HOOP_SUPPORT",
             "pb_preferred_max_stirrup_legs": engine.project.pb_preferred_max_stirrup_legs,
-            "pb_stirrup_selection_strategy": "PREFERRED_LEG_BAND_THEN_SPACING_THEN_DIAMETER",
+            "pb_stirrup_selection_strategy": "SPACING_THEN_DIAMETER_THEN_LEGS",
         }
     )
+
+
+def _replay_detailing_context(
+    raw: Mapping[str, Any], metadata: Mapping[str, Any], profile: BeamDetailingProfile,
+) -> dict[str, Any]:
+    """Restore recorded input context; legacy payloads keep their missing evidence explicit."""
+    saved = raw.get("detailing_context")
+    if isinstance(saved, Mapping):
+        seismic = saved.get("seismic_context")
+        if seismic is not None:
+            seismic = dict(seismic)
+            if isinstance(seismic.get("provenance"), Mapping):
+                seismic["provenance"] = DesignResultProvenance(**seismic["provenance"])
+            seismic["likely_yield_locations_mm"] = tuple(seismic.get("likely_yield_locations_mm", ()))
+            seismic = SeismicDetailingContext(**seismic)
+        return {
+            "left_support": SupportFaceContext(**saved["left_support"]) if saved.get("left_support") else None,
+            "right_support": SupportFaceContext(**saved["right_support"]) if saved.get("right_support") else None,
+            "seismic_context": seismic,
+            "yield_locations_mm": tuple(saved.get("yield_locations_mm", ())),
+        }
+    context: dict[str, Any] = {}
+    for side in ("left", "right"):
+        face = raw.get(f"{side}_support_face_mm")
+        if face is not None:
+            context[f"{side}_support"] = SupportFaceContext(
+                f"{raw.get('beam_no', '')}/{side}", float(face),
+                source="legacy payload recorded support-face location",
+            )
+    if profile.is_smf:
+        etabs_shear = raw.get("capacity_shear_etabs_kN")
+        context["seismic_context"] = SeismicDetailingContext(
+            is_smf=True,
+            frame_type=str(raw.get("frame_type", "")),
+            design_code=str(metadata.get("design_code", "ACI 318-14")),
+            capacity_shear_demand_kN=float(etabs_shear) if etabs_shear is not None else None,
+            capacity_shear_source=str(raw.get("capacity_shear_source", "")),
+            capacity_shear_verified=etabs_shear is not None and bool(raw.get("capacity_shear_source")),
+            gravity_shear_kN=raw.get("capacity_shear_gravity_kN"),
+            mpr_strength_factor=1.25,
+            mpr_strength_source="ACI 318-14 SMF probable-strength screening factor 1.25; automatic selected reinforcement",
+            source="legacy raw_rows replay; missing context remains unresolved",
+        )
+    return context
 
 
 def redetail_payload(
@@ -577,6 +645,9 @@ def redetail_payload(
     detailing_results: list[BeamDetailingResult | None] = []
     for source in output.get("raw_rows", []):
         raw = dict(source)
+        # Derived layouts are regenerated below, never reused as new-policy evidence.
+        raw.pop("longitudinal_rows", None)
+        raw.pop("row_coordination_audit", None)
         common = {
             key: value
             for key, value in raw.items()
@@ -609,7 +680,21 @@ def redetail_payload(
             for region in REGIONS
         }
         prior_status = str(source.get("engine_status", ""))
-        if prior_status and prior_status != "OK":
+        if prior_status == "MIXED_SECTION_REVIEW_REQUIRED":
+            common["accepted_warning_codes"] = "; ".join(ACCEPTED_WARNING_CODES)
+        retryable = prior_status.startswith((
+            "BEAM_LINE_COORDINATION_BLOCKED", "ADJACENT_SPAN_",
+        ))
+        # These are solver outcomes, not missing/ambiguous source data. A
+        # replay must evaluate them against the current engine and catalogue.
+        # Keep extraction and mixed-section/profile review gates unchanged.
+        solver_status = prior_status.rsplit(":", 1)[-1].strip().split(";", 1)[0]
+        retryable = retryable or solver_status in {
+            "NO_ALLOWED_SPACING", "ROW_CATALOG_NO_FEASIBLE_LAYOUT",
+            "FINAL_ROWS_NO_FEASIBLE_HOOP",
+        }
+        retryable = retryable or prior_status == "MIXED_SECTION_REVIEW_REQUIRED"
+        if prior_status and prior_status != "OK" and not retryable:
             status = prior_status
         elif any("top_total_mm2" not in controls[region] for region in REGIONS):
             status = "NO_RESULTS"
@@ -650,6 +735,7 @@ def redetail_payload(
                         str(common.get("beam_role", common.get("beam_type", "PB"))),
                     ),
                     tuple(_engine_demand(region, controls[region]) for region in REGIONS),
+                    **_replay_detailing_context(source, output.get("metadata", {}), detailing_profile),
                 )
             )
             raw["engine_status"] = "OK"
@@ -685,6 +771,7 @@ def redetail_payload(
         elif result is not None and controls is not None:
             raw_rows[index]["engine_status"] = "OK"
             raw_rows[index]["engine_mode"] = result.mode.value
+            raw_rows[index].update(_row_layout_fields(result))
             raw_rows[index].update(_uniform_bottom_fields(result))
             raw_rows[index]["coordination_status"] = result.coordination_status
             raw_rows[index]["continuity_option"] = (
@@ -867,45 +954,37 @@ def _coordinate_results_by_beam_line(
 ) -> tuple[list[BeamDetailingResult | None], dict[int, str]]:
     output = list(results)
     errors: dict[int, str] = {}
-    groups: dict[str, list[int]] = {}
+    groups: dict[tuple[str, str, str], list[int]] = {}
     for index, (common, _) in enumerate(contexts):
         if output[index] is None:
             continue
-        groups.setdefault(str(common.get("beam_line", "")), []).append(index)
+        key = tuple(str(common.get(key, "")) for key in ("story", "beam_type", "beam_line"))
+        groups.setdefault(key, []).append(index)
 
     for indexes in groups.values():
         indexes.sort(key=lambda index: int(contexts[index][0].get("span_no", 0)))
-        if len(indexes) < 2:
-            continue
-        try:
-            max_rounds = max(2, len(indexes) * 3)
-            for _ in range(max_rounds):
-                before = tuple(_result_layout_signature(output[index]) for index in indexes)
-                for first_index, second_index in zip(indexes, indexes[1:]):
-                    first_span = int(contexts[first_index][0].get("span_no", 0))
-                    second_span = int(contexts[second_index][0].get("span_no", 0))
-                    if second_span != first_span + 1:
-                        continue
-                    first = output[first_index]
-                    second = output[second_index]
-                    if first is None or second is None:
-                        continue
-                    output[first_index], output[second_index] = coordinate_adjacent_spans(
-                        first,
-                        second,
-                        engine.project.default_continuity_option,
-                        engine,
-                    )
-                after = tuple(_result_layout_signature(output[index]) for index in indexes)
-                if after == before:
-                    break
-            else:
-                raise DetailingError("ADJACENT_SPAN_COORDINATION_NOT_CONVERGED")
-        except (DetailingError, ValueError) as exc:
-            status = f"BEAM_LINE_COORDINATION_BLOCKED: {exc}"
-            for index in indexes:
-                output[index] = None
-                errors[index] = status
+        segments: list[list[int]] = []
+        for index in indexes:
+            span = int(contexts[index][0].get("span_no", 0))
+            if not segments or span != int(contexts[segments[-1][-1]][0].get("span_no", 0)) + 1:
+                segments.append([])
+            segments[-1].append(index)
+        for segment in segments:
+            if len(segment) < 2:
+                continue
+            try:
+                coordinated = coordinate_span_segment(
+                    tuple(output[index] for index in segment),
+                    engine.project.default_continuity_option,
+                    engine,
+                )
+                for index, result in zip(segment, coordinated):
+                    output[index] = result
+            except (DetailingError, ValueError) as exc:
+                status = f"BEAM_LINE_COORDINATION_BLOCKED: {exc}"
+                for index in segment:
+                    output[index] = None
+                    errors[index] = status
     return output, errors
 
 
@@ -923,9 +1002,10 @@ def _uniform_bottom_fields(result: BeamDetailingResult) -> dict[str, Any]:
     first = bottoms[0]
     diameters = tuple(
         dict.fromkeys(
-            bar.diameter_mm
+            row.diameter_mm
             for design in bottoms
-            for bar in design.bars
+            for row in design.rows
+            if row.role != "hanger"
         )
     )
     return {
@@ -936,6 +1016,10 @@ def _uniform_bottom_fields(result: BeamDetailingResult) -> dict[str, Any]:
         "bottom_uniform_provided_mm2": first.provided_area_mm2,
         "bottom_uniform_diameters_mm": ",".join(str(value) for value in diameters),
         "bottom_uniform_layers": first.layers,
+        "bottom_uniform_rows": [
+            {"count": row.count, "diameter_mm": row.diameter_mm, "role": row.role}
+            for row in first.rows
+        ],
     }
 
 
@@ -946,8 +1030,49 @@ def _record_initial_layout(
     raw["iteration_status"] = result.iteration_status
     raw["iteration_count"] = result.iteration_count
     raw["coordination_initial_signature"] = "|".join(_result_layout_signature(result))
+    raw.update(_row_layout_fields(result))
     raw.update(_uniform_bottom_fields(result))
     raw.update(_constructability_row_fields(result))
+
+
+def _row_layout_fields(result: BeamDetailingResult) -> dict[str, Any]:
+    """Serialize every physical row for all regions and faces.
+
+    Notation remains a display convenience; replay and every downstream
+    consumer can use this lossless row payload instead.
+    """
+    regions: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    for region in result.regions:
+        region_rows: dict[str, list[dict[str, Any]]] = {}
+        for face_name, design in (("top", region.top), ("bottom", region.bottom)):
+            rows = [
+                {
+                    "count": row.count,
+                    "diameter_mm": row.diameter_mm,
+                    "role": row.role,
+                    "credited_area_mm2": row.credited_area_mm2,
+                }
+                for row in design.rows
+            ]
+            region_rows[face_name] = rows
+            audit.append({
+                "region": region.name,
+                "face": face_name,
+                "required_area_mm2": design.required_area_mm2,
+                "provided_area_mm2": design.provided_area_mm2,
+                "effective_depth_mm": design.effective_depth_mm,
+                "row_centers_mm": list(design.row_centers_mm),
+                "row_x_mm": [list(row) for row in design.row_x_mm],
+                "constraint_sources": list(design.constraint_sources),
+                "rows": rows,
+            })
+        regions[region.name] = region_rows
+    return {
+        "longitudinal_rows": regions,
+        "row_coordination_audit": audit,
+        "row_coordination_policy": "same_physical_row_same_diameter; distinct_rows_may_differ",
+    }
 
 
 def _constructability_row_fields(result: BeamDetailingResult) -> dict[str, Any]:
@@ -1589,92 +1714,6 @@ def _derive_support_face_contexts(
     return output
 
 
-def _region_controls(
-    design: BeamDesignResult,
-    length_mm: float,
-    depth_mm: float,
-) -> dict[str, dict[str, Any]] | None:
-    if not design.stations or length_mm <= 0 or depth_mm <= 0:
-        return None
-    end_zone = min(2.0 * depth_mm, length_mm / 2.0)
-    groups = {
-        "left": [station for station in design.stations if station.location <= end_zone],
-        "middle": [station for station in design.stations if end_zone < station.location < length_mm - end_zone],
-        "right": [station for station in design.stations if station.location >= length_mm - end_zone],
-    }
-    targets = {
-        "left": end_zone,
-        "middle": length_mm / 2.0,
-        "right": length_mm - end_zone,
-    }
-    for name, stations in groups.items():
-        if not stations:
-            groups[name] = [
-                min(
-                    design.stations,
-                    key=lambda station: abs(station.location - targets[name]),
-                )
-            ]
-    return {name: _control_values(stations) for name, stations in groups.items()}
-
-
-def _control_values(stations: Iterable[DesignStation]) -> dict[str, Any]:
-    items = list(stations)
-    top_total = max(items, key=lambda station: station.as_total_top_mm2)
-    top_flex = max(items, key=lambda station: station.as_flex_top_mm2)
-    bottom_total = max(items, key=lambda station: station.as_total_bottom_mm2)
-    bottom_flex = max(items, key=lambda station: station.as_flex_bottom_mm2)
-    shear = max(items, key=lambda station: station.shear_area)
-    tl = max(items, key=lambda station: station.torsion_longitudinal_area)
-    tt = max(items, key=lambda station: station.torsion_trans_area)
-    return {
-        "top_total_mm2": top_total.as_total_top_mm2,
-        "top_total_station_mm": top_total.location,
-        "top_total_combo": top_total.top_flexural_combo,
-        "top_flex_mm2": top_flex.as_flex_top_mm2,
-        "top_flex_station_mm": top_flex.location,
-        "top_flex_combo": top_flex.top_flexural_combo,
-        "bottom_total_mm2": bottom_total.as_total_bottom_mm2,
-        "bottom_total_station_mm": bottom_total.location,
-        "bottom_total_combo": bottom_total.bottom_flexural_combo,
-        "bottom_flex_mm2": bottom_flex.as_flex_bottom_mm2,
-        "bottom_flex_station_mm": bottom_flex.location,
-        "bottom_flex_combo": bottom_flex.bottom_flexural_combo,
-        "as_min_top_mm2": max(
-            (station.top_min_area or 0.0 for station in items),
-            default=0.0,
-        ),
-        "as_min_bottom_mm2": max(
-            (station.bottom_min_area or 0.0 for station in items),
-            default=0.0,
-        ),
-        "as_provided_top_mm2": _maximum_available(station.top_provided_area for station in items),
-        "as_provided_bottom_mm2": _maximum_available(station.bottom_provided_area for station in items),
-        "raw_as_provided_top": _maximum_available(station.raw_top_provided_area for station in items),
-        "raw_as_provided_bottom": _maximum_available(station.raw_bottom_provided_area for station in items),
-        "av_over_s": shear.shear_area,
-        "av_station_mm": shear.location,
-        "av_combo": shear.shear_combo,
-        "al_mm2": tl.torsion_longitudinal_area,
-        "al_station_mm": tl.location,
-        "al_combo": tl.torsion_longitudinal_combo,
-        "at_over_s": tt.torsion_trans_area,
-        "at_station_mm": tt.location,
-        "at_combo": tt.torsion_trans_combo,
-        "source_station_count": len(items),
-        "source_objects": tuple(dict.fromkeys(station.source_object for station in items if station.source_object)),
-        "units": ",".join(dict.fromkeys(station.units for station in items if station.units)),
-        "result_source": ",".join(dict.fromkeys(station.result_source for station in items if station.result_source)),
-        "design_errors": "; ".join(dict.fromkeys(station.error for station in items if station.error.strip())),
-        "design_warnings": "; ".join(dict.fromkeys(station.warning for station in items if station.warning.strip())),
-    }
-
-
-def _maximum_available(values: Iterable[float | None]) -> float | None:
-    available = [value for value in values if value is not None]
-    return max(available, default=None)
-
-
 def _engine_demand(name: str, control: Mapping[str, Any]) -> BeamRegionDemand:
     return BeamRegionDemand(
         name=name,
@@ -1747,7 +1786,7 @@ def _review_row(common: Mapping[str, Any], controls: Mapping[str, Any], result: 
             "legs": max(region.stirrup.legs for region in result.regions),
             "face_required_mm2": result.face_rebar.required_each_side_mm2,
             "face_text": result.face_rebar.notation,
-            "engine_warnings": "; ".join(result.warnings),
+            "engine_warnings": _engine_warning_text(common, result.warnings),
             "iteration_status": result.iteration_status,
             "iteration_count": result.iteration_count,
             "coordination_status": result.coordination_status,
@@ -1818,7 +1857,7 @@ def _final_row(common: Mapping[str, Any], result: Any) -> dict[str, Any]:
         "s1": by_name["middle"].stirrup.notation,
         "legs": max(region.stirrup.legs for region in result.regions),
         "face": result.face_rebar.notation,
-        "engine_warnings": "; ".join(result.warnings),
+        "engine_warnings": _engine_warning_text(common, result.warnings),
         "iteration_status": result.iteration_status,
         "iteration_count": result.iteration_count,
         "coordination_status": result.coordination_status,

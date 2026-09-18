@@ -148,6 +148,13 @@ internal sealed class PythonWorkflowRunner : IDisposable
             startInfo.ArgumentList.Add("--export-rebar-workbook");
         }
 
+        if (request.ExportBeamResultDxf)
+        {
+            startInfo.ArgumentList.Add("--export-beam-result-dxf");
+            startInfo.ArgumentList.Add("--dxf-text-height");
+            startInfo.ArgumentList.Add(request.DxfTextHeight.ToString());
+        }
+
         return startInfo;
     }
 

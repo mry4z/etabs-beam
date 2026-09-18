@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,9 @@ def export_beam_schedule(
     filename_pattern: str = "beam_schedule_{timestamp}.xlsx",
     special_records: list[MergeRecord] | None = None,
     span_schedule: SpanScheduleMapping | None = None,
+    *,
+    output_path: Path | None = None,
+    beam_type: str | None = None,
 ) -> Path:
     """Write the legacy beam schedule and, optionally, structural span rows.
 
@@ -34,7 +38,48 @@ def export_beam_schedule(
     """
     reports_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = available_output_path(reports_dir, filename_pattern.format(timestamp=timestamp))
+    destination = output_path or available_output_path(
+        reports_dir,
+        filename_pattern.format(timestamp=timestamp),
+    )
+    if beam_type is not None:
+        if beam_type not in {"PB", "SB"}:
+            raise ValueError(f"unsupported beam_type: {beam_type}")
+        if span_schedule is not None:
+            selected_records = tuple(
+                record for record in span_schedule.records if record.span.beam_type == beam_type
+            )
+            selected_names = {
+                name
+                for record in selected_records
+                for name in record.span.source_objects
+            }
+            beams = [
+                beam
+                for beam in beams
+                if beam.name in selected_names
+                or any(name in selected_names for name in (beam.source_names or (beam.name,)))
+            ]
+            source_to_span_ids = {
+                name: values
+                for name, values in span_schedule.source_to_span_ids.items()
+                if name in selected_names
+            }
+            source_to_line_ids = {
+                name: values
+                for name, values in span_schedule.source_to_line_ids.items()
+                if name in selected_names
+            }
+            span_schedule = replace(
+                span_schedule,
+                records=selected_records,
+                source_to_span_ids=source_to_span_ids,
+                source_to_line_ids=source_to_line_ids,
+            )
+        else:
+            # Without a structural schedule there is no safe PB/SB mapping;
+            # keep the legacy object rows rather than guessing from names.
+            span_schedule = None
 
     memberships = {
         name: (group.group_id, position + 1, len(group.members), _neighbors(group.members, position))
@@ -109,7 +154,8 @@ def export_beam_schedule(
                 }
             )
 
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(destination, engine="openpyxl") as writer:
         pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="梁表")
         pd.DataFrame(station_rows).to_excel(writer, index=False, sheet_name="设计站点")
         if span_schedule is not None:
@@ -142,7 +188,7 @@ def export_beam_schedule(
         pd.DataFrame(record_rows).to_excel(writer, index=False, sheet_name="异常记录")
         for sheet in writer.book.worksheets:
             _format_sheet(sheet)
-    return output_path
+    return destination
 
 
 def _span_row(record: object) -> dict[str, object]:

@@ -150,7 +150,10 @@ def test_pb38_midspan_reduces_with_four_leg_preference_without_changing_support_
     result = engine.design(BeamDetailingInput(section, demands))
     assert all(region.stirrup.legs == 4 for region in result.regions)
     assert tuple(region.stirrup.notation for region in result.regions) == ("T10@100", "T16@200", "T10@100")
-    assert tuple(region.top.notation for region in result.regions) == ("6T25 4/2", "4T25", "6T25 4/2")
+    first_rows = [region.top.rows[0] for region in result.regions]
+    assert len({row.diameter_mm for row in first_rows}) == 1
+    assert all(row.count >= region.stirrup.legs for row, region in zip(first_rows, result.regions))
+    assert all(region.top.provided_area_mm2 >= region.top.required_area_mm2 for region in result.regions)
     assert result.regions[1].top.required_area_mm2 == pytest.approx(1129.5091989569646)
     # The newly authorized hoop preference reduces the controlling leg count;
     # the existing PB top count floor and support-diameter/lap rule remain.

@@ -289,12 +289,20 @@ def test_snapshot_workflow_runs_topology_and_excel_without_etabs(tmp_path) -> No
         exclude_writeback_objects=None,
         export_excel=True,
         export_rebar_workbook=False,
+        export_beam_result_dxf=True,
+        dxf_text_height=25,
         artifact_node="node",
         artifact_node_modules=None,
         artifact_node_max_old_space_mb=1024,
     )
 
-    summary = run_snapshot_workflow(args, load_config(), output)
+    progress_events = []
+    summary = run_snapshot_workflow(
+        args,
+        load_config(),
+        output,
+        progress=lambda percent, message: progress_events.append((percent, message)),
+    )
 
     assert summary["mode"] == "read-only-snapshot"
     assert summary["data_source"]["kind"] == "sqlite-snapshot"
@@ -302,6 +310,13 @@ def test_snapshot_workflow_runs_topology_and_excel_without_etabs(tmp_path) -> No
     assert summary["spans"] == 1
     assert Path(summary["outputs"]["spans_csv"]).is_file()
     assert Path(summary["outputs"]["excel"]).is_file()
+    assert len(summary["outputs"]["beam_result_dxf"]) == 1
+    assert len(summary["outputs"]["beam_section_dxf"]) == 1
+    assert Path(summary["outputs"]["beam_result_dxf"][0]).is_file()
+    assert Path(summary["outputs"]["beam_section_dxf"][0]).is_file()
+    assert progress_events[0][0] == 0
+    assert progress_events[-1][0] == 86
+    assert [percent for percent, _ in progress_events] == sorted(percent for percent, _ in progress_events)
 
 
 def test_snapshot_workflow_builds_rebar_payload_from_same_domain_contract(

@@ -293,7 +293,7 @@ def build_constructability(
     left_spacing_mm: float | None,
     middle_spacing_mm: float | None,
     right_spacing_mm: float | None,
-    allowed_spacings_mm: Sequence[int] = (100, 150, 200),
+    allowed_spacings_mm: Sequence[int] = (100, 110, 130, 150, 170, 200),
     smf_end_project_limit_mm: float = 100.0,
     yield_locations_mm: Iterable[float] = (),
     seismic_context: SeismicDetailingContext | None = None,

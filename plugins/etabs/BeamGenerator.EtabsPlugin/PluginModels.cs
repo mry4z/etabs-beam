@@ -99,6 +99,10 @@ internal sealed class PluginSettings
     public string EtabsApiPath { get; set; } = "";
 
     public bool ExportRebarWorkbook { get; set; }
+
+    public bool ExportBeamResultDxf { get; set; }
+
+    public int DxfTextHeight { get; set; } = 100;
 }
 
 internal sealed record WorkflowRunRequest(
@@ -116,5 +120,7 @@ internal sealed record WorkflowRunRequest(
     bool TowerPreflightOnly = false,
     bool TowerContinueOnReview = false,
     bool TowerCreateGroups = false,
-    string TowerPlanPath = ""
+    string TowerPlanPath = "",
+    bool ExportBeamResultDxf = false,
+    int DxfTextHeight = 100
 );

@@ -52,9 +52,7 @@ internal sealed partial class MainForm
         string? reportPath;
         try
         {
-            reportPath = Directory.GetFiles(request.OutputDirectory, "tower_assignment_check_*.json")
-                .OrderByDescending(File.GetLastWriteTimeUtc)
-                .FirstOrDefault();
+            reportPath = FindTowerReport(request.OutputDirectory);
         }
         catch { return false; }
         if (reportPath is null) return false;
@@ -114,7 +112,10 @@ internal sealed partial class MainForm
         var selection = Convert.ToString(_selectionMode.SelectedItem) ?? "selected";
         if (selection == "selected" && _snapshot.SelectedFrames.Count == 0)
             throw new InvalidOperationException("selected 模式要求先在 ETABS 中选择至少一个 Frame Object。");
-        _lastOutputDirectory = CreateUniqueOutputDirectory(ResolvePath(directory, _outputRootText.Text));
+        _lastOutputDirectory = CreateModelOutputDirectory(
+            ResolvePath(directory, _outputRootText.Text),
+            model
+        );
         Directory.CreateDirectory(_lastOutputDirectory);
         SaveSettings(showConfirmation: false);
         return new WorkflowRunRequest(runner, directory, config, api, _lastOutputDirectory,
@@ -151,8 +152,7 @@ internal sealed partial class MainForm
             RefreshModel();
             if (requestScope != CurrentTowerReviewScope())
                 throw new InvalidOperationException("检查期间模型或处理范围改变，请重新检查。");
-            var reportPath = Directory.GetFiles(_lastOutputDirectory, "tower_assignment_check_*.json")
-                .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+            var reportPath = FindTowerReport(_lastOutputDirectory);
             _towerReportPath = reportPath ?? "";
             var reportSummary = TowerReportSummary.MissingReport;
             if (reportPath is not null)
@@ -196,5 +196,17 @@ internal sealed partial class MainForm
             _openOutputButton.Enabled = Directory.Exists(_lastOutputDirectory);
             CloseAfterRecoveryIfRequested();
         }
+    }
+
+    private static string? FindTowerReport(string outputDirectory)
+    {
+        var dataDirectory = Path.Combine(outputDirectory, "_data");
+        var searchDirectories = Directory.Exists(dataDirectory)
+            ? new[] { dataDirectory, outputDirectory }
+            : new[] { outputDirectory };
+        return searchDirectories
+            .SelectMany(directory => Directory.GetFiles(directory, "tower_assignment_check_*.json"))
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
     }
 }

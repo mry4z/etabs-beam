@@ -1,3 +1,22 @@
+# v0.4.3（v2）梁计算结果/截面 DXF · 2026-09-16
+
+- 新增按楼层输出梁计算结果 DXF 与真实梁截面 DXF；结果基于同一 Span schedule，保留真实跨折线、N_mm_C 单位门禁、红色 ERR 及逐跨摘要。
+- DXF 文件名按交付约定输出为 `wpj-<Story>.dxf` 与 `构件编号-<Story>.dxf`；结果/截面全部 TEXT 统一使用 `dsptext_beam` 图层，文字内容保持原值。
+- 插件新增“同时生成梁计算结果/截面 DXF（按楼层）”及 25/50/75/100 mm 字高设置，设置文件持久化；普通成果流程仍为只读。
+- 插件 DXF 字高下拉框默认 100 mm；已有合法的 25/50/75/100 mm 设置继续保留，无效设置回退 100 mm。
+- 普通梁工作流增加节流的 `[beam]` 阶段进度和紧凑完成摘要；完整逐跨明细继续写入 `topology_summary.json` 与 manifest。
+- CLI 与 SQLite snapshot 均支持 `--export-beam-result-dxf` / `--dxf-text-height`；未连接 ETABS 的离线验证覆盖 DXF 几何与标签格式。
+- 普通成果统一落入 `<model>_beam_output/`：根目录只保留最终主/次梁配筋表、`<model>_span_note.dxf` 和 `wpj-`/`构件编号-` 逐层 DXF；审计、payload、manifest、预览和基础检查梁表归档至 `_data/`，重复运行复用同一模型目录。
+- 配筋箍筋目录统一为 `100/110/130/150/170/200 mm`（规范最大间距仍为硬过滤），宽度 `<400/400–549/≥550 mm` 从 2/4/6 肢起步，选择策略明确为 `SPACING_THEN_DIAMETER_THEN_LEGS`；PB/SB 均保持只读且 SB 跨内统一规格。
+
+# v0.4.2（v2）纵向排筋协调实现 · 2026-09-10
+
+- 梁跨协调改为有限的连续段处理，按物理排筋保存完整 rows（同一物理排同径、不同排可异径）。
+- 梁表 JSON schema 升级至 2.2；保留完整排筋、排布审计和重算所需 detailing context。
+- 修正共同支座多排面积退化、真实 profile 过渡分组、上部第一排贯通和多排几何/重心审计；当前源代码策略版本为 `nasiriyah-smf-sb-2026-09-11-r4-row-coordination`。
+- 0.4.2 第一排协调规则：支座/同跨第一排直径保持一致，根数按各区箍筋架立与需求独立求解；完整 rows、有效高度、横向槽位和最终箍筋反馈均写入 JSON 审计。
+- 本版当前完成离线源代码验证；便携包构建与 ETABS 22/23 实模验收仍为发布门禁，未连接或写回 ETABS 实模。
+
 # v0.4.1（v2）加载确认版 · 2026-09-10
 
 ## 2026-09-10 修订
@@ -28,7 +47,7 @@
 1. 先由用户保存工作，移除旧插件条目，退出加载过旧 DLL 的 ETABS。
 2. 将 ZIP 完整解压到新目录，保留 `workflow/`；不要只复制 DLL，也不要混入旧运行器或 ETABSv1.dll。
 3. 重新启动 ETABS，在 Tools → Add/Show Plugins 中加载包根目录的 `BeamGenerator.EtabsPlugin.dll`。
-4. 确认窗口显示 v0.4.1，内置引擎已就绪；config.yaml 指向新包 `workflow/BeamGenerator.Workflow/config.yaml`。
+4. 确认窗口显示 v0.4.3，内置引擎已就绪；config.yaml 指向新包 `workflow/BeamGenerator.Workflow/config.yaml`。
 5. API DLL 选择当前 ETABS 安装目录的文件；结果目录使用新的测试目录。
 
 ## 请优先确认

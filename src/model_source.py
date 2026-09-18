@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 from src.core.etabs_connector import api_values, model_paths_match
 from src.core.etabs_tower import EtabsTowerReader
 from src.core.tower_assignment import TowerAssignmentReport
-from src.core.geometry_extractor import BeamGeometry, GeometryExtractor
+from src.core.geometry_extractor import BeamGeometry, GeometryExtractor, SelectionError
 from src.core.model_writeback import EtabsWriteback, FrameState
 from src.design.etabs_result import EtabsResultProvider
 from src.design.provider import BeamDesignResult, DesignResultStatus
@@ -24,6 +24,15 @@ from src.snapshot.sqlite_snapshot import (
 from src.utils.geometry import Point3D
 
 
+def _emit_progress(
+    progress: Callable[[int, str], None] | None,
+    percent: int,
+    message: str,
+) -> None:
+    if progress is not None:
+        progress(max(0, min(100, int(percent))), message)
+
+
 class ReadModelSource(Protocol):
     """The normalized read contract consumed by topology and workbook flows."""
 
@@ -32,13 +41,24 @@ class ReadModelSource(Protocol):
 
     def assert_current(self) -> str: ...
 
-    def extract_beams(self, selection: str = "all") -> list[BeamGeometry]: ...
+    def extract_beams(
+        self,
+        selection: str = "all",
+        *,
+        include_design_ineligible: bool = False,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> list[BeamGeometry]: ...
 
     def column_supports(self) -> dict[str, Point3D]: ...
 
     def frame_states(self, beams: Sequence[BeamGeometry]) -> dict[str, FrameState]: ...
 
-    def designs(self, beams: Iterable[BeamGeometry]) -> dict[str, BeamDesignResult]: ...
+    def designs(
+        self,
+        beams: Iterable[BeamGeometry],
+        *,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> dict[str, BeamDesignResult]: ...
 
     def frame_types(self) -> dict[str, str]: ...
 
@@ -47,6 +67,8 @@ class ReadModelSource(Protocol):
     def design_code(self) -> str: ...
 
     def identity(self) -> Mapping[str, Any]: ...
+
+    def design_object_exclusions(self) -> tuple[Mapping[str, Any], ...]: ...
 
 
 class EtabsOapiReadSource:
@@ -69,6 +91,9 @@ class EtabsOapiReadSource:
         )
         self.expected_model_sha256 = expected_model_sha256
         self._geometry = GeometryExtractor(sap_model)
+        self._design_provider = EtabsResultProvider(sap_model)
+        self._design_cache: dict[str, BeamDesignResult] = {}
+        self._design_exclusions: list[dict[str, Any]] = []
 
     def assert_current(self) -> str:
         if not self.durable_model_path.is_file():
@@ -78,8 +103,53 @@ class EtabsOapiReadSource:
             raise RuntimeError("OAPI_SOURCE_MODEL_CHANGED: " f"expected {self.expected_model_sha256}, got {actual}")
         return actual
 
-    def extract_beams(self, selection: str = "all") -> list[BeamGeometry]:
-        return self._geometry.extract(selection)
+    def extract_beams(
+        self,
+        selection: str = "all",
+        *,
+        include_design_ineligible: bool = False,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> list[BeamGeometry]:
+        beams = self._geometry.extract(selection)
+        results_available = getattr(self.sap.DesignConcrete, "GetResultsAvailable", None)
+        if results_available is None or not bool(results_available()):
+            # Without a model-level design result there is no authoritative
+            # object membership set yet.  The workflow will fail closed before
+            # exporting design-dependent outputs; do not silently discard all
+            # geometry during a topology-only diagnostic run.
+            _emit_progress(progress, 100, "读取梁几何完成（模型暂无设计结果）")
+            return beams
+        self._design_exclusions = []
+        eligible: list[BeamGeometry] = []
+        _emit_progress(progress, 0, "读取梁设计资格")
+        total = len(beams)
+        last_percent = -1
+        for index, beam in enumerate(beams, 1):
+            result = self._design_result(beam.name)
+            if result.status in {DesignResultStatus.AVAILABLE, DesignResultStatus.PARTIAL}:
+                eligible.append(beam)
+            else:
+                self._design_exclusions.append(
+                    {
+                        "object_name": beam.name,
+                        "label": beam.label,
+                        "story": beam.story,
+                        "section": beam.section,
+                        "status": result.status.value,
+                        "reason": result.status_message or "ETABS 未返回当前对象的混凝土设计结果。",
+                    }
+                )
+            percent = round(index * 100 / max(total, 1))
+            if percent != last_percent:
+                _emit_progress(progress, percent, f"读取梁设计资格 {index}/{total}")
+                last_percent = percent
+        if include_design_ineligible:
+            _emit_progress(progress, 100, f"梁设计资格读取完成（{len(beams)} 梁）")
+            return beams
+        if selection == "selected" and not eligible:
+            raise SelectionError("当前选择中没有参与混凝土设计的梁对象。")
+        _emit_progress(progress, 100, f"梁设计资格读取完成（{len(eligible)} 梁）")
+        return eligible
 
     def tower_assignment_report(
         self,
@@ -101,9 +171,45 @@ class EtabsOapiReadSource:
     def frame_states(self, beams: Sequence[BeamGeometry]) -> dict[str, FrameState]:
         return EtabsWriteback(self.sap).snapshot_from_geometry(beams)
 
-    def designs(self, beams: Iterable[BeamGeometry]) -> dict[str, BeamDesignResult]:
-        provider = EtabsResultProvider(self.sap)
-        return _read_designs(provider, beams)
+    def designs(
+        self,
+        beams: Iterable[BeamGeometry],
+        *,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> dict[str, BeamDesignResult]:
+        beam_list = tuple(beams)
+        designs: dict[str, BeamDesignResult] = {}
+        _emit_progress(progress, 0, "读取梁设计结果")
+        last_percent = -1
+        total = len(beam_list)
+        for index, beam in enumerate(beam_list, 1):
+            designs[beam.name] = self._design_result(beam.name)
+            percent = round(index * 100 / max(total, 1))
+            if percent != last_percent:
+                _emit_progress(progress, percent, f"读取梁设计结果 {index}/{total}")
+                last_percent = percent
+        _emit_progress(progress, 100, f"梁设计结果读取完成（{total} 梁）")
+        return designs
+
+    def _design_result(self, name: str) -> BeamDesignResult:
+        cached = self._design_cache.get(name)
+        if cached is not None:
+            return cached
+        try:
+            result = self._design_provider.get_beam_design_total(name)
+        except Exception as exc:
+            result = BeamDesignResult(
+                name,
+                status=DesignResultStatus.API_ERROR,
+                status_message=str(exc),
+                source_objects=(name,),
+                result_source="GetSummaryResultsBeam_2",
+            )
+        self._design_cache[name] = result
+        return result
+
+    def design_object_exclusions(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(self._design_exclusions)
 
     def frame_types(self) -> dict[str, str]:
         return _frame_types(self.sap)
@@ -148,14 +254,39 @@ class SqliteReadSource:
         self._metadata = metadata
         self._source = SqliteSnapshotSource(self.reader)
         self._design = SqliteDesignProvider(self.reader)
+        self._design_exclusions: list[dict[str, Any]] = []
 
     def assert_current(self) -> str:
         return self.reader.assert_source_current(self.model_path)
 
-    def extract_beams(self, selection: str = "all") -> list[BeamGeometry]:
+    def extract_beams(
+        self,
+        selection: str = "all",
+        *,
+        include_design_ineligible: bool = False,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> list[BeamGeometry]:
         if selection != "all":
             raise SnapshotTableError("SNAPSHOT_SELECTION_UNSUPPORTED: only all is available")
-        return self._source.extract_beams()
+        _emit_progress(progress, 0, "读取快照梁几何")
+        beams = self._source.extract_beams()
+        design_names = set(self._design.beam_names())
+        eligible = [beam for beam in beams if beam.name in design_names]
+        self._design_exclusions = [
+            {
+                "object_name": beam.name,
+                "label": beam.label,
+                "story": beam.story,
+                "section": beam.section,
+                "status": DesignResultStatus.NO_RESULTS.value,
+                "reason": "快照设计结果中不存在当前对象。",
+            }
+            for beam in beams
+            if beam.name not in design_names
+        ]
+        result = beams if include_design_ineligible else eligible
+        _emit_progress(progress, 100, f"快照梁几何读取完成（{len(result)} 梁）")
+        return result
 
     def column_supports(self) -> dict[str, Point3D]:
         return self._source.column_supports()
@@ -163,12 +294,28 @@ class SqliteReadSource:
     def frame_states(self, beams: Sequence[BeamGeometry]) -> dict[str, FrameState]:
         return self._source.frame_states(beams)
 
-    def designs(self, beams: Iterable[BeamGeometry]) -> dict[str, BeamDesignResult]:
+    def designs(
+        self,
+        beams: Iterable[BeamGeometry],
+        *,
+        progress: Callable[[int, str], None] | None = None,
+    ) -> dict[str, BeamDesignResult]:
         beam_names = tuple(beam.name for beam in beams)
         snapshot_names = self._design.beam_names()
         if set(beam_names) != set(snapshot_names):
             raise SnapshotTableError("SNAPSHOT_DESIGN_BEAM_SET_MISMATCH")
-        return {name: self._design.get_beam_design(name) for name in beam_names}
+        designs: dict[str, BeamDesignResult] = {}
+        _emit_progress(progress, 0, "读取梁设计结果")
+        last_percent = -1
+        total = len(beam_names)
+        for index, name in enumerate(beam_names, 1):
+            designs[name] = self._design.get_beam_design(name)
+            percent = round(index * 100 / max(total, 1))
+            if percent != last_percent:
+                _emit_progress(progress, percent, f"读取梁设计结果 {index}/{total}")
+                last_percent = percent
+        _emit_progress(progress, 100, f"梁设计结果读取完成（{total} 梁）")
+        return designs
 
     def frame_types(self) -> dict[str, str]:
         return self._source.frame_types()
@@ -194,6 +341,9 @@ class SqliteReadSource:
             "etabs_version": self._metadata.get("etabs_version"),
             "api_version": self._metadata.get("api_version"),
         }
+
+    def design_object_exclusions(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(self._design_exclusions)
 
 
 def _read_designs(

@@ -172,10 +172,14 @@ class BarCatalog:
 class ProjectDetailingPolicy:
     """Project choices, separate from code clauses."""
 
-    version: str = "nasiriyah-smf-sb-2026-08-27-r3"
+    version: str = "nasiriyah-smf-sb-2026-09-18-SPACING_THEN_DIAMETER_THEN_LEGS"
     catalog: BarCatalog = field(default_factory=BarCatalog)
     enabled_diameters_mm: tuple[int, ...] = (10, 12, 16, 20, 25)
-    allowed_spacings_mm: tuple[int, ...] = (100, 150, 200)
+    # Both ordinary and SMF members use the same approved discrete spacing
+    # catalogue.  Code maximum-spacing limits remain a hard filter below.
+    allowed_spacings_mm: tuple[int, ...] = (100, 110, 130, 150, 170, 200)
+    smf_allowed_spacings_mm: tuple[int, ...] = (100, 110, 130, 150, 170, 200)
+    smf_shallow_min_stirrup_diameter_mm: int = 12
     preferred_stirrup_diameters_mm: tuple[int, ...] = (10, 12)
     preferred_longitudinal_diameters_mm: tuple[int, ...] = (20, 25)
     preferred_torsion_face_diameters_mm: tuple[int, ...] = (20, 25, 16, 12, 10)
@@ -220,6 +224,12 @@ class ProjectDetailingPolicy:
             raise DetailingError("SB 上筋优选直径上限必须为正数。")
         if not self.allowed_spacings_mm or any(value <= 0 for value in self.allowed_spacings_mm):
             raise DetailingError("项目箍筋间距目录不能为空且必须为正数。")
+        if not self.smf_allowed_spacings_mm or any(
+            value <= 0 for value in self.smf_allowed_spacings_mm
+        ):
+            raise DetailingError("SMF 箍筋间距目录不能为空且必须为正数。")
+        if self.smf_shallow_min_stirrup_diameter_mm not in enabled:
+            raise DetailingError("SMF 浅型梁最低箍筋直径必须属于项目启用目录。")
         if self.smf_end_max_spacing_mm <= 0:
             raise DetailingError("SMF 端部项目箍筋间距上限必须为正数。")
         if not 0 < self.smf_max_longitudinal_ratio <= 0.025:
@@ -250,6 +260,32 @@ class ProjectDetailingPolicy:
                 reverse=True,
             )
         )
+
+    def allowed_spacings_for(self, section: Any, region_name: str) -> tuple[int, ...]:
+        """Return the discrete spacing catalogue applicable to one region."""
+
+        if getattr(section, "is_smf", False):
+            return tuple(sorted(set((*self.allowed_spacings_mm, *self.smf_allowed_spacings_mm))))
+        return self.allowed_spacings_mm
+
+    def preferred_stirrup_legs(self, section: Any) -> int:
+        """Return the project preferred even leg count for one beam width."""
+
+        width = float(getattr(section, "width_mm", 0.0))
+        if width < 400.0:
+            return 2
+        if width < 550.0:
+            return 4
+        return 6
+
+    def minimum_stirrup_diameter_for(self, section: Any) -> int:
+        if (
+            getattr(section, "is_smf", False)
+            and float(section.width_mm) >= 500.0
+            and float(section.depth_mm) <= 300.0
+        ):
+            return self.smf_shallow_min_stirrup_diameter_mm
+        return min(self.enabled_diameters_mm)
 
     def minimum_main_diameter_for(self, section: Any) -> int:
         """Return the active primary-flexural diameter floor for one section."""
@@ -313,8 +349,11 @@ class ACI318_14_DetailingPolicy:
         stirrup_diameter_mm: float,
         main_diameter_mm: float,
         smf_end_project_limit_mm: float | None = None,
+        *,
+        effective_depth_mm: float | None = None,
     ) -> tuple[float, str, tuple[tuple[str, float], ...], bool]:
-        effective_depth = self.effective_depth(section, stirrup_diameter_mm, main_diameter_mm)
+        effective_depth = (effective_depth_mm if effective_depth_mm is not None else
+                           self.effective_depth(section, stirrup_diameter_mm, main_diameter_mm))
         if effective_depth <= 0:
             return 0.0, "INVALID_EFFECTIVE_DEPTH", (("effective_depth", 0.0),), False
         ph = self.hoop_perimeter(
@@ -594,20 +633,129 @@ class StirrupDesign:
 
 
 @dataclass(frozen=True)
+class PhysicalRow:
+    count: int
+    diameter_mm: int
+    role: str = "longitudinal"
+    credited_area_mm2: float | None = None
+
+    def __post_init__(self):
+        if not isinstance(self.count, int) or self.count < 2 or self.diameter_mm <= 0:
+            raise DetailingError("PHYSICAL_ROW_INVALID: every row needs at least two equal-diameter bars")
+        area = self.count * math.pi * self.diameter_mm**2 / 4
+        if self.credited_area_mm2 is None:
+            object.__setattr__(self, "credited_area_mm2", area)
+        elif not 0 <= self.credited_area_mm2 <= area + 1e-9:
+            raise DetailingError("PHYSICAL_ROW_INVALID_CREDIT")
+
+    @property
+    def notation(self):
+        return f"{self.count}T{self.diameter_mm}"
+
+
+@dataclass(frozen=True, init=False)
 class LongitudinalDesign:
-    bars: tuple[BarSpec, ...]
+    rows: tuple[PhysicalRow, ...]
     required_area_mm2: float
-    provided_area_mm2: float
-    layers: int
     clear_spacing_mm: float
-    hanger_bars: BarSpec | None = None
+    row_centers_mm: tuple[float, ...]
+    row_x_mm: tuple[tuple[float, ...], ...]
+    effective_depth_mm: float | None
+    constraint_sources: tuple[str, ...]
+
+    def __init__(self, bars=(), required_area_mm2=0.0, provided_area_mm2=None,
+                 layers=None, clear_spacing_mm=25.0, hanger_bars=None, *, rows=None,
+                 row_centers_mm=(), row_x_mm=(), effective_depth_mm=None, constraint_sources=()):
+        if rows is None:
+            # Convert the pre-0.4.2 catalogue representation to physical rows
+            # at the boundary.  Each layer is a real row; no downstream
+            # consumer is allowed to infer rows from a flattened notation.
+            converted: list[PhysicalRow] = []
+            for bar in bars:
+                layer_counts = tuple(int(value) for value in (bar.layers or (bar.count,)))
+                for count in layer_counts:
+                    if count:
+                        physical_count = max(2, count)
+                        converted.append(PhysicalRow(
+                            physical_count,
+                            bar.diameter_mm,
+                            bar.role,
+                            credited_area_mm2=count * bar.area_mm2,
+                        ))
+            if hanger_bars is not None:
+                for count in tuple(int(value) for value in (hanger_bars.layers or (hanger_bars.count,))):
+                    if count:
+                        physical_count = max(2, count)
+                        converted.append(PhysicalRow(
+                            physical_count,
+                            hanger_bars.diameter_mm,
+                            hanger_bars.role,
+                            credited_area_mm2=count * hanger_bars.area_mm2,
+                        ))
+            rows = tuple(converted)
+        if not rows:
+            raise DetailingError("PHYSICAL_ROWS_REQUIRED")
+        for key, value in dict(rows=tuple(rows), required_area_mm2=required_area_mm2,
+                               clear_spacing_mm=clear_spacing_mm,
+                               row_centers_mm=tuple(row_centers_mm),
+                               row_x_mm=tuple(tuple(row) for row in row_x_mm),
+                               effective_depth_mm=effective_depth_mm,
+                               constraint_sources=tuple(constraint_sources)).items():
+            object.__setattr__(self, key, value)
+
+    @property
+    def bars(self):
+        groups: list[BarSpec] = []
+        for row in self.rows:
+            count = row.count
+            area = math.pi * row.diameter_mm**2 / 4.0
+            if groups and groups[-1].diameter_mm == row.diameter_mm and groups[-1].role == row.role:
+                prior = groups[-1]
+                groups[-1] = BarSpec(
+                    prior.diameter_mm,
+                    prior.count + count,
+                    (*prior.layers, count),
+                    area,
+                    prior.role,
+                )
+            else:
+                groups.append(BarSpec(row.diameter_mm, count, (count,), area, row.role))
+        return tuple(groups)
+
+    @property
+    def provided_area_mm2(self):
+        return sum(r.credited_area_mm2 for r in self.rows)
+
+    @property
+    def layers(self):
+        return len(self.rows)
+
+    @property
+    def hanger_bars(self):
+        return None
+
+    @property
+    def minimum_main_diameter_mm(self):
+        return min(r.diameter_mm for r in self.rows if r.role != "hanger")
+
+    @property
+    def maximum_main_diameter_mm(self):
+        return max(r.diameter_mm for r in self.rows if r.role != "hanger")
 
     @property
     def notation(self) -> str:
-        flexural = "+".join(bar.notation for bar in self.bars)
-        if self.hanger_bars is None:
-            return flexural
-        return f"{flexural}+({self.hanger_bars.notation})"
+        main = tuple(row for row in self.rows if row.role != "hanger")
+        hanger = tuple(row for row in self.rows if row.role == "hanger")
+        if not main:
+            return "/".join(row.notation for row in self.rows)
+        if len({row.diameter_mm for row in main}) == 1:
+            diameter = main[0].diameter_mm
+            text = "/".join(f"{row.count}T{diameter}" for row in main)
+        else:
+            text = "/".join(row.notation for row in main)
+        if hanger:
+            text += "/" + "/".join(row.notation for row in hanger)
+        return text
 
 
 @dataclass(frozen=True)
@@ -658,6 +806,8 @@ class BeamDetailingResult:
     smf_checks: tuple[RuleCheck, ...] = ()
     capacity_shear_review: CapacityShearReview | None = None
     seismic_context: SeismicDetailingContext | None = None
+    input_data: BeamDetailingInput | None = None
+    coordination_audit: tuple[dict, ...] = ()
 
     @property
     def errors(self) -> tuple[str, ...]:
@@ -678,6 +828,10 @@ class BeamDetailingEngine:
         self.project = project_policy or ProjectDetailingPolicy()
 
     def design(self, input_data: BeamDetailingInput) -> BeamDetailingResult:
+        from src.design.row_solver import design_span
+        return design_span(input_data, self)
+
+    def _legacy_design(self, input_data: BeamDetailingInput) -> BeamDetailingResult:
         section = input_data.section
         if section.detailing_profile is BeamDetailingProfile.PB_REVIEW_REQUIRED:
             raise DetailingError("DETAILING_PROFILE_REVIEW_REQUIRED")
@@ -798,12 +952,29 @@ class BeamDetailingEngine:
             capacity_review,
         )
 
+        return self._build_row_result(input_data, mode, regions, iteration_count=iteration_count)
+
+    def _build_row_result(self, input_data, mode, regions, *, iteration_count=1):
+        section = input_data.section
+        regions = tuple(
+            replace(
+                region,
+                top=self._resolve_physical_layout(section, region.stirrup, region.top, face="top"),
+                bottom=self._resolve_physical_layout(section, region.stirrup, region.bottom, face="bottom"),
+            )
+            for region in regions
+        )
+        iteration_status = "STABLE"
+        capacity_review = self._calculate_capacity_review(section, regions, input_data.seismic_context)
+        final_seismic_context = self._context_with_capacity_review(input_data.seismic_context, capacity_review)
         face = self._select_face_rebar(section, input_data.regions, mode)
         final_stirrup_diameter = max(region.stirrup.diameter_mm for region in regions)
         final_main_diameter = min(self._final_main_db(region, section) for region in regions)
         effective_depth = min(
-            self.code.effective_depth(section, region.stirrup.diameter_mm, self._final_main_db(region, section))
-            for region in regions
+            (design.effective_depth_mm or self.code.effective_depth(
+                section, region.stirrup.diameter_mm, self._final_main_db(region, section)
+            ))
+            for region in regions for design in (region.top, region.bottom)
         )
         layout_geometry = RebarLayoutGeometry(
             width_mm=section.width_mm,
@@ -811,9 +982,9 @@ class BeamDetailingEngine:
             effective_depth_mm=effective_depth,
             stirrup_diameter_mm=final_stirrup_diameter,
             clear_cover_mm=section.clear_cover_for_layout_mm(final_stirrup_diameter, final_main_diameter),
-            top_layers=tuple(tuple(float(value) for value in region.top.bars[0].layers) for region in regions),
-            bottom_layers=tuple(tuple(float(value) for value in region.bottom.bars[0].layers) for region in regions),
-            coordinates_resolved=False,
+            top_layers=tuple(tuple(float(row.count) for row in region.top.rows) for region in regions),
+            bottom_layers=tuple(tuple(float(row.count) for row in region.bottom.rows) for region in regions),
+            coordinates_resolved=True,
         )
         constructability = build_constructability(
             is_smf=section.is_smf,
@@ -826,7 +997,14 @@ class BeamDetailingEngine:
             left_spacing_mm=regions[0].stirrup.spacing_mm,
             middle_spacing_mm=regions[1].stirrup.spacing_mm,
             right_spacing_mm=regions[2].stirrup.spacing_mm,
-            allowed_spacings_mm=self.project.allowed_spacings_mm,
+            allowed_spacings_mm=tuple(
+                sorted(
+                    set(
+                        (*self.project.allowed_spacings_mm,
+                         *self.project.smf_allowed_spacings_mm)
+                    )
+                )
+            ),
             smf_end_project_limit_mm=self.project.smf_end_max_spacing_mm,
             yield_locations_mm=(
                 input_data.yield_locations_mm
@@ -924,6 +1102,89 @@ class BeamDetailingEngine:
             smf_checks=tuple(smf_checks),
             capacity_shear_review=capacity_review,
             seismic_context=input_data.seismic_context,
+            input_data=input_data,
+        )
+
+    def _resolve_physical_layout(
+        self,
+        section: BeamSection,
+        stirrup: StirrupDesign,
+        design: LongitudinalDesign,
+        *,
+        face: str,
+    ) -> LongitudinalDesign:
+        """Resolve row centers and effective depth from the actual rows.
+
+        Centers are measured from the relevant concrete face.  This is kept
+        separate from candidate selection so legacy payloads cannot silently
+        publish an empty geometry audit.
+        """
+        cover = section.clear_cover_for_layout_mm(stirrup.diameter_mm, design.maximum_main_diameter_mm)
+        clear_gap = max(25.0, float(section.aggregate_mm) * 4.0 / 3.0,
+                        float(max(row.diameter_mm for row in design.rows)))
+        centers: list[float] = []
+        previous_diameter = 0.0
+        for row in design.rows:
+            radius = row.diameter_mm / 2.0
+            center = cover + stirrup.diameter_mm + radius
+            if centers:
+                center = centers[-1] + previous_diameter / 2.0 + clear_gap + radius
+            centers.append(center)
+            previous_diameter = row.diameter_mm
+        physical_area = sum(row.count * row.diameter_mm**2 for row in design.rows)
+        centroid = sum(center * row.count * row.diameter_mm**2
+                       for center, row in zip(centers, design.rows)) / physical_area
+        basis = "EXPLICIT_CLEAR_COVER_TO_STIRRUP_OUTER"
+        if section.clear_cover_to_stirrup_outer_mm is None:
+            shift = section.etabs_longitudinal_cover_mm - centroid
+            centers = [center + shift for center in centers]
+            cover += shift
+            basis = "ETABS_LONGITUDINAL_CENTROID"
+        if cover <= 0:
+            raise DetailingError(f"{section.name}/{face}: CENTROID_COVER_GEOMETRY_INFEASIBLE")
+        row_x = []
+        from itertools import combinations
+        # Inward rows use a subset of the preceding row's slots, rather than
+        # independently centering each row and claiming alignment afterwards.
+        inset = cover + stirrup.diameter_mm + max(row.diameter_mm for row in design.rows) / 2
+        first_count = design.rows[0].count
+        slots = tuple(inset + i * (section.width_mm - 2 * inset) / (first_count - 1)
+                      for i in range(first_count))
+        for row in design.rows:
+            gap = self.code.minimum_clear_spacing(row.diameter_mm, section.aggregate_mm)
+            needed = row.count * row.diameter_mm + (row.count - 1) * gap
+            if needed > section.width_mm - 2 * (cover + stirrup.diameter_mm) + 1e-9:
+                raise DetailingError(f"{section.name}/{face}: ROW_HORIZONTAL_CLEARANCE_FAILED")
+            feasible = (candidate for candidate in combinations(slots, row.count)
+                        if all(b - a >= row.diameter_mm + gap - 1e-9
+                               for a, b in zip(candidate, candidate[1:])))
+            chosen = min(feasible, key=lambda values: (
+                abs(values[0] + values[-1] - section.width_mm),
+                -(values[-1] - values[0]), values), default=None)
+            if chosen is None:
+                raise DetailingError(f"{section.name}/{face}: ROW_ALIGNMENT_INFEASIBLE")
+            row_x.append(chosen)
+            slots = chosen
+        outer = centers[-1] + previous_diameter / 2.0
+        available = section.depth_mm - 2.0 * (cover + stirrup.diameter_mm)
+        if outer > cover + stirrup.diameter_mm + available + 1e-9:
+            raise DetailingError(
+                f"{section.name}/{face}: ROW_VERTICAL_CLEARANCE_FAILED "
+                f"required={outer:.1f} available={cover + stirrup.diameter_mm + available:.1f}"
+            )
+        if design.provided_area_mm2 <= 0:
+            raise DetailingError("PHYSICAL_ROWS_NO_STRENGTH_CREDIT")
+        weighted = sum(center * row.credited_area_mm2 for center, row in zip(centers, design.rows)) / design.provided_area_mm2
+        effective_depth = section.depth_mm - weighted
+        return replace(
+            design,
+            row_centers_mm=tuple(round(value, 6) for value in centers),
+            row_x_mm=tuple(tuple(round(value, 6) for value in row) for row in row_x),
+            effective_depth_mm=round(effective_depth, 6),
+            constraint_sources=tuple(dict.fromkeys((*design.constraint_sources,
+                                      basis,
+                                      "ROW_VERTICAL_CLEARANCE_25MM_OR_4/3_AGGREGATE",
+                                      "ROW_X_ALIGNED_SLOTS"))),
         )
 
     def refresh_capacity_shear_after_layout_change(
@@ -998,8 +1259,8 @@ class BeamDetailingEngine:
         if not section.is_smf or context is None or len(regions) < 3:
             return None
         effective_depth = min(
-            self.code.effective_depth(section, region.stirrup.diameter_mm, self._final_main_db(region, section))
-            for region in regions
+            design.effective_depth_mm or self.code.effective_depth(section, region.stirrup.diameter_mm, self._final_main_db(region, section))
+            for region in regions for design in (region.top, region.bottom)
         )
         return calculate_smf_capacity_shear(
             span_length_mm=section.length_mm,
@@ -1154,10 +1415,10 @@ class BeamDetailingEngine:
             else self.project.minimum_main_diameter_mm
         )
         return min(
-            bar.diameter_mm
+            row.diameter_mm
             for design in (region.top, region.bottom)
-            for bar in design.bars
-            if bar.diameter_mm >= minimum
+            for row in design.rows
+            if row.role != "hanger" and row.diameter_mm >= minimum
         )
 
     def _finalize_stirrup_controls(
@@ -1176,6 +1437,16 @@ class BeamDetailingEngine:
                 region.stirrup.diameter_mm,
                 final_db,
                 self.project.smf_end_max_spacing_mm,
+                effective_depth_mm=(
+                    section.depth_mm
+                    if section.is_smf
+                    else min(
+                        design.effective_depth_mm or self.code.effective_depth(
+                            section, region.stirrup.diameter_mm, final_db
+                        )
+                        for design in (region.top, region.bottom)
+                    )
+                ),
             )
             minimum_av = self.code.minimum_transverse_area_per_spacing(section)
             required_av = max(region.demand.transverse_required_av_over_s_mm2_per_mm, minimum_av)
@@ -1345,7 +1616,8 @@ class BeamDetailingEngine:
             else self.project.minimum_main_diameter_mm
         )
         candidates = [
-            bar.diameter_mm for bar in design.bars if bar.diameter_mm >= minimum
+            row.diameter_mm for row in design.rows
+            if row.role != "hanger" and row.diameter_mm >= minimum
         ]
         if not candidates:
             raise DetailingError("LONGITUDINAL_THROUGH_BAR_MISSING")
@@ -1500,7 +1772,7 @@ class BeamDetailingEngine:
             key=lambda candidate: (
                 candidate.layers,
                 candidate.provided_area_mm2 - required_area,
-                sum(bar.count for bar in candidate.bars),
+                sum(row.count for row in candidate.rows if row.role != "hanger"),
                 candidate.notation,
             ),
         )
@@ -1581,55 +1853,110 @@ class BeamDetailingEngine:
         )
 
     def _select_stirrup(self, section: BeamSection, demand: BeamRegionDemand, max_main: int) -> StirrupDesign:
-        candidates: list[tuple[int, int, StirrupDesign]] = []
+        """Select one hoop using spacing, diameter, then leg preferences.
+
+        The width band fixes the preferred leg count while the catalogue is
+        searched.  A smaller spacing is allowed to satisfy demand without
+        escalating diameter or legs; only after every diameter/spacing pair
+        fails does the fallback search increase legs.
+        """
+
+        allowed_spacings = self.project.allowed_spacings_for(section, demand.name)
+        spacing_limits: list[tuple[float, str]] = []
         minimum_av = self.code.minimum_transverse_area_per_spacing(section)
         required_av = max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av)
         combo = required_av + 2.0 * demand.at_over_s_mm2_per_mm
-        for diameter_rank, diameter in enumerate(self.project.ordered_stirrup_diameters()):
+        minimum_legs = max(2, self.code.minimum_legs(section, demand.name))
+        preferred_legs = max(minimum_legs, self.project.preferred_stirrup_legs(section))
+        if preferred_legs % 2:
+            preferred_legs += 1
+        fallback: list[tuple[int, int, StirrupDesign]] = []
+
+        def make_candidate(
+            diameter: int,
+            spacing: int,
+            maximum: float,
+            reason: str,
+            limits: tuple[tuple[str, float], ...],
+            high_shear: bool,
+            legs: int,
+        ) -> StirrupDesign | None:
             area = self.project.catalog.area(diameter)
-            for spacing in sorted(self.project.allowed_spacings_mm, reverse=True):
-                maximum, reason, limits, high_shear = self.code.maximum_stirrup_spacing(
-                    section,
-                    demand,
-                    diameter,
-                    max_main,
-                    self.project.smf_end_max_spacing_mm,
-                )
+            provided_combo = legs * area / spacing
+            provided_at = area / spacing
+            if provided_at + 1e-9 < demand.at_over_s_mm2_per_mm:
+                return None
+            if provided_combo + 1e-9 < combo:
+                return None
+            return StirrupDesign(
+                diameter,
+                spacing,
+                legs,
+                provided_combo,
+                provided_at,
+                maximum,
+                reason,
+                demand.transverse_required_av_over_s_mm2_per_mm,
+                minimum_av,
+                combo,
+                max_main,
+                high_shear,
+                limits,
+            )
+
+        for diameter_rank, diameter in enumerate(self.project.ordered_stirrup_diameters()):
+            if diameter < self.project.minimum_stirrup_diameter_for(section):
+                continue
+            area = self.project.catalog.area(diameter)
+            maximum, reason, limits, high_shear = self.code.maximum_stirrup_spacing(
+                section,
+                demand,
+                diameter,
+                max_main,
+                self.project.smf_end_max_spacing_mm,
+                effective_depth_mm=(section.depth_mm if section.is_smf else None),
+            )
+            spacing_limits.append((maximum, reason))
+            for spacing in sorted(allowed_spacings, reverse=True):
                 if spacing > maximum + 1e-9:
                     continue
-                legs = max(self.code.minimum_legs(section, demand.name), 2, math.ceil(combo * spacing / area - 1e-9))
-                if legs % 2:
-                    legs += 1
-                provided_combo = legs * area / spacing
-                provided_at = area / spacing
-                if provided_at + 1e-9 < demand.at_over_s_mm2_per_mm:
-                    continue
-                if provided_combo + 1e-9 < combo:
-                    continue
-                candidates.append(
-                    (
-                        diameter_rank,
-                        spacing,
-                        StirrupDesign(
-                            diameter,
-                            spacing,
-                            legs,
-                            legs * area / spacing,
-                            provided_at,
-                            maximum,
-                            reason,
-                            demand.transverse_required_av_over_s_mm2_per_mm,
-                            minimum_av,
-                            combo,
-                            max_main,
-                            high_shear,
-                            limits,
-                        ),
-                    )
+                preferred = make_candidate(
+                    diameter,
+                    spacing,
+                    maximum,
+                    reason,
+                    limits,
+                    high_shear,
+                    preferred_legs,
                 )
-        if candidates:
-            return self._preferred_stirrup(section, candidates)
-        raise DetailingError(f"{section.name}/{demand.name}: NO_ALLOWED_SPACING")
+                if preferred is not None:
+                    return preferred
+                required_legs = max(
+                    preferred_legs,
+                    2 * math.ceil(combo * spacing / area / 2.0 - 1e-9),
+                )
+                if required_legs % 2:
+                    required_legs += 1
+                fallback_candidate = make_candidate(
+                    diameter,
+                    spacing,
+                    maximum,
+                    reason,
+                    limits,
+                    high_shear,
+                    required_legs,
+                )
+                if fallback_candidate is not None:
+                    fallback.append((spacing, diameter_rank, fallback_candidate))
+        if fallback:
+            return min(fallback, key=lambda item: (item[2].legs, item[1], -item[0]))[2]
+        maximum, reason = max(spacing_limits, default=(0.0, "EMPTY_STIRRUP_CATALOGUE"))
+        allowed = ",".join(str(value) for value in allowed_spacings)
+        raise DetailingError(
+            f"{section.name}/{demand.name}: NO_ALLOWED_SPACING; "
+            f"maximum_spacing_mm={maximum:g}; governing_rule={reason}; "
+            f"allowed_spacings_mm={allowed}; trial_main_diameter_mm={max_main}"
+        )
 
     def _select_secondary_span_stirrup(
         self,
@@ -1643,77 +1970,87 @@ class BeamDetailingEngine:
             raise DetailingError(f"{section.name}: SB_SPAN_WITHOUT_REGIONS")
         if len(main_diameters) != len(demands):
             raise DetailingError(f"{section.name}: SB_MAIN_DIAMETER_COUNT_MISMATCH")
-        candidates: list[tuple[int, int, StirrupDesign]] = []
+        allowed_spacings = self.project.allowed_spacings_for(
+            section,
+            "left" if any(demand.name == "left" for demand in demands) else "middle",
+        )
         minimum_av = self.code.minimum_transverse_area_per_spacing(section)
+        minimum_legs = max(
+            2,
+            *(self.code.minimum_legs(section, demand.name) for demand in demands),
+        )
+        preferred_legs = max(minimum_legs, self.project.preferred_stirrup_legs(section))
+        if preferred_legs % 2:
+            preferred_legs += 1
+        fallback: list[tuple[int, int, StirrupDesign]] = []
         for diameter_rank, diameter in enumerate(self.project.ordered_stirrup_diameters()):
+            if diameter < self.project.minimum_stirrup_diameter_for(section):
+                continue
             area = self.project.catalog.area(diameter)
-            for spacing in sorted(self.project.allowed_spacings_mm, reverse=True):
-                spacing_controls = tuple(
-                    self.code.maximum_stirrup_spacing(
-                        section,
-                        demand,
-                        diameter,
-                        main_diameter,
-                        self.project.smf_end_max_spacing_mm,
-                    )
-                    for demand, main_diameter in zip(demands, main_diameters)
+            spacing_controls = tuple(
+                self.code.maximum_stirrup_spacing(
+                    section,
+                    demand,
+                    diameter,
+                    main_diameter,
+                    self.project.smf_end_max_spacing_mm,
+                    effective_depth_mm=(section.depth_mm if section.is_smf else None),
                 )
-                maximum, reason, limits, high_shear = min(
-                    spacing_controls,
-                    key=lambda control: control[0],
-                )
+                for demand, main_diameter in zip(demands, main_diameters)
+            )
+            maximum, reason, limits, high_shear = min(
+                spacing_controls,
+                key=lambda control: control[0],
+            )
+            combo = max(
+                max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av)
+                + 2.0 * demand.at_over_s_mm2_per_mm
+                for demand in demands
+            )
+            for spacing in sorted(allowed_spacings, reverse=True):
                 if spacing > maximum + 1e-9:
                     continue
-                legs = max(
-                    2,
-                    *(self.code.minimum_legs(section, demand.name) for demand in demands),
-                    *(
-                        math.ceil(
-                            (max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm)
-                            * spacing
-                            / area
-                            - 1e-9
-                        )
+                def make_candidate(legs: int) -> StirrupDesign | None:
+                    provided_combo = legs * area / spacing
+                    provided_at = area / spacing
+                    if any(
+                        provided_at + 1e-9 < demand.at_over_s_mm2_per_mm
+                        or provided_combo + 1e-9
+                        < max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av)
+                        + 2.0 * demand.at_over_s_mm2_per_mm
                         for demand in demands
-                    ),
-                )
-                if legs % 2:
-                    legs += 1
-                provided_combo = legs * area / spacing
-                provided_at = area / spacing
-                if any(
-                    provided_at + 1e-9 < demand.at_over_s_mm2_per_mm
-                    or provided_combo + 1e-9
-                    < max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm
-                    for demand in demands
-                ):
-                    continue
-                candidates.append(
-                    (
-                        diameter_rank,
+                    ):
+                        return None
+                    return StirrupDesign(
+                        diameter,
                         spacing,
-                        StirrupDesign(
-                            diameter,
-                            spacing,
-                            legs,
-                            provided_combo,
-                            provided_at,
-                            maximum,
-                            f"SB_SPAN_ENVELOPE:{reason}",
-                            max(demand.transverse_required_av_over_s_mm2_per_mm for demand in demands),
-                            minimum_av,
-                            max(
-                                max(demand.transverse_required_av_over_s_mm2_per_mm, minimum_av) + 2.0 * demand.at_over_s_mm2_per_mm
-                                for demand in demands
-                            ),
-                            min(main_diameters),
-                            high_shear,
-                            limits,
-                        ),
+                        legs,
+                        provided_combo,
+                        provided_at,
+                        maximum,
+                        f"SB_SPAN_ENVELOPE:{reason}",
+                        max(demand.transverse_required_av_over_s_mm2_per_mm for demand in demands),
+                        minimum_av,
+                        combo,
+                        min(main_diameters),
+                        high_shear,
+                        limits,
                     )
+
+                preferred = make_candidate(preferred_legs)
+                if preferred is not None:
+                    return preferred
+                required_legs = max(
+                    preferred_legs,
+                    2 * math.ceil(combo * spacing / area / 2.0 - 1e-9),
                 )
-        if candidates:
-            return self._preferred_stirrup(section, candidates)
+                if required_legs % 2:
+                    required_legs += 1
+                fallback_candidate = make_candidate(required_legs)
+                if fallback_candidate is not None:
+                    fallback.append((spacing, diameter_rank, fallback_candidate))
+        if fallback:
+            return min(fallback, key=lambda item: (item[2].legs, item[1], -item[0]))[2]
         raise DetailingError(f"{section.name}: NO_ALLOWED_SPACING")
 
     def _preferred_stirrup(
@@ -1721,35 +2058,17 @@ class BeamDetailingEngine:
         section: BeamSection,
         candidates: Sequence[tuple[int, int, StirrupDesign]],
     ) -> StirrupDesign:
-        """Rank valid hoops without turning project preferences into limits."""
+        """Rank row-solver hoops by diameter, spacing, then leg count."""
 
-        if section.width_mm <= self.project.prefer_two_leg_max_width_mm + 1e-9:
-            return min(
-                candidates,
-                key=lambda item: (
-                    item[2].legs,
-                    -item[1],
-                    item[0],
-                ),
-            )[2]
-        if not section.is_secondary:
-            # A small hoop diameter must not force extra legs and, in turn,
-            # extra longitudinal bars through the existing PB support rule.
-            # Prefer the <=4-leg band, then the largest valid spacing and the
-            # configured diameter order. This tries a larger diameter before
-            # adding legs, but retains feasible two-leg hoops and a >4-leg
-            # fallback. The final longitudinal/capacity-shear iteration still
-            # checks the actual diameter, spacing, layout and provided areas.
-            return min(
-                candidates,
-                key=lambda item: (
-                    max(0, item[2].legs - self.project.pb_preferred_max_stirrup_legs),
-                    -item[1],
-                    item[0],
-                    item[2].legs,
-                ),
-            )[2]
-        return min(candidates, key=lambda item: (item[0], -item[1], item[2].legs))[2]
+        preferred_legs = self.project.preferred_stirrup_legs(section)
+        preferred = [item for item in candidates if item[2].legs == preferred_legs]
+        if not preferred:
+            preferred = [item for item in candidates if item[2].legs > preferred_legs]
+        pool = preferred or list(candidates)
+        return min(
+            pool,
+            key=lambda item: (item[0], -item[1], item[2].legs),
+        )[2]
 
     def _select_longitudinal(
         self,
@@ -1812,7 +2131,8 @@ class BeamDetailingEngine:
             preferred = [
                 candidate
                 for candidate in candidates
-                if all(bar.diameter_mm <= self.project.sb_top_preferred_max_diameter_mm for bar in candidate.bars)
+                if all(row.diameter_mm <= self.project.sb_top_preferred_max_diameter_mm
+                       for row in candidate.rows if row.role != "hanger")
             ]
             if preferred:
                 candidates = preferred
@@ -1822,8 +2142,8 @@ class BeamDetailingEngine:
                 key=lambda candidate: (
                     candidate.layers,
                     candidate.provided_area_mm2 - required_area,
-                    sum(bar.count for bar in candidate.bars),
-                    len(candidate.bars),
+                    sum(row.count for row in candidate.rows if row.role != "hanger"),
+                    len(tuple(row for row in candidate.rows if row.role != "hanger")),
                     candidate.notation,
                 ),
             )
@@ -1831,8 +2151,8 @@ class BeamDetailingEngine:
             candidates,
             key=lambda candidate: (
                 candidate.layers,
-                len(candidate.bars),
-                sum(bar.count for bar in candidate.bars),
+                len(tuple(row for row in candidate.rows if row.role != "hanger")),
+                sum(row.count for row in candidate.rows if row.role != "hanger"),
                 candidate.provided_area_mm2 - required_area,
                 candidate.notation,
             ),
@@ -1891,26 +2211,35 @@ class BeamDetailingEngine:
     ) -> LongitudinalDesign | None:
         if support_count is None:
             return design
-        flexural_count = sum(bar.count for bar in design.bars)
+        # A legacy candidate may carry a one-bar credited row normalized to a
+        # two-bar physical row.  Hanger support is based on credited flexural
+        # bars, while the published physical row remains fail-closed.
+        flexural_count = sum(row.count for row in design.rows if row.role != "hanger")
         hanger_count = max(0, support_count - flexural_count)
         if hanger_count == 0:
             return design
         hanger_diameter = self.project.sb_hanger_diameter_mm
         largest_diameter = max(
             hanger_diameter,
-            *(bar.diameter_mm for bar in design.bars),
+            *(row.diameter_mm for row in design.rows if row.role != "hanger"),
         )
         capacity = self._capacity_per_layer(section, stirrup_diameter_mm, largest_diameter)
         if support_count > capacity:
             return None
-        hanger = BarSpec(
+        rows = tuple((*design.rows, PhysicalRow(
+            max(2, hanger_count),
             hanger_diameter,
-            hanger_count,
-            (hanger_count,),
-            self.project.catalog.area(hanger_diameter),
-            role="hanger",
+            "hanger",
+            credited_area_mm2=hanger_count * self.project.catalog.area(hanger_diameter),
+        )))
+        return LongitudinalDesign(
+            rows=rows,
+            required_area_mm2=design.required_area_mm2,
+            clear_spacing_mm=design.clear_spacing_mm,
+            row_centers_mm=design.row_centers_mm,
+            effective_depth_mm=design.effective_depth_mm,
+            constraint_sources=design.constraint_sources + ("SB_HANGER_SUPPORT",),
         )
-        return replace(design, hanger_bars=hanger)
 
     def _single_diameter_candidate(self, section, required, minimum_count, stirrup_diameter, diameter, max_layers):
         area = self.project.catalog.area(diameter)
@@ -2051,7 +2380,7 @@ class BeamDetailingEngine:
         return BarSpec(diameter, count, (count,), area, role="face")
 
 
-def coordinate_adjacent_spans(
+def _legacy_coordinate_adjacent_spans(
     first: BeamDetailingResult,
     second: BeamDetailingResult,
     option: ContinuityOption,
@@ -2070,8 +2399,10 @@ def coordinate_adjacent_spans(
 
     if len(first.regions) != len(second.regions):
         raise DetailingError("相邻跨必须具有相同的 left/middle/right 区域结构。")
-    if first.detailing_profile != second.detailing_profile:
-        raise DetailingError("相邻跨配筋 profile 不一致，不能自动协调。")
+    # A profile transition is a real boundary condition, not a reason to
+    # discard the shared-support check.  The common layout is solved against
+    # both sections independently; each result retains its own profile and
+    # is rechecked with its own code limits below.
     if option not in {
         ContinuityOption.OPTION_1_STRICT_EQUAL,
         ContinuityOption.OPTION_2_COUNT_ADJUSTMENT,
@@ -2115,6 +2446,8 @@ def coordinate_adjacent_spans(
     )
     first_output = coordinate_intraspan_result(first_output, engine)
     second_output = coordinate_intraspan_result(second_output, engine)
+    first_output = _refresh_result_physical_layout(first_output, engine)
+    second_output = _refresh_result_physical_layout(second_output, engine)
     # Shared-support coordination can increase the actual end Mpr.  Recheck
     # capacity shear before the result is returned; if the existing hoops no
     # longer satisfy the new demand, fail closed and let the beam-line caller
@@ -2124,6 +2457,27 @@ def coordinate_adjacent_spans(
     return first_output, second_output
 
 
+def _refresh_result_physical_layout(
+    result: BeamDetailingResult,
+    engine: BeamDetailingEngine,
+) -> BeamDetailingResult:
+    regions = tuple(
+        replace(
+            region,
+            top=engine._resolve_physical_layout(result.section, region.stirrup, region.top, face="top"),
+            bottom=engine._resolve_physical_layout(result.section, region.stirrup, region.bottom, face="bottom"),
+        )
+        for region in result.regions
+    )
+    for region in regions:
+        top_inner = region.top.row_centers_mm[-1] + region.top.rows[-1].diameter_mm / 2
+        bottom_inner = region.bottom.row_centers_mm[-1] + region.bottom.rows[-1].diameter_mm / 2
+        gap = max(25.0, 4 * result.section.aggregate_mm / 3)
+        if top_inner + bottom_inner + gap > result.section.depth_mm + 1e-9:
+            raise DetailingError(f"{result.beam_name}/{region.name}: TOP_BOTTOM_ROWS_COLLIDE")
+    return replace(result, regions=regions)
+
+
 def coordinate_intraspan_result(
     result: BeamDetailingResult,
     engine: BeamDetailingEngine | None = None,
@@ -2131,6 +2485,12 @@ def coordinate_intraspan_result(
     """Reapply one-span lap rules after a support or manual layout change."""
 
     engine = engine or BeamDetailingEngine()
+    if result.input_data is not None:
+        from .row_solver import span_candidates
+        candidate = next(span_candidates(result.input_data, engine), None)
+        if candidate is None:
+            raise DetailingError(f"{result.beam_name}: ROW_CATALOG_NO_FEASIBLE_LAYOUT")
+        return candidate
     regions = engine._coordinate_intraspan_longitudinal(
         result.section,
         result.regions,
@@ -2222,38 +2582,15 @@ def _common_support_layout(
     )
     required = max(first_design.required_area_mm2, second_design.required_area_mm2)
     for diameter in diameters:
-        first_trial = engine._single_diameter_candidate(
-            first_result.section,
-            required,
-            minimum_count,
-            first_region.stirrup.diameter_mm,
-            diameter,
-            max_layers,
-        )
-        second_trial = engine._single_diameter_candidate(
-            second_result.section,
-            required,
-            minimum_count,
-            second_region.stirrup.diameter_mm,
-            diameter,
-            max_layers,
-        )
-        if first_trial is None or second_trial is None:
-            continue
-        count = max(first_trial.bars[0].count, second_trial.bars[0].count)
         capacity = min(
-            engine._capacity_per_layer(
-                first_result.section,
-                first_region.stirrup.diameter_mm,
-                diameter,
-            ),
-            engine._capacity_per_layer(
-                second_result.section,
-                second_region.stirrup.diameter_mm,
-                diameter,
-            ),
+            engine._capacity_per_layer(first_result.section, first_region.stirrup.diameter_mm, diameter),
+            engine._capacity_per_layer(second_result.section, second_region.stirrup.diameter_mm, diameter),
         )
+        if capacity < 1:
+            continue
         max_count = capacity * max_layers if max_layers is not None else None
+        area = engine.project.catalog.area(diameter)
+        count = max(minimum_count, math.ceil(required / area - 1e-9))
         practical = _minimum_practical_count(
             count,
             capacity,
@@ -2263,8 +2600,9 @@ def _common_support_layout(
         if practical is None:
             continue
         layers = _split_layers(practical, capacity, engine.project.minimum_bars_per_layer)
-        area = engine.project.catalog.area(diameter)
         provided = practical * area
+        if provided + 1e-9 < required:
+            continue
         first_output = LongitudinalDesign(
             (BarSpec(diameter, practical, layers, area),),
             required,
@@ -2296,6 +2634,86 @@ def _common_support_layout(
                 continue
         return first_output, second_output
     raise DetailingError("ADJACENT_SUPPORT_LAYOUT_FAILED")
+
+
+def _legacy_coordinate_span_segment(
+    results: Sequence[BeamDetailingResult],
+    option: ContinuityOption,
+    engine: BeamDetailingEngine | None = None,
+) -> tuple[BeamDetailingResult, ...]:
+    """Coordinate one contiguous beam-line segment with finite passes.
+
+    The segment API keeps the workbook path from repeatedly applying a pair
+    operation until an arbitrary iteration limit.  Each shared support is
+    visited once from left to right; the pair operation itself validates the
+    resulting layout and capacity.  A non-convergent or mixed-profile line
+    therefore fails closed at the segment boundary.
+    """
+    if not results:
+        return ()
+    engine = engine or BeamDetailingEngine()
+    output = list(results)
+    if len(output) == 1:
+        return tuple(output)
+    from src.design.row_solver import _enforce_through_top_row
+    for index in range(len(output) - 1):
+        left, right = coordinate_adjacent_spans(output[index], output[index + 1], option, engine)
+        output[index], output[index + 1] = left, right
+    all_first = [region.top.rows[0] for result in output for region in result.regions]
+    minimum_counts = [2]
+    minimum_counts.extend(
+        region.stirrup.legs for result in output for region in result.regions
+        if not result.section.is_secondary
+    )
+    minimum_count = max(minimum_counts)
+    common_count = max(minimum_count, min(row.count for row in all_first))
+    common_diameter = max(row.diameter_mm for row in all_first)
+    for index in range(len(output)):
+        output[index] = _enforce_through_top_row(
+            output[index], engine, base_diameter=common_diameter, base_count=common_count
+        )
+    from src.design.row_solver import finalize_rows
+    output = [finalize_rows(result, engine) for result in output]
+    for index, result in enumerate(output):
+        for region in result.regions:
+            for design in (region.top, region.bottom):
+                if design.provided_area_mm2 + 1e-9 < design.required_area_mm2:
+                    raise DetailingError(
+                        f"{result.beam_name}/{region.name}: FINAL_ROW_AREA_UNDERSIZED"
+                    )
+        if index:
+            previous = output[index - 1].regions[2].top.rows
+            current = result.regions[0].top.rows
+            exact = (option is ContinuityOption.OPTION_1_STRICT_EQUAL
+                     or result.section.is_secondary or output[index-1].section.is_secondary)
+            if exact:
+                compatible = [(r.count, r.diameter_mm) for r in previous] == [(r.count, r.diameter_mm) for r in current]
+            else:
+                compatible = all(a.diameter_mm == b.diameter_mm for a,b in zip(previous,current))
+            if not compatible:
+                raise DetailingError("ADJACENT_SUPPORT_FINAL_ROWS_INCOMPATIBLE")
+    return tuple(output)
+
+
+def coordinate_span_segment(results, option, engine=None):
+    # Hand-built legacy fixtures have no BeamDetailingInput and therefore no
+    # demand context from which a fresh finite candidate can be solved. Keep
+    # this explicit compatibility path for those fixtures only; workbook and
+    # replay results always carry input_data and use row_solver.
+    if any(result.input_data is None for result in results):
+        legacy_engine = engine or BeamDetailingEngine()
+        output = list(results)
+        for index in range(len(output) - 1):
+            output[index], output[index + 1] = _legacy_coordinate_adjacent_spans(
+                output[index], output[index + 1], option, legacy_engine
+            )
+        return tuple(output)
+    from .row_solver import coordinate_segment
+    return coordinate_segment(results, option, engine or BeamDetailingEngine())
+
+
+def coordinate_adjacent_spans(left, right, option, engine=None):
+    return coordinate_span_segment((left, right), option, engine)
 
 
 def _preferred_order(preferred: Iterable[int], enabled: Iterable[int]) -> tuple[int, ...]:

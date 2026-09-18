@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from src.cli import (
+    _beam_progress,
+    _display_summary,
     _ensure_etabs_dll,
     _etabs_version,
     _load_confirmed_multi_section_spans,
@@ -39,6 +41,43 @@ def test_cli_parser_exposes_safe_workflow_flags() -> None:
     assert args.output_dir == Path("out")
     assert args.source_model is None
     assert args.manifest_registry is None
+
+
+def test_cli_beam_progress_is_monotonic_and_throttled(capsys) -> None:
+    _beam_progress._state = {"percent": -1}
+    for percent in (0, 25, 25, 20, 100):
+        _beam_progress(percent, "阶段")
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("[beam]")]
+    values = [int(line.split("]", 2)[2].split("%", 1)[0]) for line in lines]
+    assert values == [0, 25, 100]
+    assert all(0 <= value <= 100 for value in values)
+    assert lines[-1].endswith("100% 阶段")
+
+
+def test_cli_display_summary_keeps_ordinary_stdout_compact() -> None:
+    displayed = _display_summary(
+        {
+            "status": "OK",
+            "mode": "read-only",
+            "beams": 3,
+            "spans": 2,
+            "blocking_topology_diagnostics": 1,
+            "beam_result_dxf_issues": [{"span_id": "F1-PB1-1"}],
+            "beam_result_dxf_summary": [{"span_id": "F1-PB1-1", "status": "AVAILABLE"}],
+            "outputs": {"beam_result_dxf": ["wpj-F1.dxf"]},
+        }
+    )
+
+    assert displayed == {
+        "status": "OK",
+        "mode": "read-only",
+        "beams": 3,
+        "spans": 2,
+        "errors": 2,
+        "beam_result_dxf_errors": 1,
+        "outputs": {"beam_result_dxf": ["wpj-F1.dxf"]},
+    }
 
 
 def test_cli_parser_exposes_formal_rebar_workbook_flags() -> None:
@@ -163,20 +202,26 @@ def test_cli_run_writes_success_manifest(tmp_path: Path, monkeypatch) -> None:
             str(registry),
         ]
     )
-    monkeypatch.setattr(
-        "src.cli._run_impl",
-        lambda args, config, output_dir: {
+    def fake_run(_args, _config, _output_dir, *, progress=None):
+        assert progress is _beam_progress
+        progress(0, "附加 ETABS")
+        progress(40, "拓扑划分")
+        return {
             "status": "OK",
+            "mode": "read-only",
             "model": str(tmp_path / "missing.EDB"),
+            "beams": 1,
+            "spans": 1,
             "outputs": {},
-        },
-    )
+        }
+
+    monkeypatch.setattr("src.cli._run_impl", fake_run)
 
     summary = run(args)
 
     assert summary["run_id"]
     assert Path(summary["outputs"]["manifest"]).is_file()
-    assert (output / "topology_summary.json").is_file()
+    assert (output / "model_beam_output" / "_data" / "topology_summary.json").is_file()
 
 
 def test_cli_run_writes_failure_manifest(tmp_path: Path, monkeypatch) -> None:
@@ -200,7 +245,7 @@ def test_cli_run_writes_failure_manifest(tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="expected failure"):
         run(args)
 
-    manifests = list(output.glob("run_manifest_*.json"))
+    manifests = list((output / "model_beam_output" / "_data").glob("run_manifest_*.json"))
     assert len(manifests) == 1
     payload = json.loads(manifests[0].read_text(encoding="utf-8"))
     assert payload["status"] == "FAILED"

@@ -24,6 +24,8 @@ internal sealed partial class MainForm : Form
     private readonly ComboBox _selectionMode = new();
     private readonly CheckBox _exportExcel = new();
     private readonly CheckBox _exportRebarWorkbook = new();
+    private readonly CheckBox _exportBeamResultDxf = new();
+    private readonly ComboBox _dxfTextHeight = new();
     private readonly RichTextBox _logText = new();
     private readonly Button _runButton = new();
     private readonly Button _cancelButton = new();
@@ -192,7 +194,22 @@ internal sealed partial class MainForm : Form
         _exportRebarWorkbook.Text = "同时生成主/次梁配筋表（单页静态结果）";
         _exportRebarWorkbook.AutoSize = true;
         _exportRebarWorkbook.Anchor = AnchorStyles.Left;
-        outputOptions.Controls.AddRange(new Control[] { _exportExcel, _exportRebarWorkbook });
+        _exportBeamResultDxf.Text = "同时生成梁计算结果/截面 DXF（按楼层）";
+        _exportBeamResultDxf.AutoSize = true;
+        _exportBeamResultDxf.Anchor = AnchorStyles.Left;
+        _dxfTextHeight.DropDownStyle = ComboBoxStyle.DropDownList;
+        _dxfTextHeight.Items.AddRange(new object[] { 25, 50, 75, 100 });
+        _dxfTextHeight.SelectedItem = 100;
+        _dxfTextHeight.Width = 70;
+        _dxfTextHeight.Anchor = AnchorStyles.Left;
+        outputOptions.Controls.AddRange(new Control[]
+        {
+            _exportExcel,
+            _exportRebarWorkbook,
+            _exportBeamResultDxf,
+            new Label { Text = "字高", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(8, 7, 0, 0) },
+            _dxfTextHeight,
+        });
         layout.Controls.Add(outputOptions, 1, 5);
         layout.SetColumnSpan(outputOptions, 2);
 
@@ -262,6 +279,10 @@ internal sealed partial class MainForm : Form
         _selectionMode.SelectedItem = settings.SelectionMode is "all" ? "all" : "selected";
         _exportExcel.Checked = settings.ExportExcel;
         _exportRebarWorkbook.Checked = settings.ExportRebarWorkbook;
+        _exportBeamResultDxf.Checked = settings.ExportBeamResultDxf;
+        _dxfTextHeight.SelectedItem = new[] { 25, 50, 75, 100 }.Contains(settings.DxfTextHeight)
+            ? settings.DxfTextHeight
+            : 100;
         _etabsApiText.Text = settings.EtabsApiPath ?? "";
         UpdateRuntimeMode();
         if (!string.IsNullOrWhiteSpace(warning))
@@ -278,12 +299,14 @@ internal sealed partial class MainForm : Form
             PluginSettingsStore.Save(
                 new PluginSettings
                 {
-                    SchemaVersion = 2,
+                    SchemaVersion = 3,
                     ConfigPath = _configText.Text.Trim(),
                     OutputRoot = _outputRootText.Text.Trim(),
                     SelectionMode = Convert.ToString(_selectionMode.SelectedItem) ?? "selected",
                     ExportExcel = _exportExcel.Checked,
                     ExportRebarWorkbook = _exportRebarWorkbook.Checked,
+                    ExportBeamResultDxf = _exportBeamResultDxf.Checked,
+                    DxfTextHeight = Convert.ToInt32(_dxfTextHeight.SelectedItem ?? 100),
                     EtabsApiPath = _etabsApiText.Text.Trim(),
                 }
             );
@@ -454,7 +477,7 @@ internal sealed partial class MainForm : Form
 
             var outputRoot = ResolvePath(workingDirectory, _outputRootText.Text);
             Directory.CreateDirectory(outputRoot);
-            _lastOutputDirectory = CreateUniqueOutputDirectory(outputRoot);
+            _lastOutputDirectory = CreateModelOutputDirectory(outputRoot, expectedModel);
             Directory.CreateDirectory(_lastOutputDirectory);
 
             SaveSettings(showConfirmation: false);
@@ -477,7 +500,9 @@ internal sealed partial class MainForm : Form
                 _exportRebarWorkbook.Checked,
                 _snapshot.ProcessId,
                 expectedModel,
-                TowerCheck: false
+                TowerCheck: false,
+                ExportBeamResultDxf: _exportBeamResultDxf.Checked,
+                DxfTextHeight: Convert.ToInt32(_dxfTextHeight.SelectedItem ?? 100)
             );
 
             _runButton.Enabled = false;
@@ -796,14 +821,16 @@ internal sealed partial class MainForm : Form
         return File.Exists(path) ? path : throw new InvalidOperationException($"{label}不存在：{path}");
     }
 
-    private static string CreateUniqueOutputDirectory(string outputRoot)
+    private static string CreateModelOutputDirectory(string outputRoot, string durableModelPath)
     {
-        var candidate = Path.Combine(outputRoot, $"run_{DateTime.Now:yyyyMMdd_HHmmss}");
-        for (var suffix = 0; Directory.Exists(candidate); suffix++)
+        var stem = Path.GetFileNameWithoutExtension(durableModelPath);
+        var invalid = Path.GetInvalidFileNameChars();
+        var safe = new string(stem.Select(character => invalid.Contains(character) ? '_' : character).ToArray())
+            .Trim(' ', '.');
+        if (string.IsNullOrWhiteSpace(safe))
         {
-            candidate = Path.Combine(outputRoot, $"run_{DateTime.Now:yyyyMMdd_HHmmss}_{suffix + 1}");
+            safe = "model";
         }
-
-        return candidate;
+        return Path.Combine(outputRoot, $"{safe}_beam_output");
     }
 }

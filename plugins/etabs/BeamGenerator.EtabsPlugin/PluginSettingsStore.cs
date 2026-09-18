@@ -45,8 +45,14 @@ internal static class PluginSettingsStore
                 warning = "检测到依赖本机 Python/仓库路径的旧设置，已迁移为随插件发布的便携运行器。";
                 defaults.SelectionMode = loaded.SelectionMode;
                 defaults.ExportExcel = loaded.ExportExcel;
+                defaults.ExportRebarWorkbook = loaded.ExportRebarWorkbook;
                 return defaults;
             }
+            if (loaded.DxfTextHeight is not (25 or 50 or 75 or 100))
+            {
+                loaded.DxfTextHeight = 100;
+            }
+            loaded.SchemaVersion = 3;
             return loaded;
         }
         catch (Exception exception)
@@ -69,7 +75,7 @@ internal static class PluginSettingsStore
         var installation = PortableWorkflowLocator.Locate();
         return new PluginSettings
         {
-            SchemaVersion = 2,
+            SchemaVersion = 3,
             ConfigPath = installation.ConfigPath,
             OutputRoot = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),

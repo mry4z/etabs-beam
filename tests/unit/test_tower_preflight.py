@@ -150,7 +150,7 @@ def test_group_validation_precedes_mutation(tmp_path, monkeypatch, reason):
 
 
 @pytest.mark.parametrize("status", ["PASS", "BLOCKED"])
-def test_cli_tower_only_returns_before_geometry_design_and_restores_units(tmp_path, monkeypatch, status):
+def test_cli_tower_only_returns_before_geometry_design_and_restores_units(tmp_path, monkeypatch, status, capsys):
     model = tmp_path / "model.EDB"
     model.write_bytes(b"offline fake")
     args = cli._parser().parse_args(["--pid", "123", "--tower-preflight-only", "--export-rebar-workbook"])
@@ -171,11 +171,16 @@ def test_cli_tower_only_returns_before_geometry_design_and_restores_units(tmp_pa
     monkeypatch.setitem(sys.modules, "ETABSv1", SimpleNamespace(eUnits=SimpleNamespace(N_mm_C="N_mm_C")))
     if status == "BLOCKED":
         with pytest.raises(TowerPreflightRequired):
-            cli._run_impl(args, config, tmp_path)
+            cli._run_impl(args, config, tmp_path, progress=cli._tower_progress)
     else:
-        result = cli._run_impl(args, config, tmp_path)
+        result = cli._run_impl(args, config, tmp_path, progress=cli._tower_progress)
         assert result["mode"] == "tower-preflight"
         assert set(result["outputs"]) == {"tower_assignment_json", "tower_assignment_csv"}
+    output = capsys.readouterr().out
+    progress_lines = [line for line in output.splitlines() if line.startswith("[tower]")]
+    values = [int(line.split("]", 2)[2].split("%", 1)[0]) for line in progress_lines]
+    assert values == sorted(values)
+    assert "[beam]" not in output
     assert unit_state == ["original", "N_mm_C", "original"]
 
 
