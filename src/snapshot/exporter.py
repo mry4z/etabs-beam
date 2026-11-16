@@ -10,8 +10,9 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from src.core.geometry_extractor import BeamGeometry
+from src.core.geometry_extractor import BeamGeometry, ColumnOutline
 from src.design.etabs_result import EtabsResultProvider
+from src.design.region_results import LEGACY_DETAILING_POLICY_ID
 from src.design.provider import BeamDesignResult, DesignResultStatus
 from src.run_manifest import artifact_record, sha256_file
 from src.snapshot.sqlite_snapshot import (
@@ -24,6 +25,7 @@ from src.snapshot.sqlite_snapshot import (
     SqliteDesignProvider,
     SqliteSnapshotSource,
     build_project_beam_geometry_table,
+    build_project_column_outline_table,
     build_project_column_support_table,
     build_project_design_table,
     write_snapshot,
@@ -57,7 +59,7 @@ ACI31814_RECTANGULAR_BEAM_PROFILE = SnapshotProfile(
         "Material Properties - Rebar Data",
         "Concrete Beam Overwrites - ACI 318-14",
     ),
-    optional_tables=("Brace Object Connectivity",),
+    optional_tables=("Brace Object Connectivity", "Section Designer Shapes - Concrete Polygon"),
 )
 
 
@@ -116,11 +118,14 @@ def export_snapshot_bundle(
     live_beams: Sequence[BeamGeometry],
     live_supports: Mapping[str, Point3D],
     live_designs: Mapping[str, BeamDesignResult],
+    live_column_outlines: Sequence[ColumnOutline] = (),
     live_frame_states: Mapping[str, Any] | None = None,
     live_section_info: Mapping[str, Mapping[str, Any]] | None = None,
     profile: SnapshotProfile = ACI31814_RECTANGULAR_BEAM_PROFILE,
     coordinate_tolerance_mm: float = 0.01,
     expected_source_sha256: str | None = None,
+    detailing_policy_id: str = LEGACY_DETAILING_POLICY_ID,
+    detailing_policy_revision_id: str = LEGACY_DETAILING_POLICY_ID,
 ) -> dict[str, Any]:
     """Write, replay, validate and manifest one non-overwriting snapshot bundle."""
 
@@ -164,11 +169,14 @@ def export_snapshot_bundle(
         export_profile=profile.name,
         export_profile_version=profile.version,
         domain_mapping_version=PROJECT_BEAM_DESIGN_MAPPING_VERSION,
+        detailing_policy_id=detailing_policy_id,
+        detailing_policy_revision_id=detailing_policy_revision_id,
     )
     tables = (
         *raw_tables,
         build_project_beam_geometry_table(live_beams),
         build_project_column_support_table(live_supports),
+        build_project_column_outline_table(live_column_outlines),
         build_project_design_table(live_designs),
     )
     created_snapshot = False
@@ -186,6 +194,7 @@ def export_snapshot_bundle(
             live_beams=live_beams,
             live_supports=live_supports,
             live_designs=live_designs,
+            live_column_outlines=live_column_outlines,
             live_frame_states=live_frame_states,
             live_section_info=live_section_info,
             coordinate_tolerance_mm=coordinate_tolerance_mm,
@@ -226,6 +235,7 @@ def validate_snapshot(
     live_beams: Sequence[BeamGeometry],
     live_supports: Mapping[str, Point3D],
     live_designs: Mapping[str, BeamDesignResult],
+    live_column_outlines: Sequence[ColumnOutline] = (),
     live_frame_states: Mapping[str, Any] | None = None,
     live_section_info: Mapping[str, Mapping[str, Any]] | None = None,
     coordinate_tolerance_mm: float,
@@ -254,6 +264,10 @@ def validate_snapshot(
     supports_exact = dict(live_supports) == replay_supports
     if not supports_exact:
         raise SnapshotTableError("SNAPSHOT_PROJECT_SUPPORTS_NOT_EXACT")
+    replay_column_outlines = source.column_outlines()
+    outlines_exact = tuple(live_column_outlines) == replay_column_outlines
+    if not outlines_exact:
+        raise SnapshotTableError("SNAPSHOT_PROJECT_COLUMN_OUTLINES_NOT_EXACT")
     if live_frame_states is not None:
         replay_states = source.frame_states(replay_beams)
         if replay_states != dict(live_frame_states):
@@ -314,6 +328,11 @@ def validate_snapshot(
             "raw_table_equivalent_within_tolerance": True,
             "equivalent": True,
             "exact_round_trip": supports_exact,
+        },
+        "column_outlines": {
+            "live_count": len(live_column_outlines),
+            "replay_count": len(replay_column_outlines),
+            "exact_round_trip": outlines_exact,
         },
         "design_results": {
             "beam_count": len(replay_designs),

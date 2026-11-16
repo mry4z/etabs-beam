@@ -9,9 +9,9 @@
     <Platforms>x64</Platforms>
     <AssemblyName>BeamGenerator.EtabsPlugin</AssemblyName>
     <RootNamespace>BeamGenerator.EtabsPlugin</RootNamespace>
-    <Version>0.4.3</Version>
-    <FileVersion>0.4.3.0</FileVersion>
-    <AssemblyVersion>0.4.3.0</AssemblyVersion>
+    <Version>0.4.4.10</Version>
+    <FileVersion>0.4.4.10</FileVersion>
+    <AssemblyVersion>0.4.4.10</AssemblyVersion>
     <Product>ETABS Beam Generator Plugin</Product>
     <Description>Read-only ETABS interaction and Python workflow launcher.</Description>
     <EtabsApiPath Condition="'$(EtabsApiPath)' == ''">$(ETABS_API_PATH)</EtabsApiPath>

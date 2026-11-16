@@ -13,10 +13,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.comments import Comment
+from openpyxl.cell.text import InlineFont
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from src.design.no_design import is_explicit_no_design
 from src.rebar_workbook import (
     ADJACENT_SPAN_BOTTOM_STRATEGY,
     BOTTOM_REINFORCEMENT_STRATEGY,
@@ -86,6 +89,8 @@ NON_CURRENT_REVIEW_CODES = frozenset(
         "CAPACITY_SHEAR_SOURCE_UNVERIFIED",
         "SMF_DESIGN_SOURCE_UNVERIFIED",
         "SMF_SUPPORT_FACE_UNRESOLVED",
+        "EXCLUDED_NO_DESIGN",
+        "V3_PARENT_CONTINUITY_EXTERNAL_SCOPE_NO_DESIGN",
     }
 )
 
@@ -103,9 +108,13 @@ def _natural_key(value: Any) -> tuple[Any, ...]:
 
 def _span_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
     try:
-        return (0, int(row.get("span_no")))
+        object_part_index = int(row.get("object_part_index") or 0)
     except (TypeError, ValueError):
-        return (1, _natural_key(row.get("beam_no", "")))
+        object_part_index = 0
+    try:
+        return (0, int(row.get("span_no")), object_part_index)
+    except (TypeError, ValueError):
+        return (1, _natural_key(row.get("beam_no", "")), object_part_index)
 
 
 def _as_number(value: Any) -> int | float | None:
@@ -216,10 +225,13 @@ def _exception_reason(*rows: Mapping[str, Any]) -> str:
     reasons: list[str] = []
     if status and status.upper() != "OK" and status.upper() not in NON_CURRENT_REVIEW_CODES:
         reasons.append(status)
+    if values.get("coordination_status") == "FEASIBLE_OPTIMIZATION_INCOMPLETE":
+        reasons.append("优化未完成")
     blocking = "; ".join(_current_review_tokens(values.get("constructability_blocking_statuses")))
     if blocking:
         reasons.append(blocking)
-    if values.get("bottom_reinforcement_strategy") != BOTTOM_REINFORCEMENT_STRATEGY:
+    if (status != "EXCLUDED_NO_DESIGN"
+            and values.get("bottom_reinforcement_strategy") != BOTTOM_REINFORCEMENT_STRATEGY):
         reasons.append("LEGACY_REDETAIL_REQUIRED")
     if values.get("bottom_uniform_regions_match") is False:
         reasons.append("BOTTOM_LAYOUT_NOT_UNIFORM_WITHIN_SPAN")
@@ -381,10 +393,10 @@ def _exception_comment(row: Mapping[str, Any], reason: str) -> str:
     )
 
 
-def _column_widths(sheet, beam_type: str) -> None:
+def _column_widths(sheet, beam_type: str, *, span_width: int = 16) -> None:
     widths = {
         "A": 17,
-        "B": 16,
+        "B": max(16, span_width),
         "C": 10,
         "D": 10,
         "E": 16,
@@ -441,6 +453,8 @@ def render_rebar_workbook_xlsx(
     entries: list[tuple[dict[str, Any], dict[str, Any], str]] = []
     for raw, review, final in zip(raw_rows, review_rows, final_rows):
         merged = _merged_row(raw, review, final)
+        if is_explicit_no_design(merged.get("engine_status"), merged.get("status_message")):
+            continue
         entries.append((_row_values(merged, role), merged, _exception_reason(raw, review, final)))
     entries.sort(
         key=lambda item: (
@@ -448,6 +462,16 @@ def render_rebar_workbook_xlsx(
             _natural_key(item[1].get("beam_line", "")),
             _span_key(item[1]),
         )
+    )
+    span_width = max(
+        (
+            len(str(values["beam_no"]))
+            + len(" (CANTILEVER)")
+            + 2
+            for values, source, _reason in entries
+            if source.get("is_cantilever") is True
+        ),
+        default=16,
     )
 
     workbook = Workbook()
@@ -465,7 +489,7 @@ def render_rebar_workbook_xlsx(
     sheet.page_margins.top = 0.35
     sheet.page_margins.bottom = 0.35
     sheet.print_options.horizontalCentered = True
-    _column_widths(sheet, role)
+    _column_widths(sheet, role, span_width=span_width)
 
     last_column = len(columns)
     _merge_label(
@@ -538,7 +562,18 @@ def render_rebar_workbook_xlsx(
             row_number = data_start
             for values, source, reason in story_entries:
                 for column, (key, _label) in enumerate(columns, start=1):
-                    sheet.cell(row=row_number, column=column, value=_cell_value(values.get(key)))
+                    value = _cell_value(values.get(key))
+                    if key == "beam_no" and source.get("is_cantilever") is True:
+                        value = CellRichText(
+                            [
+                                str(values["beam_no"]),
+                                TextBlock(
+                                    InlineFont(color=COLORS["red"]),
+                                    " (CANTILEVER)",
+                                ),
+                            ]
+                        )
+                    sheet.cell(row=row_number, column=column, value=value)
                 exception = bool(reason)
                 _style_data_row(sheet, row_number, last_column, exception=exception)
                 if exception:

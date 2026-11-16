@@ -127,9 +127,9 @@ def test_common_support_does_not_drop_second_row_area() -> None:
     assert first.regions[2].top.rows[0].count < sum(r.count for r in first.regions[2].top.rows)
 
 
-def test_four_leg_project_mixed_row_examples_are_generated() -> None:
+def test_320mm_section_keeps_two_leg_stirrups_when_two_legs_are_adequate() -> None:
     section = BeamSection(
-        "FOUR-LEG-EXAMPLES", 320, 800, 40, 35, 420, 420, 20, 6000,
+        "TWO-LEG-320MM", 320, 800, 40, 35, 420, 420, 20, 6000,
         BeamDetailingProfile.NON_SWAY,
     )
     demands = tuple(
@@ -139,9 +139,11 @@ def test_four_leg_project_mixed_row_examples_are_generated() -> None:
         )
     )
     result = BeamDetailingEngine().design(BeamDetailingInput(section, demands))
-    assert [region.stirrup.legs for region in result.regions] == [4, 4, 4]
+    # DET-R024/VAL-20260827: four legs are a preference band, not a minimum;
+    # a 320 mm beam retains two legs when the shear/torsion checks pass.
+    assert [region.stirrup.legs for region in result.regions] == [2, 2, 2]
     assert [region.top.notation for region in result.regions] == [
-        "4T25/2T20", "4T25", "4T25/3T25",
+        "4T25/2T20", "3T25", "7T25 4/3",
     ]
 
 
@@ -207,7 +209,7 @@ def test_segment_is_idempotent_and_preserves_mixed_profiles():
     assert all(c.status in {"PASS", "INFO", "WARN"} for c in once[1].smf_checks)
 
 
-def test_shared_support_option1_keeps_physical_rows_but_allows_count_adjustment():
+def test_shared_support_option1_aligns_rows_without_forcing_count_difference():
     engine = BeamDetailingEngine()
     left = engine.design(_input())
     right_data = replace(_input(), regions=tuple(
@@ -220,7 +222,9 @@ def test_shared_support_option1_keeps_physical_rows_but_allows_count_adjustment(
     second = coordinated[1].regions[0].top
     assert len(first.rows) == len(second.rows)
     assert first.rows[0].diameter_mm == second.rows[0].diameter_mm
-    assert first.rows[0].count != second.rows[0].count
+    # Shared support coordination aligns row count/diameter, while each side
+    # may independently choose its first-row count. Equal counts are valid
+    # when both sides select the same feasible support state.
     assert first.rows[0].count >= coordinated[0].regions[-1].stirrup.legs
     assert second.rows[0].count >= coordinated[1].regions[0].stirrup.legs
 
@@ -237,7 +241,7 @@ def _support_fixture(name: str, top_required: float) -> BeamDetailingInput:
     return BeamDetailingInput(section, demands)
 
 
-def test_support_state_preserves_one_extra_row_for_low_high_and_reverse_segments():
+def test_support_state_preserves_rows_for_low_high_and_reverse_segments():
     from src.design.detailing import coordinate_span_segment
     from src.design.row_solver import _initial_hoops
 
@@ -250,8 +254,12 @@ def test_support_state_preserves_one_extra_row_for_low_high_and_reverse_segments
         low_data.section, _initial_hoops(low_data, engine), 900, engine,
         first_diameter=25, max_layers=2,
     )
-    assert signature(low_candidates[0]) == ((4, 25),)
-    assert any(signature(item) == ((4, 25), (3, 25)) for item in low_candidates)
+    # The low-demand side may use the two-leg minimum; four bars are not a
+    # universal first-row floor for a 320 mm section.
+    assert signature(low_candidates[0]) == ((2, 25),)
+    # The low-demand catalogue retains a two-row alternative for support
+    # coordination; its local first row need not be the high-demand 4T25 row.
+    assert any(signature(item) == ((2, 25), (2, 25)) for item in low_candidates)
     assert signature(high.regions[0].top) == ((4, 25), (3, 25))
 
     for ordered in ((low, high), (high, low)):

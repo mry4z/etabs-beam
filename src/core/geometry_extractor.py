@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+import math
+from typing import Any, Iterable, Sequence
 
 from src.core.etabs_connector import EtabsApiError, api_values
 from src.utils.geometry import Point3D, length
@@ -36,6 +37,76 @@ def expand_rigid_support_points(column_points: Iterable[str], rigid_links: Itera
     return supports
 
 
+def relevant_anchored_rigid_links(
+    rigid_links: Iterable["RigidLinkGeometry"],
+    beam_endpoint_names: Iterable[str],
+    column_anchor_names: Iterable[str],
+) -> tuple["RigidLinkGeometry", ...]:
+    """Keep only rigid components that connect a lower-column anchor to a beam endpoint."""
+
+    links = tuple(rigid_links)
+    beam_points = {str(name) for name in beam_endpoint_names}
+    anchors = {str(name) for name in column_anchor_names}
+    by_story: dict[str, list[int]] = {}
+    for index, link in enumerate(links):
+        by_story.setdefault(link.story, []).append(index)
+
+    selected: set[int] = set()
+    for indices in by_story.values():
+        adjacency: dict[str, list[int]] = {}
+        for index in indices:
+            link = links[index]
+            adjacency.setdefault(link.point_i, []).append(index)
+            adjacency.setdefault(link.point_j, []).append(index)
+        visited: set[str] = set()
+        for start in adjacency:
+            if start in visited:
+                continue
+            component_nodes: set[str] = set()
+            component_edges: set[int] = set()
+            stack = [start]
+            while stack:
+                point = stack.pop()
+                if point in component_nodes:
+                    continue
+                component_nodes.add(point)
+                visited.add(point)
+                for edge_index in adjacency.get(point, ()):
+                    component_edges.add(edge_index)
+                    edge = links[edge_index]
+                    other = edge.point_j if edge.point_i == point else edge.point_i
+                    if other not in component_nodes:
+                        stack.append(other)
+            component_anchors = component_nodes & anchors
+            for beam_point in sorted(component_nodes & beam_points):
+                pending = [beam_point]
+                previous: dict[str, tuple[str, int] | None] = {beam_point: None}
+                found_anchor = ""
+                while pending:
+                    point = pending.pop(0)
+                    if point in component_anchors:
+                        found_anchor = point
+                        break
+                    for edge_index in adjacency.get(point, ()):
+                        if edge_index not in component_edges:
+                            continue
+                        edge = links[edge_index]
+                        other = edge.point_j if edge.point_i == point else edge.point_i
+                        if other not in previous:
+                            previous[other] = (point, edge_index)
+                            pending.append(other)
+                if not found_anchor:
+                    continue
+                point = found_anchor
+                while point != beam_point:
+                    parent = previous.get(point)
+                    if parent is None:
+                        break
+                    point, edge_index = parent
+                    selected.add(edge_index)
+    return tuple(links[index] for index in range(len(links)) if index in selected)
+
+
 @dataclass(frozen=True)
 class BeamGeometry:
     name: str
@@ -58,6 +129,31 @@ class BeamGeometry:
 
 
 @dataclass(frozen=True)
+class RigidLinkGeometry:
+    """Numbering-only geometry for one true rigid helper frame."""
+
+    name: str
+    story: str
+    point_i: str
+    point_j: str
+    start: Point3D
+    end: Point3D
+    section: str = ""
+
+
+@dataclass(frozen=True)
+class ColumnOutline:
+    """One column concrete outline in the global plan coordinate system."""
+
+    frame_name: str
+    support_name: str
+    section: str
+    shape_name: str
+    support: Point3D
+    vertices: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
 class _FrameSummary:
     """Fields needed for support discovery from one bulk OAPI row."""
 
@@ -71,6 +167,18 @@ class _FrameSummary:
     end: Point3D
 
 
+def _upper_endpoint(summary: _FrameSummary) -> tuple[str, Point3D]:
+    """Return the endpoint at the higher elevation of a column frame."""
+
+    if summary.start[2] > summary.end[2]:
+        return summary.point_i, summary.start
+    return summary.point_j, summary.end
+
+
+def _field_key(value: Any) -> str:
+    return "".join(character for character in str(value).casefold() if character.isalnum())
+
+
 class GeometryExtractor:
     FRAME_OBJECT_TYPE = 2
     BEAM_DESIGN_ORIENTATION = 2
@@ -81,6 +189,8 @@ class GeometryExtractor:
         self._design_orientation_cache: dict[str, int] = {}
         self._concrete_section_cache: dict[str, bool] = {}
         self._section_depth_cache: dict[str, float | None] = {}
+        self._column_outline_cache: tuple[ColumnOutline, ...] | None = None
+        self._column_section_shape_cache: dict[str, tuple[tuple[str, tuple[tuple[float, float], ...]], ...]] = {}
 
     def selected_beam_names(self) -> list[str]:
         values = api_values(self.sap.SelectObj.GetSelected(0, None, None), "SelectObj.GetSelected")
@@ -105,12 +215,40 @@ class GeometryExtractor:
         """Return real and rigid-transferred column support point names."""
         return self._column_support_names()
 
-    def column_supports(self) -> dict[str, Point3D]:
-        """Return every column/equivalent-column point and its global coordinate.
+    def column_anchor_names(self) -> set[str]:
+        """Return only endpoints of lower column segments before rigid transfer."""
+        return {_upper_endpoint(summary)[0] for summary in self._lower_column_frames()}
 
-        Rigid helper members are not included as beams, but an anchored rigid
-        member transfers the real column support to its opposite endpoint.
-        Unanchored rigid members remain excluded from support classification.
+    def rigid_links_for_beams(self, beams: Sequence[BeamGeometry]) -> tuple[RigidLinkGeometry, ...]:
+        """Return anchored rigid frames adjacent to this beam scope for numbering only."""
+        summaries = self._all_frame_summaries()
+        anchors = self.column_anchor_names()
+        links = tuple(
+            RigidLinkGeometry(
+                summary.name,
+                summary.story,
+                summary.point_i,
+                summary.point_j,
+                summary.start,
+                summary.end,
+                summary.section,
+            )
+            for summary in summaries
+            if "rigid" in summary.section.casefold()
+        )
+        return relevant_anchored_rigid_links(
+            links,
+            (point for beam in beams for point in (beam.point_i, beam.point_j)),
+            anchors,
+        )
+
+    def column_supports(self) -> dict[str, Point3D]:
+        """Return top endpoints of lower column segments and rigid transfers.
+
+        A beam at a column joint is supported only when a column continues
+        downward from that joint.  The bottom end of an upper-only column is
+        therefore excluded.  A rigid helper transfers a detected lower-column
+        support only after it is anchored to such a support.
 
         Coordinates are read independently of Beam Object endpoints so a
         column landing inside one long Beam Object is retained for structural
@@ -120,6 +258,152 @@ class GeometryExtractor:
         return {
             point_name: coordinates[point_name] for point_name in sorted(support_names) if point_name in coordinates
         }
+
+    def column_outlines(self) -> tuple[ColumnOutline, ...]:
+        """Return plan outlines for lower-column supports, including SD polygons."""
+
+        if self._column_outline_cache is not None:
+            return self._column_outline_cache
+        outlines: list[ColumnOutline] = []
+        for summary in self._lower_column_frames():
+            support_name, support = _upper_endpoint(summary)
+            matrix_values = api_values(
+                self.sap.FrameObj.GetTransformationMatrix(summary.name, [0.0] * 9, False),
+                f"FrameObj.GetTransformationMatrix({summary.name})",
+            )
+            matrix = tuple(float(value) for value in list(matrix_values[0]))
+            if len(matrix) != 9 or not all(math.isfinite(value) for value in matrix):
+                raise EtabsApiError(f"FrameObj.GetTransformationMatrix({summary.name}): 方向余弦矩阵无效。")
+            section_shapes = self._column_section_shapes(summary.section)
+            for shape_name, local_vertices in section_shapes:
+                global_vertices = tuple(
+                    (
+                        support[0] + local_2 * matrix[3] + local_3 * matrix[6],
+                        support[1] + local_2 * matrix[4] + local_3 * matrix[7],
+                    )
+                    for local_2, local_3 in local_vertices
+                )
+                outlines.append(
+                    ColumnOutline(
+                        frame_name=summary.name,
+                        support_name=support_name,
+                        section=summary.section,
+                        shape_name=shape_name,
+                        support=support,
+                        vertices=global_vertices,
+                    )
+                )
+        self._column_outline_cache = tuple(outlines)
+        return self._column_outline_cache
+
+    def _column_section_shapes(self, section_name: str) -> tuple[tuple[str, tuple[tuple[float, float], ...]], ...]:
+        """Read one rectangular/circular section or public SD concrete polygons."""
+
+        if section_name not in self._column_section_shape_cache:
+            self._column_section_shape_cache[section_name] = self._read_column_section_shapes(section_name)
+        return self._column_section_shape_cache[section_name]
+
+    def _read_column_section_shapes(
+        self,
+        section_name: str,
+    ) -> tuple[tuple[str, tuple[tuple[float, float], ...]], ...]:
+
+        try:
+            values = api_values(
+                self.sap.PropFrame.GetRectangle(section_name, "", "", 0.0, 0.0, -1, "", ""),
+                f"PropFrame.GetRectangle({section_name})",
+            )
+        except EtabsApiError:
+            values = None
+        if values is not None:
+            try:
+                t3, t2 = float(values[2]), float(values[3])
+            except (IndexError, TypeError, ValueError):
+                t2 = t3 = 0.0
+            if all(math.isfinite(value) and value > 0.0 for value in (t2, t3)):
+                return (("", ((-t2 / 2, -t3 / 2), (t2 / 2, -t3 / 2), (t2 / 2, t3 / 2), (-t2 / 2, t3 / 2))),)
+
+        try:
+            values = api_values(
+                self.sap.PropFrame.GetCircle(section_name, "", "", 0.0, -1, "", ""),
+                f"PropFrame.GetCircle({section_name})",
+            )
+        except EtabsApiError:
+            values = None
+        if values is not None:
+            try:
+                diameter = float(values[2])
+            except (IndexError, TypeError, ValueError):
+                diameter = 0.0
+            if math.isfinite(diameter) and diameter > 0.0:
+                radius = diameter / 2.0
+                vertices = tuple(
+                    (radius * math.cos(2.0 * math.pi * index / 96), radius * math.sin(2.0 * math.pi * index / 96))
+                    for index in range(96)
+                )
+                return (("", vertices),)
+
+        try:
+            values = api_values(
+                self.sap.PropFrame.GetSDSection(section_name, "", 0, [], [], 0, 0, "", ""),
+                f"PropFrame.GetSDSection({section_name})",
+            )
+        except EtabsApiError as exc:
+            raise EtabsApiError(
+                f"Column section {section_name}: no supported rectangular, circular, or Section Designer "
+                "concrete-polygon geometry is available."
+            ) from exc
+        if len(values) != 8:
+            raise EtabsApiError(f"PropFrame.GetSDSection({section_name}): 返回参数数量异常。")
+        shape_count = int(values[1])
+        table_values = api_values(
+            self.sap.DatabaseTables.GetTableForDisplayArray(
+                "Section Designer Shapes - Concrete Polygon",
+                None,
+                "",
+                0,
+                None,
+                0,
+                None,
+            ),
+            "DatabaseTables.GetTableForDisplayArray(Section Designer Shapes - Concrete Polygon)",
+        )
+        if len(table_values) != 5:
+            raise EtabsApiError("Section Designer Concrete Polygon: 返回参数数量异常。")
+        _requested_fields, _table_version, included_fields, record_count, flat_data = table_values
+        fields = tuple(_field_key(value) for value in list(included_fields or ()))
+        data = tuple(str(value) for value in list(flat_data or ()))
+        count = int(record_count)
+        if not fields or count < 0 or len(data) != count * len(fields):
+            raise EtabsApiError("Section Designer Concrete Polygon: 字段/记录数据长度异常。")
+        required = {"sectionname", "shapename", "x", "y"}
+        if not required.issubset(fields):
+            raise EtabsApiError("Section Designer Concrete Polygon: 缺少 SectionName/ShapeName/X/Y 字段。")
+        column_indexes = {name: fields.index(name) for name in required}
+        grouped: dict[str, list[tuple[float, float]]] = {}
+        for offset in range(0, len(data), len(fields)):
+            row = data[offset : offset + len(fields)]
+            if row[column_indexes["sectionname"]] != section_name:
+                continue
+            shape_name = row[column_indexes["shapename"]].strip()
+            try:
+                # CSI stores X=local-3 and Y=local-2.
+                local_2 = float(row[column_indexes["y"]])
+                local_3 = float(row[column_indexes["x"]])
+            except ValueError as exc:
+                raise EtabsApiError(f"Section Designer Concrete Polygon {section_name}: 坐标无效。") from exc
+            if not shape_name or not math.isfinite(local_2) or not math.isfinite(local_3):
+                raise EtabsApiError(f"Section Designer Concrete Polygon {section_name}: ShapeName/坐标无效。")
+            grouped.setdefault(shape_name, []).append((local_2, local_3))
+        if not grouped:
+            raise EtabsApiError(
+                f"Section Designer {section_name}: Concrete Polygon 表没有匹配到截面多边形 "
+                f"(shape_count={shape_count})。"
+            )
+        for shape_name, vertices in grouped.items():
+            if len(vertices) < 3:
+                raise EtabsApiError(f"Section Designer {section_name}/{shape_name}: 顶点少于 3 个。")
+        return tuple((name, tuple(vertices)) for name, vertices in grouped.items())
 
     def _column_support_names(self) -> set[str]:
         return self._column_support_data()[0]
@@ -133,10 +417,8 @@ class GeometryExtractor:
         called ``GetCoordCartesian`` for every support; on a real 7,000-frame
         model that added tens of thousands of cross-process calls.
         """
-        from ETABSv1 import eFrameDesignOrientation
-
         summaries = self._all_frame_summaries()
-        points: set[str] = set()
+        points = { _upper_endpoint(summary)[0] for summary in self._lower_column_frames(summaries) }
         rigid_links: list[tuple[str, str]] = []
         coordinates: dict[str, Point3D] = {}
         for summary in summaries:
@@ -144,10 +426,22 @@ class GeometryExtractor:
             coordinates.setdefault(summary.point_j, summary.end)
             if "rigid" in summary.section.casefold():
                 rigid_links.append((summary.point_i, summary.point_j))
-            orientation = self._design_orientation(summary.name, eFrameDesignOrientation.Column)
-            if orientation == 1:
-                points.update((summary.point_i, summary.point_j))
         return expand_rigid_support_points(points, rigid_links), coordinates
+
+    def _lower_column_frames(
+        self,
+        summaries: tuple[_FrameSummary, ...] | None = None,
+    ) -> tuple[_FrameSummary, ...]:
+        from ETABSv1 import eFrameDesignOrientation
+
+        candidates: list[_FrameSummary] = []
+        for summary in summaries or self._all_frame_summaries():
+            if self._design_orientation(summary.name, eFrameDesignOrientation.Column) != 1:
+                continue
+            if abs(summary.start[2] - summary.end[2]) <= 1.0e-6:
+                continue
+            candidates.append(summary)
+        return tuple(candidates)
 
     def _all_frame_summaries(self) -> tuple[_FrameSummary, ...]:
         """Read model-wide Frame geometry in one call, with a legacy fallback."""

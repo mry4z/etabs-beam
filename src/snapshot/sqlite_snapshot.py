@@ -17,19 +17,27 @@ import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
 from src.core.etabs_connector import EtabsApiError, api_values
-from src.core.geometry_extractor import BeamGeometry, expand_rigid_support_points
+from src.core.geometry_extractor import (
+    BeamGeometry,
+    ColumnOutline,
+    RigidLinkGeometry,
+    expand_rigid_support_points,
+    relevant_anchored_rigid_links,
+)
 from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
 from src.utils.geometry import Point3D
 
 SNAPSHOT_SCHEMA_VERSION = "1.0"
 FIELD_MAPPING_VERSION = "raw-oapi-table/1.0"
 PROJECT_BEAM_DESIGN_TABLE_KEY = "__project__.BeamDesignResult.v1"
-PROJECT_DOMAIN_MAPPING_VERSION = "beam-domain/2.0"
+PROJECT_DOMAIN_MAPPING_VERSION = "beam-domain/2.1"
 # Compatibility alias for callers that previously imported the design-only
-# mapping constant.  Version 2.0 covers exact geometry, supports and design.
+# mapping constant. Version 2.1 adds lower-column support semantics and
+# normalized global-plan column outlines to exact geometry and design.
 PROJECT_BEAM_DESIGN_MAPPING_VERSION = PROJECT_DOMAIN_MAPPING_VERSION
 PROJECT_BEAM_GEOMETRY_TABLE_KEY = "__project__.BeamGeometry.v1"
 PROJECT_COLUMN_SUPPORT_TABLE_KEY = "__project__.ColumnSupport.v1"
+PROJECT_COLUMN_OUTLINE_TABLE_KEY = "__project__.ColumnOutline.v1"
 PROJECT_BEAM_GEOMETRY_FIELDS = (
     "Name",
     "Label",
@@ -50,6 +58,18 @@ PROJECT_COLUMN_SUPPORT_FIELDS = (
     "X",
     "Y",
     "Z",
+)
+PROJECT_COLUMN_OUTLINE_FIELDS = (
+    "FrameName",
+    "SupportName",
+    "SectionName",
+    "ShapeName",
+    "SupportX",
+    "SupportY",
+    "SupportZ",
+    "VertexIndex",
+    "X",
+    "Y",
 )
 PROJECT_BEAM_DESIGN_FIELDS = (
     "BeamName",
@@ -117,6 +137,8 @@ class SnapshotMetadata:
     created_at_utc: str = ""
     snapshot_schema_version: str = SNAPSHOT_SCHEMA_VERSION
     field_mapping_version: str = FIELD_MAPPING_VERSION
+    detailing_policy_id: str = "legacy"
+    detailing_policy_revision_id: str = "legacy"
 
     def __post_init__(self) -> None:
         required = {
@@ -628,6 +650,8 @@ class SqliteSnapshotSource:
 
     def __init__(self, reader: SnapshotReader) -> None:
         self.reader = reader
+        self._column_anchor_names_cache: set[str] | None = None
+        self._rigid_links_cache: tuple[RigidLinkGeometry, ...] | None = None
 
     def extract_beams(self) -> list[BeamGeometry]:
         metadata = self.reader.metadata()
@@ -776,9 +800,48 @@ class SqliteSnapshotSource:
         metadata = self.reader.metadata()
         if metadata.get("units") != "N_mm_C":
             raise SnapshotSchemaError(f"UNSUPPORTED_SNAPSHOT_UNITS: expected N_mm_C, got {metadata.get('units')!r}")
-        if self.reader.has_table(PROJECT_COLUMN_SUPPORT_TABLE_KEY):
-            return self._extract_project_supports()
-        return self.raw_table_column_supports()
+        raw_supports = self.raw_table_column_supports()
+        if not self.reader.has_table(PROJECT_COLUMN_SUPPORT_TABLE_KEY):
+            return raw_supports
+        # Legacy project tables recorded both ends of every column. Keep their
+        # full-precision coordinates while applying the corrected lower-column
+        # endpoint membership from the public connectivity tables.
+        stored = self._extract_project_supports()
+        return {name: stored.get(name, point) for name, point in raw_supports.items()}
+
+    def column_outlines(self) -> tuple[ColumnOutline, ...]:
+        """Replay normalized outlines or fail clearly for pre-outline bundles."""
+
+        if not self.reader.has_table(PROJECT_COLUMN_OUTLINE_TABLE_KEY):
+            raise SnapshotTableError(
+                "SNAPSHOT_COLUMN_OUTLINES_UNAVAILABLE: this legacy bundle predates normalized column plan outlines; "
+                "re-export the snapshot from ETABS before creating beam DXFs."
+            )
+        table = self.reader.read_table(
+            PROJECT_COLUMN_OUTLINE_TABLE_KEY,
+            expected_fields=PROJECT_COLUMN_OUTLINE_FIELDS,
+        )
+        grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for row in _row_mappings(table):
+            key = (row["FrameName"], row["SupportName"], row["SectionName"], row["ShapeName"])
+            group = grouped.setdefault(
+                key,
+                {"support": (float(row["SupportX"]), float(row["SupportY"]), float(row["SupportZ"])), "vertices": []},
+            )
+            group["vertices"].append(
+                (int(row["VertexIndex"]), (float(row["X"]), float(row["Y"])))
+            )
+        outlines: list[ColumnOutline] = []
+        for (frame_name, support_name, section_name, shape_name), group in grouped.items():
+            vertices = tuple(point for _, point in sorted(group["vertices"], key=lambda item: item[0]))
+            if len(vertices) < 3:
+                raise SnapshotTableError(
+                    f"SNAPSHOT_COLUMN_OUTLINE_INVALID: {frame_name}/{shape_name} has fewer than three vertices"
+                )
+            outlines.append(
+                ColumnOutline(frame_name, support_name, section_name, shape_name, group["support"], vertices)
+            )
+        return tuple(outlines)
 
     def raw_table_column_supports(self) -> dict[str, Point3D]:
         """Rebuild display-table supports for export-time provenance checks."""
@@ -821,7 +884,17 @@ class SqliteSnapshotSource:
 
         column_points: set[str] = set()
         for row in _row_mappings(columns):
-            column_points.update((row["UniquePtI"], row["UniquePtJ"]))
+            try:
+                point_i_z = float(points[row["UniquePtI"]]["Z"])
+                point_j_z = float(points[row["UniquePtJ"]]["Z"])
+            except (KeyError, ValueError) as exc:
+                raise SnapshotTableError(
+                    f"SNAPSHOT_JOIN_OR_NUMERIC_VALUE_INVALID: column endpoints for {row['UniqueName']}"
+                ) from exc
+            if point_i_z > point_j_z:
+                column_points.add(row["UniquePtI"])
+            elif point_j_z > point_i_z:
+                column_points.add(row["UniquePtJ"])
         rigid_links: list[tuple[str, str]] = []
         for table in connectivity_tables:
             for row in _row_mappings(table):
@@ -846,6 +919,94 @@ class SqliteSnapshotSource:
             except ValueError as exc:
                 raise SnapshotTableError(f"SNAPSHOT_NUMERIC_VALUE_INVALID: support point {name}") from exc
         return result
+
+    def raw_table_column_anchor_names(self) -> set[str]:
+        """Return only lower-column endpoints before any rigid-link transfer."""
+
+        if self._column_anchor_names_cache is not None:
+            return set(self._column_anchor_names_cache)
+        metadata = self.reader.metadata()
+        if metadata.get("units") != "N_mm_C":
+            raise SnapshotSchemaError(f"UNSUPPORTED_SNAPSHOT_UNITS: expected N_mm_C, got {metadata.get('units')!r}")
+        points = _indexed_rows(
+            self.reader.read_table("Point Object Connectivity", expected_fields=self.POINT_FIELDS),
+            "UniqueName",
+        )
+        columns = self.reader.read_table("Column Object Connectivity", expected_fields=self.COLUMN_FIELDS)
+        anchors: set[str] = set()
+        for row in _row_mappings(columns):
+            try:
+                point_i_z = float(points[row["UniquePtI"]]["Z"])
+                point_j_z = float(points[row["UniquePtJ"]]["Z"])
+            except (KeyError, ValueError) as exc:
+                raise SnapshotTableError(
+                    f"SNAPSHOT_JOIN_OR_NUMERIC_VALUE_INVALID: column endpoints for {row['UniqueName']}"
+                ) from exc
+            if point_i_z > point_j_z:
+                anchors.add(row["UniquePtI"])
+            elif point_j_z > point_i_z:
+                anchors.add(row["UniquePtJ"])
+        self._column_anchor_names_cache = anchors
+        return set(anchors)
+
+    def rigid_links_for_beams(self, beams: Sequence[BeamGeometry]) -> tuple[RigidLinkGeometry, ...]:
+        """Read selected-scope rigid edges from public connectivity tables."""
+
+        if self._rigid_links_cache is None:
+            metadata = self.reader.metadata()
+            if metadata.get("units") != "N_mm_C":
+                raise SnapshotSchemaError(
+                    f"UNSUPPORTED_SNAPSHOT_UNITS: expected N_mm_C, got {metadata.get('units')!r}"
+                )
+            points = _indexed_rows(
+                self.reader.read_table("Point Object Connectivity", expected_fields=self.POINT_FIELDS),
+                "UniqueName",
+            )
+            assignments = _indexed_rows(
+                self.reader.read_table(
+                    "Frame Assignments - Section Properties", expected_fields=self.ASSIGNMENT_FIELDS
+                ),
+                "UniqueName",
+            )
+            connectivity_tables = [
+                ("Beam Object Connectivity", self.BEAM_FIELDS),
+                ("Column Object Connectivity", self.COLUMN_FIELDS),
+            ]
+            if self.reader.has_table("Brace Object Connectivity"):
+                connectivity_tables.append(("Brace Object Connectivity", self.BRACE_FIELDS))
+            links: list[RigidLinkGeometry] = []
+            for table_name, fields in connectivity_tables:
+                table = self.reader.read_table(table_name, expected_fields=fields)
+                for row in _row_mappings(table):
+                    assignment = assignments.get(row["UniqueName"])
+                    if assignment is None:
+                        raise SnapshotTableError(f"SNAPSHOT_JOIN_MISSING: frame assignment for {row['UniqueName']}")
+                    section = assignment["SectProp"]
+                    if "rigid" not in section.casefold():
+                        continue
+                    point_i_name, point_j_name = row["UniquePtI"], row["UniquePtJ"]
+                    point_i, point_j = points.get(point_i_name), points.get(point_j_name)
+                    if point_i is None or point_j is None:
+                        missing = point_i_name if point_i is None else point_j_name
+                        raise SnapshotTableError(f"SNAPSHOT_JOIN_MISSING: point {missing} for {row['UniqueName']}")
+                    try:
+                        start = (float(point_i["X"]), float(point_i["Y"]), float(point_i["Z"]))
+                        end = (float(point_j["X"]), float(point_j["Y"]), float(point_j["Z"]))
+                    except ValueError as exc:
+                        raise SnapshotTableError(
+                            f"SNAPSHOT_NUMERIC_VALUE_INVALID: rigid link endpoints for {row['UniqueName']}"
+                        ) from exc
+                    links.append(
+                        RigidLinkGeometry(
+                            row["UniqueName"], row["Story"], point_i_name, point_j_name, start, end, section
+                        )
+                    )
+            self._rigid_links_cache = tuple(links)
+        return relevant_anchored_rigid_links(
+            self._rigid_links_cache,
+            (point for beam in beams for point in (beam.point_i, beam.point_j)),
+            self.raw_table_column_anchor_names(),
+        )
 
     def _extract_project_supports(self) -> dict[str, Point3D]:
         """Replay full-precision support coordinates captured from GetAllFrames."""
@@ -1110,6 +1271,34 @@ def build_project_column_support_table(
         1,
         PROJECT_COLUMN_SUPPORT_FIELDS,
         rows,
+    )
+
+
+def build_project_column_outline_table(outlines: Sequence[ColumnOutline]) -> OapiTable:
+    """Serialize transformed plan vertices for deterministic offline DXFs."""
+
+    rows: list[tuple[str, ...]] = []
+    for outline in outlines:
+        for index, (x, y) in enumerate(outline.vertices):
+            rows.append(
+                (
+                    outline.frame_name,
+                    outline.support_name,
+                    outline.section,
+                    outline.shape_name,
+                    *(_float_text(value) for value in outline.support),
+                    str(index),
+                    _float_text(x),
+                    _float_text(y),
+                )
+            )
+    return OapiTable(
+        PROJECT_COLUMN_OUTLINE_TABLE_KEY,
+        "Project Normalized Column Outlines",
+        -1,
+        1,
+        PROJECT_COLUMN_OUTLINE_FIELDS,
+        tuple(rows),
     )
 
 

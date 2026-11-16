@@ -6,7 +6,7 @@ from src.core.continuity_analyzer import ContinuityGroup
 from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.geometry_extractor import BeamGeometry
 from src.design.provider import BeamDesignResult
-from src.design.provider import DesignStation
+from src.design.provider import DesignResultStatus, DesignStation
 from src.excel_export import export_beam_schedule
 from src.excel_span_adapter import SpanScheduleMapping, SpanScheduleRecord
 
@@ -61,3 +61,27 @@ def test_export_beam_type_filter_writes_fixed_primary_and_secondary_paths(tmp_pa
     assert secondary.name == "M_secondarybeam_schedule.xlsx"
     assert list(load_workbook(primary, read_only=True)["梁表"].iter_rows(min_row=2, values_only=True))[0][0] == "PB"
     assert list(load_workbook(secondary, read_only=True)["梁表"].iter_rows(min_row=2, values_only=True))[0][0] == "SB"
+
+
+def test_basic_beam_schedule_hides_only_explicit_no_design_rows(tmp_path: Path) -> None:
+    beams = [
+        BeamGeometry("B1", "B1", "L1", "P1", "P2", (0, 0, 0), (6, 0, 0), "B300x500"),
+        BeamGeometry("B2", "B2", "L1", "P2", "P3", (6, 0, 0), (12, 0, 0), "B300x500"),
+        BeamGeometry("B3", "B3", "L1", "P3", "P4", (12, 0, 0), (18, 0, 0), "B300x500"),
+    ]
+    designs = {
+        "B1": BeamDesignResult(
+            "B1",
+            status=DesignResultStatus.SKIPPED,
+            status_message="EXCLUDED_NO_DESIGN; GetDesignProcedure=7 No Design",
+        ),
+        "B2": BeamDesignResult("B2", status=DesignResultStatus.NO_RESULTS, status_message="N.A."),
+        "B3": BeamDesignResult(
+            "B3", status=DesignResultStatus.API_ERROR, status_message="No Design API result was available"
+        ),
+    }
+
+    output = export_beam_schedule(beams, [], designs, tmp_path)
+    rows = list(load_workbook(output, read_only=True)["梁表"].iter_rows(min_row=2, values_only=True))
+
+    assert [row[0] for row in rows] == ["B2", "B3"]

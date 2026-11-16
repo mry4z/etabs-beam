@@ -7,9 +7,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.config import load_config
+from src.config import load_config, parse_rebar_workers
 from src.core.etabs_connector import EtabsConnector, etabs_version_info, model_paths_match
 from src.core.geometry_extractor import GeometryExtractor
+from src.design.detailing import make_fresh_detailing_engine
+from src.design.region_results import SUPPORTED_DETAILING_POLICY_IDS
 from src.model_source import EtabsOapiReadSource
 from src.run_manifest import sha256_file
 from src.snapshot.exporter import (
@@ -39,7 +41,17 @@ def main(argv: list[str] | None = None) -> int:
 def run(arguments: argparse.Namespace) -> dict[str, Any]:
     """Attach to one explicit PID and export without model mutation or save."""
 
-    config = load_config(arguments.config)
+    config = load_config(
+        arguments.config,
+        detailing_policy_id=getattr(arguments, "detailing_policy", None),
+        layout_dictionary_path=getattr(arguments, "layout_dictionary", None),
+        rebar_workers=getattr(arguments, "rebar_workers", None),
+    )
+    detailing_engine = make_fresh_detailing_engine(
+        config.design.detailing_policy,
+        layout_dictionary_path=config.design.layout_dictionary_path,
+        candidate_lookup=config.design.candidate_lookup,
+    )
     expected_model = Path(arguments.expected_model).resolve()
     if not expected_model.is_file() or expected_model.suffix.casefold() != ".edb":
         raise FileNotFoundError(f"expected durable EDB not found: {expected_model}")
@@ -63,6 +75,7 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
         extractor = GeometryExtractor(sap_model)
         beams = extractor.extract("all")
         supports = extractor.column_supports()
+        column_outlines = extractor.column_outlines()
         live_source = EtabsOapiReadSource(
             sap_model,
             actual_model,
@@ -87,12 +100,17 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
             live_beams=beams,
             live_supports=supports,
             live_designs=designs,
+            live_column_outlines=column_outlines,
             live_frame_states=frame_states,
             live_section_info=section_info,
             profile=ACI31814_RECTANGULAR_BEAM_PROFILE,
             coordinate_tolerance_mm=arguments.coordinate_tolerance_mm,
             expected_source_sha256=source_sha256_before_capture,
+            detailing_policy_id=config.design.detailing_policy,
+            detailing_policy_revision_id=detailing_engine.detailing_policy_revision_id,
         )
+    summary["detailing_policy_id"] = config.design.detailing_policy
+    summary["detailing_policy_revision_id"] = detailing_engine.detailing_policy_revision_id
     summary["host"] = {
         "pid": arguments.pid,
         "actual_model": str(actual_model),
@@ -124,6 +142,22 @@ def _parser() -> argparse.ArgumentParser:
         help="Exact durable .EDB path expected in the target process",
     )
     parser.add_argument("--config", help="Project YAML config")
+    parser.add_argument(
+        "--detailing-policy",
+        choices=sorted(SUPPORTED_DETAILING_POLICY_IDS),
+        default=None,
+        help="Policy selection recorded for downstream snapshot workflows",
+    )
+    parser.add_argument(
+        "--layout-dictionary",
+        help="Optional precomputed physical-row bank path for explicit drawing-policy R6",
+    )
+    parser.add_argument(
+        "--rebar-workers",
+        type=parse_rebar_workers,
+        default=None,
+        help="Rebar processes: auto uses logical CPU count minus one; integer 1..64 overrides config",
+    )
     parser.add_argument("--output", required=True, help="New .sqlite output path")
     parser.add_argument(
         "--coordinate-tolerance-mm",

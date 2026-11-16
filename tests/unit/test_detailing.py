@@ -260,7 +260,7 @@ def test_multilayer_longitudinal_layout_never_leaves_one_bar_in_last_layer() -> 
     assert all(row.count >= 2 for row in result.regions[0].top.rows)
 
 
-def test_case_two_triggers_span_wide_torsion_face_mode() -> None:
+def test_case_two_blocks_when_total_area_exceeds_two_layer_catalogue() -> None:
     data = _input(
         "CASE-2",
         450,
@@ -271,20 +271,12 @@ def test_case_two_triggers_span_wide_torsion_face_mode() -> None:
             _demand("right", 7000, 5600, 2.10, 0.90, 3300),
         ),
     )
-    result = BeamDetailingEngine().design(data)
-    assert result.mode is ReinforcementMode.FACE_TORSION
-    assert result.face_rebar.mode is FaceRebarMode.TORSION_AND_SKIN
-    assert result.face_rebar.notation == "7T20"
-    assert result.face_rebar.provided_each_side_mm2 >= 2000
-    for region in result.regions:
-        assert region.top.provided_area_mm2 >= region.as_flex_top_mm2
-        assert region.bottom.provided_area_mm2 >= region.as_flex_bottom_mm2
-        assert region.stirrup.legs == 4
-        assert any(name == "TORSION_PH_OVER_8" for name, _ in region.stirrup.spacing_limits)
-        assert any(name == "TORSION_ABSOLUTE" for name, _ in region.stirrup.spacing_limits)
+    # The retired AsTotal-Al/2 face fallback must not turn this into OK.
+    with pytest.raises(DetailingError, match="NO_FEASIBLE_TOTAL_LONGITUDINAL_LAYOUT"):
+        BeamDetailingEngine().design(data)
 
 
-def test_face_mode_that_cannot_place_asmin_fails_with_spec_status() -> None:
+def test_total_area_layout_that_cannot_place_asmin_fails_with_spec_status() -> None:
     data = _input(
         "MIN-FLEX-CONFLICT",
         90,
@@ -293,7 +285,7 @@ def test_face_mode_that_cannot_place_asmin_fails_with_spec_status() -> None:
         smf=False,
     )
 
-    with pytest.raises(DetailingError, match="ROW_CATALOG_NO_FEASIBLE_LAYOUT"):
+    with pytest.raises(DetailingError, match="NO_FEASIBLE_TOTAL_LONGITUDINAL_LAYOUT"):
         BeamDetailingEngine().design(data)
 
 

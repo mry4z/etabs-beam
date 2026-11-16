@@ -7,7 +7,7 @@ public sealed class cPlugin : cPluginContract
     public int Info(ref string Text)
     {
         Text =
-            $"ETABS Beam Generator Plugin v{typeof(cPlugin).Assembly.GetName().Version?.ToString(3)} (v2)\n"
+            $"ETABS Beam Generator Plugin v{typeof(cPlugin).Assembly.GetName().Version} (v2)\n"
             + "Tower preflight with selection recovery and portable workflow launcher.\n"
             + "Includes a self-contained workflow runtime; no local Python or repository source is required.\n"
             + "PB/SB workbooks contain static single-sheet results (no formulas, no node).\n"

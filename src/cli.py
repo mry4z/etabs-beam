@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
 import platform
 import sys
+import time
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from src.config import load_config
+from src.config import load_config, parse_rebar_workers
 from src.etabs_locate import search_etabs_dll_path
 from src.core.beam_line_span_analyzer import BeamLineSpanSettings, analyze_beam_lines
 from src.core.continuity_analyzer import ContinuityAnalyzer
@@ -44,9 +46,24 @@ from src.core.tower_assignment import compact_tower_assignment_summary
 from src.drawing.beam_result_dxf import export_beam_result_and_section_dxfs
 from src.drawing.dxf_export import export_requires_split_dxf, export_structural_spans_csv, export_structural_spans_dxf
 from src.design.etabs_result import EtabsResultProvider
+from src.design.detailing import make_fresh_detailing_engine
+from src.design.offline_style import (
+    DRAWING_POLICY_REVISION_R7_ID,
+    DRAWING_POLICY_REVISION_R8_ID,
+    DRAWING_POLICY_REVISION_R9_ID,
+    DRAWING_V3_POLICY_ID,
+    DRAWING_V3_REVISION_ID,
+    default_runtime_rules_path,
+)
 from src.design.provider import BeamDesignResult, DesignResultStatus
+from src.design.region_results import (
+    DRAWING_DETAILING_POLICY_ID,
+    LEGACY_DETAILING_POLICY_ID,
+    SUPPORTED_DETAILING_POLICY_IDS,
+)
+from src.design.no_design import excluded_no_design_source_names
 from src.excel_export import export_beam_schedule
-from src.excel_span_adapter import build_span_schedule
+from src.excel_span_adapter import build_span_schedule, span_object_part_paths
 from src.model_source import EtabsOapiReadSource
 from src.output_layout import model_name_from_path, resolve_output_layout
 from src.rebar_workbook import (
@@ -62,9 +79,16 @@ from src.tower_preflight import run_tower_preflight, validate_tower_options
 
 
 def main(argv: list[str] | None = None) -> int:
+    multiprocessing.freeze_support()
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.allow_policy_revision_change and (
+            args.replay_payload is None or args.detailing_policy is None
+        ):
+            raise ValueError(
+                "--allow-policy-revision-change requires --replay-payload and explicit --detailing-policy"
+            )
         if args.replay_payload is not None:
             summary = _replay_payload(args)
         else:
@@ -150,10 +174,15 @@ def _compact_workflow_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
     for key in (
         "run_id",
+        "detailing_policy_id",
+        "detailing_policy_revision_id",
         "beam_lines",
         "design_result_beams",
         "requires_split_actions",
         "unconfirmed_multi_section_spans",
+        "optimization_incomplete_count",
+        "rebar_parallelism",
+        "rebar_dispatch_seconds",
     ):
         if key in summary:
             compact[key] = summary[key]
@@ -214,7 +243,14 @@ def _ensure_etabs_dll(config: Any, explicit: Any) -> Any:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Run the workflow and always leave a success or failure manifest."""
 
-    config = load_config(args.config, etabs_dll_path=args.etabs_api)
+    config = load_config(
+        args.config,
+        etabs_dll_path=args.etabs_api,
+        detailing_policy_id=getattr(args, "detailing_policy", None),
+        layout_dictionary_path=getattr(args, "layout_dictionary", None),
+        rebar_workers=getattr(args, "rebar_workers", None),
+        candidate_lookup=getattr(args, "candidate_lookup", None),
+    )
     config = _ensure_etabs_dll(config, args.etabs_api)
     model_hint = getattr(args, "expected_model", None) or getattr(args, "source_model", None) or "model"
     layout = resolve_output_layout(
@@ -267,6 +303,26 @@ def _run_impl(
     progress: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     validate_tower_options(args)
+    detailing_policy_id = (
+        getattr(args, "detailing_policy", None) or config.design.detailing_policy
+    )
+    if getattr(args, "v3_coverage_schedule", False):
+        if args.snapshot_input is None:
+            raise ValueError("--v3-coverage-schedule requires --snapshot-input")
+        if detailing_policy_id != DRAWING_V3_POLICY_ID:
+            raise ValueError("--v3-coverage-schedule requires --detailing-policy drawing_v3")
+        if not getattr(args, "export_rebar_workbook", False):
+            raise ValueError("--v3-coverage-schedule requires --export-rebar-workbook")
+    if detailing_policy_id == DRAWING_V3_POLICY_ID:
+        detailing_policy_revision_id = DRAWING_V3_REVISION_ID
+    elif detailing_policy_id == DRAWING_DETAILING_POLICY_ID:
+        detailing_policy_revision_id = (
+            DRAWING_POLICY_REVISION_R9_ID
+            if config.design.candidate_lookup == "auto"
+            else DRAWING_POLICY_REVISION_R8_ID
+        )
+    else:
+        detailing_policy_revision_id = LEGACY_DETAILING_POLICY_ID
     data_dir = output_dir / "_data"
     data_dir.mkdir(parents=True, exist_ok=True)
     # Tower preflight owns the complete 0..100 progress range.  Do not feed
@@ -350,6 +406,10 @@ def _run_impl(
                 args.selection,
                 progress=extraction_progress,
             )
+        design_exclusions = tuple(
+            getattr(read_source, "design_object_exclusions", lambda: ())()
+        )
+        excluded_no_design_names = excluded_no_design_source_names(design_exclusions)
         if phase_progress is not None:
             phase_progress(20, f"读取几何完成（{len(beams)} 梁）")
         tower_result = run_tower_preflight(args, read_source, beams, data_dir, progress=progress)
@@ -362,6 +422,9 @@ def _run_impl(
                 **tower_result,
             }
         column_supports = read_source.column_supports()
+        column_anchor_names = getattr(read_source, "column_anchor_names", lambda: set())()
+        rigid_links = getattr(read_source, "rigid_links_for_beams", lambda _beams: ())(beams)
+        column_outlines = read_source.column_outlines()
         if phase_progress is not None:
             phase_progress(23, f"读取支承完成（{len(column_supports)} 个）")
         structural = analyze_beam_lines(
@@ -375,6 +438,8 @@ def _run_impl(
                 story_workers=4,
             ),
             column_support_coordinates=column_supports,
+            column_anchor_names=column_anchor_names,
+            rigid_links=rigid_links,
         )
         if phase_progress is not None:
             phase_progress(35, f"拓扑划分完成（{len(structural.spans)} Span）")
@@ -410,11 +475,22 @@ def _run_impl(
             data_dir / "topology_spans.csv",
             span_id_resolver=span_id,
         )
+        numbering_schedule = build_span_schedule(
+            structural,
+            beams,
+            {},
+            config.geometry.coordinate_tolerance_mm,
+            detailing_policy_id=detailing_policy_id,
+        )
         spans_dxf = export_structural_spans_dxf(
             structural.spans,
             output_dir / f"{model_name_from_path(durable_model or actual_model)}_span_note.dxf",
             model_name=model_name_from_path(durable_model or actual_model),
             span_id_resolver=span_id,
+            column_outlines=column_outlines,
+            rigid_links=structural.rigid_links,
+            object_part_labels=span_object_part_paths(numbering_schedule, excluded_no_design_names),
+            excluded_source_names=excluded_no_design_names,
         )
         split_json, split_csv = write_requires_split_audit(records, data_dir, "requires_split_audit")
         split_dxf = export_requires_split_dxf(
@@ -437,9 +513,6 @@ def _run_impl(
         )
         if phase_progress is not None:
             phase_progress(50, "拓扑 DXF/审计导出完成")
-        design_exclusions = tuple(
-            getattr(read_source, "design_object_exclusions", lambda: ())()
-        )
         design_exclusion_path = None
         if design_exclusions:
             design_exclusion_path = data_dir / "excluded_non_design_objects.json"
@@ -603,15 +676,18 @@ def _run_impl(
                 if extraction_progress is None:
                     export_beams = export_source.extract_beams(
                         args.selection,
-                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
+                        include_design_ineligible=False,
                     )
                 else:
                     export_beams = export_source.extract_beams(
                         args.selection,
-                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
+                        include_design_ineligible=False,
                         progress=extraction_progress,
                     )
                 export_supports = export_source.column_supports()
+                export_column_anchors = export_source.column_anchor_names()
+                export_rigid_links = export_source.rigid_links_for_beams(export_beams)
+                export_column_outlines = export_source.column_outlines()
                 export_structural = analyze_beam_lines(
                     export_beams,
                     set(export_supports),
@@ -623,37 +699,20 @@ def _run_impl(
                         story_workers=4,
                     ),
                     column_support_coordinates=export_supports,
+                    column_anchor_names=export_column_anchors,
+                    rigid_links=export_rigid_links,
                 )
             else:
                 export_source = read_source
-                extraction_progress = _scaled_progress(phase_progress, 50, 56)
-                if extraction_progress is None:
-                    export_beams = read_source.extract_beams(
-                        args.selection,
-                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
-                    )
-                else:
-                    export_beams = read_source.extract_beams(
-                        args.selection,
-                        include_design_ineligible=bool(getattr(args, "export_beam_result_dxf", False)),
-                        progress=extraction_progress,
-                    )
-                if tuple(beam.name for beam in export_beams) == tuple(beam.name for beam in beams):
-                    export_structural = structural
-                else:
-                    export_supports = export_source.column_supports()
-                    export_structural = analyze_beam_lines(
-                        export_beams,
-                        set(export_supports),
-                        BeamLineSpanSettings(
-                            coordinate_tolerance_mm=config.geometry.coordinate_tolerance_mm,
-                            source_span_overlap_tolerance_mm=config.geometry.source_span_overlap_tolerance_mm,
-                            merge_angle_deg=config.geometry.merge_angle_limit_deg,
-                            intersection_z_tolerance_mm=config.geometry.coordinate_tolerance_mm,
-                            story_workers=4,
-                        ),
-                        column_support_coordinates=export_supports,
-                    )
+                # Ordinary read-only exports must remain projections of the
+                # canonical topology built above.  Re-extracting the model
+                # here used to request design-ineligible objects for DXF and
+                # then renumber a second topology, so span_note/topology and
+                # Excel/rebar/DXF labels could refer to different physical
+                # spans.  Non-design objects stay in the exclusion audit only.
+                export_beams = beams
+                export_structural = structural
+                export_column_outlines = column_outlines
             if phase_progress is not None:
                 phase_progress(60, f"导出对象拓扑完成（{len(export_beams)} 梁）")
             design_progress = _scaled_progress(phase_progress, 60, 72)
@@ -671,6 +730,8 @@ def _run_impl(
                 export_beams,
                 designs,
                 config.geometry.coordinate_tolerance_mm,
+                detailing_policy_id=detailing_policy_id,
+                valid_station_domain=(detailing_policy_revision_id == DRAWING_V3_REVISION_ID),
             )
             if phase_progress is not None:
                 phase_progress(75, f"Span schedule 完成（{len(span_schedule.records)} 跨）")
@@ -681,6 +742,7 @@ def _run_impl(
                     export_source.section_info,
                     output_dir,
                     text_height=float(getattr(args, "dxf_text_height", 50)),
+                    column_outlines=export_column_outlines,
                 )
                 if phase_progress is not None:
                     phase_progress(82, "梁计算结果/截面 DXF 导出完成")
@@ -734,6 +796,19 @@ def _run_impl(
                     clear_cover_source=config.design.clear_cover_source,
                     max_aggregate_size_mm=config.design.max_aggregate_size_mm,
                     max_aggregate_size_source=(config.design.max_aggregate_size_source),
+                    engine=make_fresh_detailing_engine(
+                        detailing_policy_id,
+                        layout_dictionary_path=config.design.layout_dictionary_path,
+                        candidate_lookup=config.design.candidate_lookup,
+                        candidate_lookup_output_dir=data_dir,
+                    ),
+                    detailing_policy_id=detailing_policy_id,
+                    rebar_workers=config.design.rebar_workers,
+                    sb_frame_type_override=(
+                        "Non Sway"
+                        if detailing_policy_id in {DRAWING_DETAILING_POLICY_ID, DRAWING_V3_POLICY_ID}
+                        else None
+                    ),
                 )
                 write_rebar_payload(payload, rebar_payload_path)
                 write_rebar_payload(
@@ -741,7 +816,10 @@ def _run_impl(
                     secondary_rebar_payload_path,
                 )
                 if phase_progress is not None:
-                    phase_progress(92, "配筋表输入文件导出完成")
+                    phase_progress(92, "配筋表输入文件导出完成；实际进程数={}，梁串分派耗时={:.1f}秒".format(
+                        payload["metadata"]["rebar_parallelism"]["workers_effective"],
+                        payload["metadata"].get("rebar_performance", {}).get("dispatch_seconds", 0.0),
+                    ))
 
     if not args.writeback and not args.prepare_section_review_groups:
         data_source_identity = dict(read_source.identity())
@@ -764,6 +842,8 @@ def _run_impl(
         "original_units": original_units,
         "export_units": "N_mm_C",
         "design_standard": config.design.standard,
+        "detailing_policy_id": detailing_policy_id,
+        "detailing_policy_revision_id": detailing_policy_revision_id,
         "data_source": data_source_identity,
         "environment": environment,
         "beams": len(beams),
@@ -825,6 +905,10 @@ def _run_impl(
             "save_status": save_status,
         }
     if rebar_payload_path is not None:
+        summary["optimization_incomplete_count"] = sum(row.get("coordination_status") == "FEASIBLE_OPTIMIZATION_INCOMPLETE" for row in payload.get("raw_rows", []))
+        summary["rebar_parallelism"] = payload["metadata"]["rebar_parallelism"]
+        summary["rebar_performance"] = payload["metadata"].get("rebar_performance", {})
+        summary["rebar_dispatch_seconds"] = summary["rebar_performance"].get("dispatch_seconds")
         run_workbook_builder(
             rebar_payload_path,
             rebar_workbook_output,
@@ -897,7 +981,44 @@ def _runtime_self_test(args: argparse.Namespace) -> dict[str, Any]:
     api_path = Path(args.etabs_api).resolve()
     if not api_path.is_file():
         raise FileNotFoundError(f"ETABS API DLL not found: {api_path}")
-    config = load_config(args.config, etabs_dll_path=api_path)
+    config = load_config(
+        args.config,
+        etabs_dll_path=api_path,
+        detailing_policy_id=getattr(args, "detailing_policy", None),
+        layout_dictionary_path=getattr(args, "layout_dictionary", None),
+        rebar_workers=getattr(args, "rebar_workers", None),
+        candidate_lookup=getattr(args, "candidate_lookup", None),
+    )
+    selected_policy_id = config.design.detailing_policy
+    selected_engine = make_fresh_detailing_engine(
+        selected_policy_id,
+        layout_dictionary_path=config.design.layout_dictionary_path,
+        candidate_lookup=getattr(config.design, "candidate_lookup", "off"),
+    )
+    drawing_engine = (
+        selected_engine
+        if selected_policy_id == DRAWING_DETAILING_POLICY_ID
+        else make_fresh_detailing_engine(DRAWING_DETAILING_POLICY_ID)
+    )
+    style_library = drawing_engine.offline_style_library
+    if style_library is None:
+        raise RuntimeError("PACKAGED_DETAILING_POLICY_RESOURCE_UNAVAILABLE")
+    drawing_rule_summary = style_library.effective_rule_summary(drawing_engine)
+    if selected_policy_id == DRAWING_V3_POLICY_ID:
+        expected_drawing_revision = DRAWING_V3_REVISION_ID
+    elif selected_policy_id == DRAWING_DETAILING_POLICY_ID and getattr(config.design, "candidate_lookup", "off") == "auto":
+        expected_drawing_revision = DRAWING_POLICY_REVISION_R9_ID
+    else:
+        expected_drawing_revision = DRAWING_POLICY_REVISION_R8_ID
+    if selected_policy_id in {DRAWING_DETAILING_POLICY_ID, DRAWING_V3_POLICY_ID} and (
+        selected_engine.detailing_policy_revision_id != expected_drawing_revision
+    ):
+        raise RuntimeError("FRESH_DETAILING_POLICY_REVISION_UNEXPECTED")
+    if drawing_rule_summary.get("eligible_rule_count") != 380:
+        raise RuntimeError(
+            "PACKAGED_DETAILING_POLICY_RULE_COUNT_INVALID: "
+            f"expected 380 eligible rules, got {drawing_rule_summary.get('eligible_rule_count')}"
+        )
 
     import clr
     import openpyxl
@@ -919,6 +1040,15 @@ def _runtime_self_test(args: argparse.Namespace) -> dict[str, Any]:
         "pyyaml": yaml.__version__,
         "etabs_api": _api_environment(config.etabs.dll_path),
         "etabs_types": [cHelper.__name__, cPluginContract.__name__],
+        "detailing_policy_id": selected_policy_id,
+        "detailing_policy_revision_id": selected_engine.detailing_policy_revision_id,
+        "layout_dictionary": selected_engine.layout_dictionary_metadata,
+        "detailing_policy_resource": {
+            "path": str(default_runtime_rules_path()),
+            "policy_revision_id": drawing_engine.detailing_policy_revision_id,
+            "frozen_rule_count": drawing_rule_summary.get("frozen_rule_count"),
+            "eligible_rule_count": drawing_rule_summary.get("eligible_rule_count"),
+        },
     }
     if design_exclusion_path is not None:
         summary["outputs"]["excluded_non_design_objects"] = str(design_exclusion_path)
@@ -931,20 +1061,72 @@ def _replay_payload(args: argparse.Namespace) -> dict[str, Any]:
         raise FileNotFoundError(f"Replay payload not found: {source}")
     output_dir = Path(args.output_dir or source.parent / "v042-replay").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    input_read_start = time.perf_counter()
     payload = json.loads(source.read_text(encoding="utf-8"))
-    result = redetail_payload(payload)
+    input_read_seconds = time.perf_counter() - input_read_start
+    generation_start = time.perf_counter()
+    requested_policy = getattr(args, "detailing_policy", None)
+    allow_revision_change = bool(getattr(args, "allow_policy_revision_change", False))
+    if allow_revision_change and requested_policy is None:
+        raise ValueError("--allow-policy-revision-change requires explicit --detailing-policy")
+    if (getattr(args, "candidate_lookup", None) == "off" and requested_policy is None
+            and payload.get("metadata", {}).get("detailing_policy_revision_id") == DRAWING_POLICY_REVISION_R9_ID):
+        raise ValueError("R9 replay with --candidate-lookup off requires --detailing-policy and --allow-policy-revision-change")
+    config = load_config(
+        getattr(args, "config", None),
+        detailing_policy_id=requested_policy,
+        layout_dictionary_path=getattr(args, "layout_dictionary", None),
+        rebar_workers=getattr(args, "rebar_workers", None),
+        candidate_lookup=getattr(args, "candidate_lookup", None),
+    )
+    layout_dictionary_path = config.design.layout_dictionary_path
+    replay_lookup = (config.design.candidate_lookup if requested_policy is not None
+                     or getattr(args, "candidate_lookup", None) is not None
+                     or allow_revision_change else "off")
+    if requested_policy is None and layout_dictionary_path is None and replay_lookup == "off":
+        result = redetail_payload(payload, rebar_workers=config.design.rebar_workers,
+                                 candidate_lookup_output_dir=output_dir / "_data")
+    else:
+        selected_policy = requested_policy or config.design.detailing_policy
+        engine = make_fresh_detailing_engine(
+            selected_policy, layout_dictionary_path=layout_dictionary_path, candidate_lookup=replay_lookup,
+            candidate_lookup_output_dir=output_dir / "_data"
+        )
+        result = redetail_payload(
+            payload,
+            engine=engine,
+            allow_policy_revision_change=(
+                allow_revision_change
+                or layout_dictionary_path is not None
+                or getattr(args, "candidate_lookup", None) == "auto"
+            ),
+            rebar_workers=config.design.rebar_workers,
+        )
+    generation_seconds = time.perf_counter() - generation_start
     destination = (output_dir / source.name).resolve()
     if destination == source:
         raise ValueError("offline replay refuses to overwrite its source payload")
+    serialization_start = time.perf_counter()
     destination = write_rebar_payload(result, destination)
+    serialization_seconds = time.perf_counter() - serialization_start
     return {
         "status": "OK",
         "mode": "offline-payload-replay",
         "source_payload": str(source),
         "output_payload": str(destination),
         "schema_version": result.get("metadata", {}).get("schema_version"),
+        "detailing_policy_id": result.get("metadata", {}).get("detailing_policy_id", LEGACY_DETAILING_POLICY_ID),
+        "detailing_policy_revision_id": result.get("metadata", {}).get("detailing_policy_revision_id", LEGACY_DETAILING_POLICY_ID),
+        "layout_dictionary": result.get("metadata", {}).get("layout_dictionary"),
         "row_count": len(result.get("raw_rows", [])),
+        "optimization_incomplete_count": sum(row.get("coordination_status") == "FEASIBLE_OPTIMIZATION_INCOMPLETE" for row in result.get("raw_rows", [])),
         "model_writeback": False,
+        "rebar_parallelism": result.get("metadata", {}).get("rebar_parallelism", {}),
+        "rebar_dispatch_seconds": result.get("metadata", {}).get("rebar_performance", {}).get("dispatch_seconds"),
+        "rebar_generation_seconds": generation_seconds,
+        "rebar_input_load_seconds": input_read_seconds,
+        "rebar_serialization_seconds": serialization_seconds,
+        "rebar_generation_timing_scope": "after JSON load through engine initialization and redetail return; includes worker spawn; excludes input read and output serialization",
     }
 
 
@@ -1101,6 +1283,30 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=Path, help="配置文件路径")
     parser.add_argument(
+        "--detailing-policy",
+        choices=sorted(SUPPORTED_DETAILING_POLICY_IDS),
+        default=None,
+        help="本次新运行使用的稳定配筋策略 ID；离线回放未指定时保留载荷记录的策略与修订",
+    )
+    parser.add_argument(
+        "--layout-dictionary",
+        type=Path,
+        help="可选的预计算纵筋候选字典库；仅显式绘图策略 R6 支持",
+    )
+    parser.add_argument(
+        "--rebar-workers",
+        type=parse_rebar_workers,
+        default=None,
+        help="BeamLine processes: auto uses logical CPU count minus one; integer 1..64 overrides config.",
+    )
+    parser.add_argument("--candidate-lookup", choices=["auto", "off"], default=None,
+                        help="Use the prepared R9 candidate lookup for drawing policy.")
+    parser.add_argument(
+        "--v3-coverage-schedule",
+        action="store_true",
+        help="Enable experimental V3 top-10 coverage coordination for a drawing_v3 SQLite snapshot run.",
+    )
+    parser.add_argument(
         "--runtime-self-test",
         action="store_true",
         help="验证便携 Python/依赖/ETABS API 装载后退出，不附着或修改模型",
@@ -1109,6 +1315,11 @@ def _parser() -> argparse.ArgumentParser:
         "--replay-payload",
         type=Path,
         help="离线重算既有梁表 JSON；不连接 ETABS、不写回模型",
+    )
+    parser.add_argument(
+        "--allow-policy-revision-change",
+        action="store_true",
+        help="Allow an explicit same-policy revision change during offline replay; requires --detailing-policy.",
     )
     parser.add_argument("--selection", choices=["all", "selected"], default="all")
     parser.add_argument("--output-dir", type=Path, help="本次运行输出目录")

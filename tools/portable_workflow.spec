@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import os
 
 from PyInstaller.utils.hooks import collect_all
 
 
 workspace_root = Path(SPECPATH).resolve().parent
+lookup_assets = Path(os.environ.get(
+    "BEAM_LOOKUP_ASSETS_BUILD_DIR",
+    str(workspace_root / "src" / "design" / "lookup_assets"),
+)).resolve()
+if not lookup_assets.is_dir():
+    raise FileNotFoundError(f"Lookup asset directory not found: {lookup_assets}")
 pythonnet_datas, pythonnet_binaries, pythonnet_hidden = collect_all("pythonnet")
 clr_loader_datas, clr_loader_binaries, clr_loader_hidden = collect_all("clr_loader")
 
@@ -13,7 +20,13 @@ a = Analysis(
     [str(workspace_root / "tools" / "portable_workflow_entry.py")],
     pathex=[str(workspace_root)],
     binaries=pythonnet_binaries + clr_loader_binaries,
-    datas=pythonnet_datas + clr_loader_datas,
+    datas=pythonnet_datas + clr_loader_datas + [
+        (
+            str(workspace_root / "src" / "design" / "policies" / "drawing_20260924_v1.json"),
+            "src/design/policies",
+        ),
+        (str(lookup_assets), "src/design/lookup_assets"),
+    ],
     hiddenimports=[
         "clr",
         "pythonnet",

@@ -5,7 +5,7 @@ import pytest
 import json
 
 from src.config import load_config
-from src.core.geometry_extractor import BeamGeometry
+from src.core.geometry_extractor import BeamGeometry, ColumnOutline
 from src.design.provider import BeamDesignResult, DesignStation
 from src.model_source import SqliteReadSource
 from src.snapshot.exporter import SnapshotProfile, export_snapshot_bundle
@@ -167,13 +167,20 @@ def _bundle_inputs():
     return (
         raw_tables,
         live_beams,
-        {"P0": (0.0, 0.0, 0.0), "P1": (0.0, 0.0, 3000.004)},
+        {"P1": (0.0, 0.0, 3000.004)},
         live_designs,
         profile,
     )
 
 
-def _export(tmp_path: Path, *, live_beams=None):
+def _export(
+    tmp_path: Path,
+    *,
+    live_beams=None,
+    live_column_outlines=(),
+    detailing_policy_id="legacy",
+    detailing_policy_revision_id="legacy",
+):
     source_model = tmp_path / "working.EDB"
     api_dll = tmp_path / "ETABSv1.dll"
     source_model.write_bytes(b"model")
@@ -190,8 +197,11 @@ def _export(tmp_path: Path, *, live_beams=None):
         live_beams=live_beams or expected_beams,
         live_supports=supports,
         live_designs=designs,
+        live_column_outlines=live_column_outlines,
         profile=profile,
         coordinate_tolerance_mm=0.01,
+        detailing_policy_id=detailing_policy_id,
+        detailing_policy_revision_id=detailing_policy_revision_id,
     )
 
 
@@ -203,6 +213,35 @@ def test_export_snapshot_bundle_writes_validated_non_overwriting_manifest(tmp_pa
     assert summary["validation"]["design_results"]["exact_round_trip"] is True
     assert (tmp_path / "domain.sqlite").is_file()
     assert (tmp_path / "domain.sqlite.manifest.json").is_file()
+
+
+def test_export_snapshot_bundle_records_selected_detailing_policy(tmp_path) -> None:
+    summary = _export(
+        tmp_path,
+        detailing_policy_id="drawing_20260924_v1",
+        detailing_policy_revision_id="drawing_20261025_uniform_hoop_no_4_3_v1",
+    )
+    manifest = json.loads((tmp_path / "domain.sqlite.manifest.json").read_text(encoding="utf-8"))
+
+    assert summary["metadata"]["detailing_policy_id"] == "drawing_20260924_v1"
+    assert summary["metadata"]["detailing_policy_revision_id"] == "drawing_20261025_uniform_hoop_no_4_3_v1"
+    assert manifest["metadata"]["detailing_policy_id"] == "drawing_20260924_v1"
+
+
+def test_snapshot_replays_transformed_column_outline_vertices(tmp_path) -> None:
+    outline = ColumnOutline(
+        "C1",
+        "P1",
+        "C400X400",
+        "P1",
+        (0.0, 0.0, 3000.004),
+        ((-200.0, -200.0), (200.0, -200.0), (200.0, 200.0), (-200.0, 200.0)),
+    )
+    _export(tmp_path, live_column_outlines=(outline,))
+
+    source = SqliteReadSource(tmp_path / "domain.sqlite", tmp_path / "working.EDB")
+
+    assert source.column_outlines() == (outline,)
 
     with pytest.raises(FileExistsError):
         _export(tmp_path)
@@ -260,7 +299,7 @@ def test_sqlite_read_source_exposes_complete_normalized_contract(tmp_path) -> No
     assert [beam.name for beam in beams] == ["B1"]
     assert beams[0].start == (0.0, 0.0, 3000.004)
     assert beams[0].end == (6000.004, 0.0, 3000.004)
-    assert set(source.column_supports()) == {"P0", "P1"}
+    assert set(source.column_supports()) == {"P1"}
     assert source.column_supports()["P1"] == (0.0, 0.0, 3000.004)
     assert source.frame_states(beams)["B1"].guid == "g-b1"
     assert source.designs(beams)["B1"].stations[0].top_flexural_area == 100.123456789
@@ -319,9 +358,11 @@ def test_snapshot_workflow_runs_topology_and_excel_without_etabs(tmp_path) -> No
     assert [percent for percent, _ in progress_events] == sorted(percent for percent, _ in progress_events)
 
 
+@pytest.mark.parametrize("policy_id", ["drawing_20260924_v1", "drawing_v3"])
 def test_snapshot_workflow_builds_rebar_payload_from_same_domain_contract(
     tmp_path,
     monkeypatch,
+    policy_id,
 ) -> None:
     _export(tmp_path)
     output = tmp_path / "offline-rebar"
@@ -331,6 +372,31 @@ def test_snapshot_workflow_builds_rebar_payload_from_same_domain_contract(
         Path(preview_dir).mkdir(parents=True)
         return Path(workbook)
 
+    from src.snapshot import workflow as snapshot_workflow
+
+    span_policy_ids = []
+    payload_policy_records = []
+    original_dxf_export = snapshot_workflow.export_beam_result_and_section_dxfs
+    original_payload_builder = snapshot_workflow.build_rebar_workbook_payload_from_domain
+
+    def capture_dxf_policy(schedule, *args, **kwargs):
+        span_policy_ids.append(schedule.detailing_policy_id)
+        return original_dxf_export(schedule, *args, **kwargs)
+
+    def capture_payload_policy(*args, **kwargs):
+        engine = kwargs["engine"]
+        payload_policy_records.append(
+            (
+                kwargs["detailing_policy_id"],
+                engine.detailing_policy_revision_id,
+                kwargs.get("sb_frame_type_override"),
+                kwargs["frame_types"],
+            )
+        )
+        return original_payload_builder(*args, **kwargs)
+
+    monkeypatch.setattr("src.snapshot.workflow.export_beam_result_and_section_dxfs", capture_dxf_policy)
+    monkeypatch.setattr("src.snapshot.workflow.build_rebar_workbook_payload_from_domain", capture_payload_policy)
     monkeypatch.setattr("src.snapshot.workflow.run_workbook_builder", fake_builder)
     monkeypatch.setattr("src.snapshot.workflow.run_secondary_workbook_builder", fake_builder)
     args = SimpleNamespace(
@@ -349,6 +415,8 @@ def test_snapshot_workflow_builds_rebar_payload_from_same_domain_contract(
         exclude_writeback_objects=None,
         export_excel=False,
         export_rebar_workbook=True,
+        export_beam_result_dxf=True,
+        detailing_policy=policy_id,
         artifact_node="node",
         artifact_node_modules=None,
         artifact_node_max_old_space_mb=1024,
@@ -362,3 +430,21 @@ def test_snapshot_workflow_builds_rebar_payload_from_same_domain_contract(
     assert payload["raw_rows"][0]["fc_mpa"] == 30.0
     assert payload["raw_rows"][0]["fy_mpa"] == 420.0
     assert payload["raw_rows"][0]["frame_type"] == "Sway Special"
+    assert payload["raw_rows"][0]["originalFrameType"] == "Sway Special"
+    assert payload["metadata"]["detailing_policy_id"] == policy_id
+    assert payload["metadata"]["detailing_policy_revision_id"] == summary["detailing_policy_revision_id"]
+    if policy_id == "drawing_20260924_v1":
+        assert payload["metadata"]["detailing_policy_parameters"]["max_main_bar_layers"] == 3
+        assert payload["metadata"]["detailing_policy_parameters"]["smf_max_longitudinal_ratio"] == 0.02
+        assert payload["metadata"]["detailing_policy_parameters"]["runtime_rule_filter"]["eligible_rule_count"] == 380
+    assert payload["metadata"]["demand_station_duplicate_policy"] == "PRESERVE_ALL"
+    assert payload["raw_rows"][0]["beam_type"] == "PB"
+    assert payload["raw_rows"][0]["actual_frame_type"] == "Sway Special"
+    assert span_policy_ids == [policy_id]
+    assert payload_policy_records == [
+        (policy_id, summary["detailing_policy_revision_id"], "Non Sway", {"B1": "Sway Special"})
+    ]
+    assert summary["detailing_policy_id"] == policy_id
+    manifest = payload["metadata"]["frame_type_override_manifest"]
+    assert manifest["user_confirmed"] is True
+    assert manifest["scope"] == "SB span rows only; PB rows retain ETABS source frame type"

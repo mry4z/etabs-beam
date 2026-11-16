@@ -1,0 +1,204 @@
+{
+  "format": "beam-row-standard-interval-index-manifest@1",
+  "description": "Exact closed float demand intervals, with shared geometry templates.",
+  "widths_mm": [
+    200,
+    250,
+    300,
+    350,
+    400,
+    450,
+    500,
+    550,
+    600,
+    650,
+    700,
+    750,
+    800
+  ],
+  "depths_mm": [
+    300,
+    350,
+    370,
+    400,
+    420,
+    450,
+    470,
+    500,
+    550,
+    600,
+    650,
+    670,
+    700,
+    750,
+    800,
+    850,
+    900,
+    950,
+    1000,
+    1050,
+    1100,
+    1150,
+    1200,
+    1270,
+    1650,
+    1750,
+    1850
+  ],
+  "profiles": [
+    "OMF",
+    "SMF"
+  ],
+  "beam_role": "PB",
+  "actual_frame_type": "",
+  "etabs_longitudinal_cover_mm": null,
+  "clear_cover_mm": 40,
+  "aggregate_mm": 25,
+  "fc_mpa": 25,
+  "fy_mpa": 420,
+  "fyt_mpa": 420,
+  "first_diameter_mm": null,
+  "max_layers": 3,
+  "hoop_diameters_mm": [
+    10,
+    12
+  ],
+  "hoop_legs": [
+    2,
+    4,
+    6
+  ],
+  "face_preserve_pairs": [
+    [
+      "top",
+      true
+    ],
+    [
+      "bottom",
+      false
+    ]
+  ],
+  "demand": "All finite nonnegative float values; no truncation at 10000 mm2.",
+  "excluded": "Other profiles, beam roles, frame metadata, first diameters, hoop combinations and nonstandard policies require exact context preparation.",
+  "context_count": 8424,
+  "files": [
+    {
+      "width_mm": 200,
+      "path": "width_200.jsonl.xz",
+      "bytes": 18636,
+      "contexts": 648,
+      "geometry_path": "width_200.json.gz",
+      "uncompressed_bytes": 1706695,
+      "sha256_uncompressed": "e2e0b77d7d25652912d3439df55315acedd45553a0ae9b1eab54bfef66a8fe5f"
+    },
+    {
+      "width_mm": 250,
+      "path": "width_250.jsonl.xz",
+      "bytes": 51412,
+      "contexts": 648,
+      "geometry_path": "width_250.json.gz",
+      "uncompressed_bytes": 2928924,
+      "sha256_uncompressed": "3913431dfbe870219d9ad876c25c9caff411ac06a6fc57377638b0de410ff3c1"
+    },
+    {
+      "width_mm": 300,
+      "path": "width_300.jsonl.xz",
+      "bytes": 76292,
+      "contexts": 648,
+      "geometry_path": "width_300.json.gz",
+      "uncompressed_bytes": 6692684,
+      "sha256_uncompressed": "cb5c00dd4ea5ac297d00fec73cd7f36adecfc5f959d54e3ee919a5cbc394c57e"
+    },
+    {
+      "width_mm": 350,
+      "path": "width_350.jsonl.xz",
+      "bytes": 269400,
+      "contexts": 648,
+      "geometry_path": "width_350.json.gz",
+      "uncompressed_bytes": 16169693,
+      "sha256_uncompressed": "cc834db8ebf4e6ab21ec4359c47a8609477ef5261986ba78919c9d99afe062de"
+    },
+    {
+      "width_mm": 400,
+      "path": "width_400.jsonl.xz",
+      "bytes": 382852,
+      "contexts": 648,
+      "geometry_path": "width_400.json.gz",
+      "uncompressed_bytes": 31947649,
+      "sha256_uncompressed": "b33de9dc5d5770aba992c05e25188863150cb03aacfd51decbcaeb458f943add"
+    },
+    {
+      "width_mm": 450,
+      "path": "width_450.jsonl.xz",
+      "bytes": 458376,
+      "contexts": 648,
+      "geometry_path": "width_450.json.gz",
+      "uncompressed_bytes": 51327984,
+      "sha256_uncompressed": "9ffb3165823cb69d7d6b7cd531bd4f760b7ba867ad13f3f1ca2b8f4c82ab6e9a"
+    },
+    {
+      "width_mm": 500,
+      "path": "width_500.jsonl.xz",
+      "bytes": 677176,
+      "contexts": 648,
+      "geometry_path": "width_500.json.gz",
+      "uncompressed_bytes": 84033321,
+      "sha256_uncompressed": "6628ffa39b659c938a2cc240c806e0c92469b6366219ae79e8c8c13a11123099"
+    },
+    {
+      "width_mm": 550,
+      "path": "width_550.jsonl.xz",
+      "bytes": 1032640,
+      "contexts": 648,
+      "geometry_path": "width_550.json.gz",
+      "uncompressed_bytes": 118044579,
+      "sha256_uncompressed": "14718dfd52c0d6bd220dc37e5b0fcaea58782b5a332387d3c081d9ea54e43695"
+    },
+    {
+      "width_mm": 600,
+      "path": "width_600.jsonl.xz",
+      "bytes": 637324,
+      "contexts": 648,
+      "geometry_path": "width_600.json.gz",
+      "uncompressed_bytes": 164313936,
+      "sha256_uncompressed": "3207bde0a696b5a1d262fb8946e19025192e09077712b7fd1d293508c14235fb"
+    },
+    {
+      "width_mm": 650,
+      "path": "width_650.jsonl.xz",
+      "bytes": 2670892,
+      "contexts": 648,
+      "geometry_path": "width_650.json.gz",
+      "uncompressed_bytes": 214379283,
+      "sha256_uncompressed": "e4a5c286ab61805a5e8642b1681050d0f89cde96b714be348ad639f543da5e1e"
+    },
+    {
+      "width_mm": 700,
+      "path": "width_700.jsonl.xz",
+      "bytes": 3534616,
+      "contexts": 648,
+      "geometry_path": "width_700.json.gz",
+      "uncompressed_bytes": 285026855,
+      "sha256_uncompressed": "9e66fa12bcec98ff869fdb8dc28e1274f0abb0f1c4367f332e85cda1eda7c669"
+    },
+    {
+      "width_mm": 750,
+      "path": "width_750.jsonl.xz",
+      "bytes": 1784652,
+      "contexts": 648,
+      "geometry_path": "width_750.json.gz",
+      "uncompressed_bytes": 348302763,
+      "sha256_uncompressed": "fd824dc5b489f45cb03a8f20ee60ae2169850103c6eecc4e9f76bc070b81922e"
+    },
+    {
+      "width_mm": 800,
+      "path": "width_800.jsonl.xz",
+      "bytes": 6562896,
+      "contexts": 648,
+      "geometry_path": "width_800.json.gz",
+      "uncompressed_bytes": 466170211,
+      "sha256_uncompressed": "ff67acb31a8c5df124b9539fe2fe738f8e9eb22a05a50888c31ec384a8d5cd6a"
+    }
+  ],
+  "compression": "XZ (LZMA preset 6); JSONL index shards only"
+}

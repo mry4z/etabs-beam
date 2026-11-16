@@ -9,9 +9,11 @@ workflows.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil, sqrt
 from typing import Any, Iterable, Sequence
+
+from .parent_context import ParentSpanContext
 
 
 @dataclass(frozen=True)
@@ -107,7 +109,7 @@ class CapacityShearReview:
     required_av_over_s_mm2_per_mm: float | None = None
     control_source: str = ""
     source: str = ""
-    vc_zero: bool = True
+    vc_zero: bool | None = True
     gravity_shear_kN: float | None = None
     message: str = ""
 
@@ -211,6 +213,7 @@ class ConstructabilityResult:
     checks: tuple[RuleCheck, ...] = ()
     warnings: tuple[str, ...] = ()
     layout_geometry: RebarLayoutGeometry | None = None
+    parent_context: ParentSpanContext | None = None
 
     @property
     def blocking_statuses(self) -> tuple[str, ...]:
@@ -228,6 +231,7 @@ class ConstructabilityResult:
     def as_mapping(self) -> dict[str, Any]:
         return {
             "status": self.status,
+            **({"parent_context": {"parent_span_id": self.parent_context.parent_span_id, "parent_length_mm": self.parent_context.parent_length_mm, "segment_start_mm": self.parent_context.segment_start_mm, "left_depth_mm": self.parent_context.left_depth_mm, "right_depth_mm": self.parent_context.right_depth_mm}} if self.parent_context else {}),
             "zones": [
                 {
                     "name": zone.name,
@@ -300,6 +304,8 @@ def build_constructability(
     beam_width_mm: float | None = None,
     concrete_strength_mpa: float | None = None,
     layout_geometry: RebarLayoutGeometry | None = None,
+    etabs_design_results_only: bool = False,
+    parent_context: ParentSpanContext | None = None,
 ) -> ConstructabilityResult:
     """Build support-face zones and hoop coordinates.
 
@@ -308,7 +314,13 @@ def build_constructability(
     detailing does not require an earthquake joint-face coordinate.
     """
 
-    if span_length_mm <= 0 or beam_depth_mm <= 0 or effective_depth_mm <= 0:
+    run_length_mm = span_length_mm
+    if parent_context is not None:
+        if parent_context.segment_start_mm + run_length_mm > parent_context.parent_length_mm + 1e-9:
+            raise ValueError("Run extends beyond parent span")
+        span_length_mm = parent_context.parent_length_mm
+
+    if run_length_mm <= 0 or span_length_mm <= 0 or beam_depth_mm <= 0 or effective_depth_mm <= 0:
         return ConstructabilityResult(
             "INVALID_SPAN_GEOMETRY",
             checks=(
@@ -328,13 +340,14 @@ def build_constructability(
                     "ordinary_full_span",
                     "ORDINARY_BEAM",
                     0.0,
-                    span_length_mm,
+                    run_length_mm,
                     span_length_mm,
                     middle_spacing_mm,
                     "ACI 318-14 Ch. 9; project spacing policy",
                 ),
             ),
             layout_geometry=layout_geometry,
+            parent_context=parent_context,
         )
 
     checks: list[RuleCheck] = []
@@ -426,7 +439,7 @@ def build_constructability(
             and seismic_context.right_mpr_kNm is not None
             and seismic_context.gravity_shear_kN is not None
         )
-        if not capacity_verified and not has_mpr_envelope:
+        if not etabs_design_results_only and not capacity_verified and not has_mpr_envelope:
             checks.append(
                 RuleCheck(
                     "SMF-CAPACITY-SHEAR-SOURCE",
@@ -438,12 +451,20 @@ def build_constructability(
                     source=(provenance.source if provenance else seismic_context.source),
                 )
             )
-        checks.extend(
-            evaluate_smf_capacity_shear(
-                span_length_mm=span_length_mm,
-                context=seismic_context,
+        if not etabs_design_results_only:
+            checks.extend(
+                evaluate_smf_capacity_shear(
+                    span_length_mm=span_length_mm,
+                    context=seismic_context,
+                )
             )
-        )
+    if etabs_design_results_only:
+        checks.append(RuleCheck(
+            "SMF-TRANSVERSE-DEMAND-SOURCE", "Project drawing policy R7", "INFO",
+            actual="ETABS_DESIGN_RESULTS_ONLY",
+            message="箍筋采用 ETABS 原始剪扭配筋需求；不按所选纵筋重算或验算容量剪力。",
+            source="normalized ETABS design results",
+        ))
     if left_support is None or right_support is None or not left_support.resolved or not right_support.resolved:
         checks.append(
             RuleCheck(
@@ -453,7 +474,7 @@ def build_constructability(
                 message="SMF 梁必须从实际支承面量取 2h 和首箍位置；当前缺少支承面来源。",
             )
         )
-        return ConstructabilityResult("SMF_SUPPORT_FACE_UNRESOLVED", checks=tuple(checks), layout_geometry=layout_geometry)
+        return ConstructabilityResult("REVIEW" if parent_context else "SMF_SUPPORT_FACE_UNRESOLVED", checks=tuple(checks), layout_geometry=layout_geometry, parent_context=parent_context)
 
     left_face = left_support.face_location_mm
     right_face = right_support.face_location_mm
@@ -468,7 +489,7 @@ def build_constructability(
                 message="支承面里程不在梁跨范围内。",
             )
         )
-        return ConstructabilityResult("SMF_SUPPORT_FACE_UNRESOLVED", checks=tuple(checks), layout_geometry=layout_geometry)
+        return ConstructabilityResult("REVIEW" if parent_context else "SMF_SUPPORT_FACE_UNRESOLVED", checks=tuple(checks), layout_geometry=layout_geometry, parent_context=parent_context)
 
     if smallest_primary_bar_diameter_mm <= 0:
         return ConstructabilityResult("SMF_HOOP_ZONE_UNRESOLVED", layout_geometry=layout_geometry)
@@ -481,8 +502,8 @@ def build_constructability(
     )
     outside_limit = effective_depth_mm / 2.0
     two_h = 2.0 * beam_depth_mm
-    left_end = min(left_face + two_h, right_face)
-    right_start = max(right_face - two_h, left_face)
+    left_end = min(left_face + 2.0 * (parent_context.left_depth_mm if parent_context else beam_depth_mm), right_face)
+    right_start = max(right_face - 2.0 * (parent_context.right_depth_mm if parent_context else beam_depth_mm), left_face)
     left_spacing = _spacing(left_spacing_mm, end_limit, allowed_spacings_mm)
     right_spacing = _spacing(right_spacing_mm, end_limit, allowed_spacings_mm)
     middle_spacing = _spacing(middle_spacing_mm, outside_limit, allowed_spacings_mm)
@@ -505,6 +526,9 @@ def build_constructability(
         )
         zones.append(zone)
         hoops.extend(_place_hoops(zone, first_from_support=True))
+        if parent_context is not None:
+            right_overlap = replace(zone, first_hoop_location_mm=max(right_face - 50.0, left_face))
+            hoops.extend(_place_hoops(right_overlap, first_from_support=True, reverse=True))
     else:
         left_zone = DetailingZone(
             "smf_left_2h",
@@ -573,6 +597,18 @@ def build_constructability(
                 )
             )
 
+    if parent_context is not None:
+        start = parent_context.segment_start_mm
+        end = start + run_length_mm
+        zones = [replace(zone, start_mm=max(zone.start_mm, start) - start,
+                         end_mm=min(zone.end_mm, end) - start,
+                         first_hoop_location_mm=(zone.first_hoop_location_mm - start
+                             if zone.first_hoop_location_mm is not None and start <= zone.first_hoop_location_mm <= end else None))
+                 for zone in zones if min(zone.end_mm, end) > max(zone.start_mm, start)]
+        hoops = [replace(hoop, location_mm=hoop.location_mm - start)
+                 for hoop in hoops if start <= hoop.location_mm and
+                 (hoop.location_mm < end or (end >= parent_context.parent_length_mm and hoop.location_mm <= end))]
+
     for zone in zones:
         if zone.selected_spacing_mm is None:
             checks.append(
@@ -615,8 +651,7 @@ def build_constructability(
                     message=f"{zone.name} 箍筋间距满足上限。",
                 )
             )
-    checks.extend(
-        (
+    first_checks = (
             RuleCheck(
                 "SMF-FIRST-HOOP-LEFT",
                 "ACI 318-14 18.6.4.2",
@@ -634,7 +669,13 @@ def build_constructability(
                 message="右首箍距右支承面 50 mm。",
             ),
         )
-    )
+    if parent_context is None:
+        checks.extend(first_checks)
+    else:
+        start = parent_context.segment_start_mm
+        end = start + run_length_mm
+        checks.extend(replace(check, actual=check.actual - start, limit=check.limit - start)
+                      for check in first_checks if start <= check.actual <= end)
     status = "OK" if not any(
         check.status not in {"PASS", "INFO", "WARN"} for check in checks
     ) else "REVIEW"
@@ -645,6 +686,7 @@ def build_constructability(
         checks=tuple(checks),
         warnings=tuple(sorted({check.message for check in checks if check.status == "WARN"})),
         layout_geometry=layout_geometry,
+        parent_context=parent_context,
     )
 
 
@@ -1110,6 +1152,69 @@ def evaluate_smf_longitudinal(
     return tuple(checks)
 
 
+
+@dataclass(frozen=True)
+class ParentLongitudinalRun:
+    """One run in parent I-to-J order, with resolved face layouts."""
+
+    run_id: str
+    width_mm: float
+    fc_mpa: float
+    fy_mpa: float
+    left_top: Any
+    left_bottom: Any
+    middle_top: Any
+    middle_bottom: Any
+    right_top: Any
+    right_bottom: Any
+
+
+def parent_longitudinal_checks(*, runs: Sequence[ParentLongitudinalRun]) -> tuple[RuleCheck, ...]:
+    """Check parent-wide SMF strength ratios using each face's resolved depth."""
+    from math import isfinite
+
+    strengths: list[tuple[ParentLongitudinalRun, str, float, float]] = []
+    unresolved: list[RuleCheck] = []
+    if not runs:
+        return (RuleCheck("SMF-PARENT-LONGITUDINAL", "ACI 318-14 18.6.3.2",
+                          "SMF_PARENT_LONGITUDINAL_UNRESOLVED", message="父跨没有截面配筋。"),)
+    for run in runs:
+        for name in ("left", "middle", "right"):
+            top = getattr(run, f"{name}_top")
+            bottom = getattr(run, f"{name}_bottom")
+            try:
+                top_d = float(top.effective_depth_mm)
+                bottom_d = float(bottom.effective_depth_mm)
+                top_area = float(top.provided_area_mm2)
+                bottom_area = float(bottom.provided_area_mm2)
+                values = (top_d, bottom_d, top_area, bottom_area, run.width_mm, run.fc_mpa, run.fy_mpa)
+                valid = all(isfinite(v) and v > 0 for v in values)
+            except (AttributeError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                unresolved.append(RuleCheck("SMF-PARENT-LONGITUDINAL", "ACI 318-14 18.6.3.2",
+                    "SMF_PARENT_LONGITUDINAL_UNRESOLVED", message=f"{run.run_id} {name} 配筋或有效高度未解析。", source=run.run_id))
+                continue
+            positive = _nominal_moment(bottom_area, top_area, run.width_mm, run.fc_mpa, run.fy_mpa, bottom_d)
+            negative = _nominal_moment(top_area, bottom_area, run.width_mm, run.fc_mpa, run.fy_mpa, top_d)
+            strengths.append((run, name, positive, negative))
+    if unresolved:
+        return tuple(unresolved)
+    maximum = max(max(positive, negative) for _, _, positive, negative in strengths)
+    checks: list[RuleCheck] = []
+    for run, name, positive, negative in strengths:
+        for sign, value in (("positive", positive), ("negative", negative)):
+            ratio = value / maximum
+            checks.append(RuleCheck("SMF-PARENT-MIN-STRENGTH", "ACI 318-14 18.6.3.2",
+                "PASS" if ratio + 1e-9 >= 0.25 else "SMF_STRENGTH_RATIO_FAILED",
+                actual=ratio, limit=0.25, message=f"{run.run_id} {name} {sign} 相对父跨最大强度。", source=run.run_id))
+    for run, name, positive, negative in (strengths[0], strengths[-1]):
+        ratio = positive / negative
+        checks.append(RuleCheck("SMF-PARENT-POSITIVE-NEGATIVE", "ACI 318-14 18.6.3.2",
+            "PASS" if ratio + 1e-9 >= 0.5 else "SMF_STRENGTH_RATIO_FAILED",
+            actual=ratio, limit=0.5, message=f"{run.run_id} {name} 真支承面正负强度比。", source=run.run_id))
+    return tuple(checks)
+
 def evaluate_ordinary_constructability(
     *,
     depth_mm: float,
@@ -1151,7 +1256,10 @@ def evaluate_ordinary_constructability(
                 message="尚未提供使用阶段钢筋应力和裂缝控制间距限值；当前仅完成几何净距检查。",
             )
         )
-    if torsion_longitudinal_area_mm2 > 0.0 or mode == "FACE_TORSION":
+    # Torsion still requires a perimeter/closed-hoop audit when Al is present,
+    # but the retired FACE_TORSION selector is no longer a trigger or a
+    # substitute for top/bottom total-area design.
+    if torsion_longitudinal_area_mm2 > 0.0:
         checks.append(
             RuleCheck(
                 "ORD-TORSION-PERIMETER",

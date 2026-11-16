@@ -13,7 +13,11 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping
 
 from src.core.beam_merger import BeamMerger
-from src.core.geometry_extractor import BeamGeometry
+from src.core.geometry_extractor import (
+    BeamGeometry,
+    RigidLinkGeometry,
+    relevant_anchored_rigid_links,
+)
 from src.design.provider import BeamDesignResult, DesignResultStatus
 from src.utils.geometry import Point3D, distance, plan_angle_deg
 
@@ -54,6 +58,7 @@ class BeamLine:
     source_objects: tuple[str, ...]
     path_points: tuple[Point3D, ...]
     is_curved: bool
+    path_parts: tuple[tuple[Point3D, ...], ...] = ()
 
     @property
     def beam_line_id(self) -> str:
@@ -94,6 +99,7 @@ class BeamLineSpanResult:
     spans: tuple[BeamSpan, ...]
     records: tuple[str, ...]
     diagnostics: tuple[TopologyDiagnostic, ...] = ()
+    rigid_links: tuple[RigidLinkGeometry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -107,6 +113,9 @@ class _UnnumberedLine:
     span_paths: tuple[tuple[Point3D, ...], ...]
     support_points: tuple[Point3D, ...]
     is_curved: bool
+    path_parts: tuple[tuple[Point3D, ...], ...] = ()
+    start_point_name: str = ""
+    end_point_name: str = ""
 
 
 def analyze_beam_lines(
@@ -114,22 +123,38 @@ def analyze_beam_lines(
     column_point_names: set[str] | None = None,
     settings: BeamLineSpanSettings | None = None,
     column_support_coordinates: Mapping[str, Point3D] | None = None,
+    column_anchor_names: set[str] | None = None,
+    rigid_links: Iterable[RigidLinkGeometry] = (),
 ) -> BeamLineSpanResult:
     """Return numbered Beam Lines and support-defined Spans.
 
-    ``column_point_names`` contains ETABS points touched by column Objects (and
-    may include rigid-end equivalent points). A candidate touching any such
-    point is a primary line. Secondary paths are split only at intersections
-    with already identified primary paths.
+    ``column_point_names`` contains ETABS points where a lower column segment
+    supports the beam, plus any rigid-end equivalent points. A candidate
+    touching any such point is a primary line. Secondary paths are split only
+    at intersections with already identified primary paths.
     """
     settings = settings or BeamLineSpanSettings()
     column_point_names = column_point_names or set()
     column_support_coordinates = column_support_coordinates or {}
+    column_anchor_names = column_anchor_names or set()
+    rigid_links = relevant_anchored_rigid_links(
+        rigid_links,
+        (point for beam in beams for point in (beam.point_i, beam.point_j)),
+        column_anchor_names,
+    )
     by_story: dict[str, list[BeamGeometry]] = {}
     for beam in beams:
         by_story.setdefault(beam.story, []).append(beam)
     story_inputs = [
-        (story_beams, column_point_names, column_support_coordinates, settings) for story_beams in by_story.values()
+        (
+            story_beams,
+            column_point_names,
+            column_support_coordinates,
+            settings,
+            tuple(link for link in rigid_links if link.story == story),
+            column_anchor_names,
+        )
+        for story, story_beams in by_story.items()
     ]
     if settings.story_workers > 1 and len(story_inputs) > 1:
         with ThreadPoolExecutor(max_workers=settings.story_workers) as executor:
@@ -144,7 +169,7 @@ def analyze_beam_lines(
     diagnostics.extend(coverage_diagnostics)
     records.extend(item.as_record() for item in coverage_diagnostics)
     records.extend(_validation_records(numbered_lines, spans, settings))
-    return BeamLineSpanResult(tuple(numbered_lines), tuple(spans), tuple(records), tuple(diagnostics))
+    return BeamLineSpanResult(tuple(numbered_lines), tuple(spans), tuple(records), tuple(diagnostics), tuple(rigid_links))
 
 
 def _analyze_story(
@@ -153,10 +178,12 @@ def _analyze_story(
         set[str],
         Mapping[str, Point3D],
         BeamLineSpanSettings,
+        tuple[RigidLinkGeometry, ...],
+        set[str],
     ],
 ) -> tuple[list[_UnnumberedLine], list[str], list[TopologyDiagnostic]]:
     """Analyze one story; this function is isolated so stories can run in parallel."""
-    beams, column_point_names, column_support_coordinates, settings = input_data
+    beams, column_point_names, column_support_coordinates, settings, rigid_links, column_anchor_names = input_data
     column_points = _column_coordinates(
         beams,
         column_point_names,
@@ -268,14 +295,22 @@ def _analyze_story(
         tuple(line.path_points for line in final_lines if line.beam_type == "PB"),
         settings,
     )
-    records.extend(item.as_record() for item in (*refinement_diagnostics, *support_diagnostics))
-    return (
+    rigid_stitched_lines, rigid_stitch_diagnostics, rigid_stitch_records = _join_pb_lines_across_rigid_links(
         final_lines,
+        rigid_links,
+        column_anchor_names,
+        settings,
+    )
+    records.extend(item.as_record() for item in (*refinement_diagnostics, *support_diagnostics, *rigid_stitch_diagnostics))
+    records.extend(rigid_stitch_records)
+    return (
+        rigid_stitched_lines,
         records,
         [
             *stitch_diagnostics,
             *refinement_diagnostics,
             *support_diagnostics,
+            *rigid_stitch_diagnostics,
         ],
     )
 
@@ -631,7 +666,7 @@ def _split_candidates_by_role(
             line_path = _join_paths(span_paths)
             span_sources = all_span_sources[source_offset : source_offset + len(span_paths)]
             source_offset += len(span_paths)
-            support_points = column_points if beam_type == "PB" else support_intersections
+            support_points = (*column_points, *support_intersections) if beam_type == "PB" else support_intersections
             lines.append(
                 _UnnumberedLine(
                     candidate.story,
@@ -643,6 +678,9 @@ def _split_candidates_by_role(
                     span_paths,
                     support_points,
                     any(_is_curved(part, settings) for part in span_paths),
+                    (line_path,),
+                    _source_endpoint_name(line_path[0], candidate.source_names or (candidate.name,), source_by_name, settings),
+                    _source_endpoint_name(line_path[-1], candidate.source_names or (candidate.name,), source_by_name, settings),
                 )
             )
     return lines
@@ -918,6 +956,330 @@ def _source_names_by_paths(
     return tuple(tuple(group) for group in selected)
 
 
+def _source_endpoint_name(
+    point: Point3D,
+    source_names: tuple[str, ...],
+    source_by_name: Mapping[str, BeamGeometry],
+    settings: BeamLineSpanSettings,
+) -> str:
+    names: set[str] = set()
+    for name in source_names:
+        source = source_by_name.get(name)
+        if source is None:
+            continue
+        if distance(point, source.start) <= settings.coordinate_tolerance_mm:
+            names.add(source.point_i)
+        if distance(point, source.end) <= settings.coordinate_tolerance_mm:
+            names.add(source.point_j)
+    return next(iter(names)) if len(names) == 1 else ""
+
+
+def _join_pb_lines_across_rigid_links(
+    lines: list[_UnnumberedLine],
+    rigid_links: tuple[RigidLinkGeometry, ...],
+    column_anchor_names: set[str],
+    settings: BeamLineSpanSettings,
+) -> tuple[list[_UnnumberedLine], list[TopologyDiagnostic], list[str]]:
+    """Share one PB line identity across a real, unambiguous rigid support gap.
+
+    This runs after role classification and support-boundary validation. The
+    rigid frame is never added to a BeamSpan path; it only links the PB line
+    identities at its two source-object endpoints.
+    """
+    if len(lines) < 2 or not rigid_links or not column_anchor_names:
+        return lines, [], []
+
+    links_by_story: dict[str, list[RigidLinkGeometry]] = {}
+    for link in rigid_links:
+        links_by_story.setdefault(link.story, []).append(link)
+
+    endpoint_links: dict[tuple[int, int], tuple[int, int]] = {}
+    pair_candidates: list[tuple[float, float, int, int, int, int]] = []
+    for story, story_links in links_by_story.items():
+        adjacency: dict[str, list[int]] = {}
+        component_edges: list[set[int]] = []
+        component_nodes: list[set[str]] = []
+        unseen = set(range(len(story_links)))
+        while unseen:
+            seed = min(unseen)
+            nodes: set[str] = set()
+            edges: set[int] = set()
+            stack: list[str] = []
+            link = story_links[seed]
+            stack.extend((link.point_i, link.point_j))
+            while stack:
+                point = stack.pop()
+                if point in nodes:
+                    continue
+                nodes.add(point)
+                for index, current in enumerate(story_links):
+                    if current.point_i == point or current.point_j == point:
+                        edges.add(index)
+                        other = current.point_j if current.point_i == point else current.point_i
+                        if other not in nodes:
+                            stack.append(other)
+            unseen.difference_update(edges)
+            component_nodes.append(nodes)
+            component_edges.append(edges)
+
+        for nodes, edges in zip(component_nodes, component_edges):
+            anchors = nodes & column_anchor_names
+            if not (len(anchors) == 1 and len(edges) == len(nodes) - 1):
+                continue
+            anchor = next(iter(anchors))
+            adjacency = {node: [] for node in nodes}
+            coordinates: dict[str, Point3D] = {}
+            inconsistent_coordinates = False
+            for index in edges:
+                link = story_links[index]
+                adjacency[link.point_i].append(index)
+                adjacency[link.point_j].append(index)
+                for point_name, point in ((link.point_i, link.start), (link.point_j, link.end)):
+                    existing = coordinates.get(point_name)
+                    if existing is not None and distance(existing, point) > settings.coordinate_tolerance_mm:
+                        inconsistent_coordinates = True
+                    else:
+                        coordinates[point_name] = point
+            if inconsistent_coordinates or any(len(neighbors) > 2 for neighbors in adjacency.values()):
+                continue
+            endpoints = []
+            for line_index, line in enumerate(lines):
+                if line.story != story or line.beam_type != "PB":
+                    continue
+                for endpoint in (0, 1):
+                    point_name = line.start_point_name if endpoint == 0 else line.end_point_name
+                    if point_name in nodes:
+                        endpoints.append((line_index, endpoint, point_name))
+            for left_offset, (left_index, left_endpoint, left_point) in enumerate(endpoints):
+                if not left_point:
+                    continue
+                for right_index, right_endpoint, right_point in endpoints[left_offset + 1 :]:
+                    if left_index == right_index or not right_point:
+                        continue
+                    left_line, right_line = lines[left_index], lines[right_index]
+                    if left_point == right_point or left_line.is_curved != right_line.is_curved:
+                        continue
+                    path_nodes = _rigid_graph_path(left_point, right_point, adjacency, story_links)
+                    if not path_nodes or len(path_nodes) < 2:
+                        continue
+                    if anchor not in path_nodes or len(path_nodes) > 3:
+                        continue
+                    anchor_index = path_nodes.index(anchor)
+                    if anchor_index > 1 or len(path_nodes) - anchor_index - 1 > 1:
+                        continue
+                    path_points = tuple(coordinates[name] for name in path_nodes)
+                    compatible, angle, gap = _rigid_join_tangents(
+                        left_line,
+                        left_endpoint,
+                        right_line,
+                        right_endpoint,
+                        path_points,
+                        settings,
+                    )
+                    if compatible:
+                        pair_candidates.append(
+                            (angle, gap, left_index, left_endpoint, right_index, right_endpoint)
+                        )
+
+    diagnostics: list[TopologyDiagnostic] = []
+    records: list[str] = []
+    alternatives_by_endpoint: dict[tuple[int, int], list[tuple[float, float, int, int]]] = {}
+    for angle, gap, left_index, left_endpoint, right_index, right_endpoint in pair_candidates:
+        alternatives_by_endpoint.setdefault((left_index, left_endpoint), []).append(
+            (angle, gap, right_index, right_endpoint)
+        )
+        alternatives_by_endpoint.setdefault((right_index, right_endpoint), []).append(
+            (angle, gap, left_index, left_endpoint)
+        )
+    ambiguous_endpoints = {
+        endpoint
+        for endpoint, alternatives in alternatives_by_endpoint.items()
+        if len({(item[2], item[3]) for item in alternatives}) > 1
+    }
+    for line_index, endpoint in sorted(ambiguous_endpoints):
+        alternatives = sorted(alternatives_by_endpoint[(line_index, endpoint)])
+        diagnostics.append(
+            TopologyDiagnostic(
+                "RIGID_STITCH_MULTIPLE_CANDIDATES",
+                "BLOCKED",
+                lines[line_index].story,
+                lines[line_index].source_objects,
+                "rigid 支承两侧存在多个共线 PB 梁线候选；已保留独立编号。",
+                tuple(lines[index].source_objects for _, _, index, _ in alternatives),
+            )
+        )
+
+    pair_candidates.sort()
+    for _, _, left_index, left_endpoint, right_index, right_endpoint in pair_candidates:
+        left_key, right_key = (left_index, left_endpoint), (right_index, right_endpoint)
+        if left_key in ambiguous_endpoints or right_key in ambiguous_endpoints:
+            continue
+        if left_key in endpoint_links or right_key in endpoint_links:
+            continue
+        endpoint_links[left_key] = right_key
+        endpoint_links[right_key] = left_key
+
+    components: list[list[tuple[int, bool]]] = []
+    visited: set[int] = set()
+    for index in range(len(lines)):
+        if index in visited:
+            continue
+        component = _candidate_component(index, endpoint_links)
+        visited.update(component)
+        if len(component) == 1:
+            components.append([(index, False)])
+            continue
+        ordered = _order_candidate_component(component, endpoint_links)
+        if ordered is None:
+            names = tuple(name for member in component for name in lines[member].source_objects)
+            diagnostics.append(
+                TopologyDiagnostic(
+                    "RIGID_STITCH_CYCLE_OR_BRANCH",
+                    "BLOCKED",
+                    lines[component[0]].story,
+                    names,
+                    "rigid 支承串接图不是唯一开链；已保留独立 PB 梁线。",
+                )
+            )
+            components.extend([[(member, False)] for member in component])
+        else:
+            components.append(ordered)
+
+    joined: list[_UnnumberedLine] = []
+    for ordered in components:
+        if len(ordered) == 1:
+            joined.append(lines[ordered[0][0]])
+            continue
+        merged = _merge_rigid_linked_lines(lines, ordered, settings.coordinate_tolerance_mm)
+        joined.append(merged)
+        records.append(
+            f"信息/rigid 梁线串接：{','.join(merged.source_objects)}；保留 {len(merged.span_paths)} 个真实混凝土跨。"
+        )
+    return joined, diagnostics, records
+
+
+def _rigid_graph_path(
+    start: str,
+    end: str,
+    adjacency: Mapping[str, list[int]],
+    links: list[RigidLinkGeometry],
+) -> tuple[str, ...]:
+    pending = [start]
+    previous: dict[str, str | None] = {start: None}
+    while pending:
+        point = pending.pop(0)
+        if point == end:
+            break
+        for edge_index in adjacency.get(point, ()):
+            link = links[edge_index]
+            other = link.point_j if link.point_i == point else link.point_i
+            if other not in previous:
+                previous[other] = point
+                pending.append(other)
+    if end not in previous:
+        return ()
+    path = [end]
+    while path[-1] != start:
+        parent = previous[path[-1]]
+        if parent is None:
+            return ()
+        path.append(parent)
+    return tuple(reversed(path))
+
+
+def _rigid_join_tangents(
+    left: _UnnumberedLine,
+    left_endpoint: int,
+    right: _UnnumberedLine,
+    right_endpoint: int,
+    connector: tuple[Point3D, ...],
+    settings: BeamLineSpanSettings,
+) -> tuple[bool, float, float]:
+    gap = sum(distance(start, end) for start, end in zip(connector, connector[1:]))
+    if gap <= settings.coordinate_tolerance_mm:
+        return False, 180.0, gap
+    start, end = connector[0], connector[-1]
+    overall_dx, overall_dy = end[0] - start[0], end[1] - start[1]
+    if overall_dx == 0.0 and overall_dy == 0.0:
+        return False, 180.0, gap
+    for first, second in zip(connector, connector[1:]):
+        if plan_angle_deg(start, end, first, second) > settings.merge_angle_deg:
+            return False, 180.0, gap
+        if (second[0] - first[0]) * overall_dx + (second[1] - first[1]) * overall_dy <= 0.0:
+            return False, 180.0, gap
+
+    left_path = left.path_points
+    right_path = right.path_points
+    if len(left_path) < 2 or len(right_path) < 2:
+        return False, 180.0, gap
+    left_joint, left_inner = (left_path[0], left_path[1]) if left_endpoint == 0 else (left_path[-1], left_path[-2])
+    right_joint, right_inner = (right_path[0], right_path[1]) if right_endpoint == 0 else (right_path[-1], right_path[-2])
+    if distance(left_joint, start) > settings.coordinate_tolerance_mm:
+        return False, 180.0, gap
+    if distance(right_joint, end) > settings.coordinate_tolerance_mm:
+        return False, 180.0, gap
+    left_angle = plan_angle_deg(left_joint, left_inner, start, connector[1])
+    right_angle = plan_angle_deg(right_joint, right_inner, connector[-2], end)
+    if max(left_angle, right_angle) > settings.merge_angle_deg:
+        return False, max(left_angle, right_angle), gap
+    left_dot = (left_inner[0] - left_joint[0]) * overall_dx + (left_inner[1] - left_joint[1]) * overall_dy
+    right_dot = (right_inner[0] - right_joint[0]) * overall_dx + (right_inner[1] - right_joint[1]) * overall_dy
+    compatible = left_dot < 0.0 < right_dot
+    return compatible, max(left_angle, right_angle), gap
+
+
+def _merge_rigid_linked_lines(
+    lines: list[_UnnumberedLine], ordered: list[tuple[int, bool]], tolerance: float
+) -> _UnnumberedLine:
+    first_line = lines[ordered[0][0]]
+    first_reverse = ordered[0][1]
+    last_line = lines[ordered[-1][0]]
+    last_reverse = ordered[-1][1]
+    outer_start = first_line.path_points[-1] if first_reverse else first_line.path_points[0]
+    outer_end = last_line.path_points[0] if last_reverse else last_line.path_points[-1]
+    if _oriented_path((outer_start, outer_end))[0] != outer_start:
+        ordered = [(index, not reverse) for index, reverse in reversed(ordered)]
+
+    span_paths: list[tuple[Point3D, ...]] = []
+    span_source_objects: list[tuple[str, ...]] = []
+    path_parts: list[tuple[Point3D, ...]] = []
+    sections: list[str] = []
+    support_points: list[Point3D] = []
+    for index, reverse in ordered:
+        line = lines[index]
+        sections.extend(line.section.split(" / "))
+        line_span_paths = tuple(reversed(line.span_paths)) if reverse else line.span_paths
+        line_span_sources = tuple(reversed(line.span_source_objects)) if reverse else line.span_source_objects
+        span_paths.extend(tuple(reversed(path)) if reverse else path for path in line_span_paths)
+        span_source_objects.extend(line_span_sources)
+        line_parts = line.path_parts or (line.path_points,)
+        if reverse:
+            path_parts.extend(tuple(reversed(path)) for path in reversed(line_parts))
+        else:
+            path_parts.extend(line_parts)
+        support_points.extend(line.support_points)
+    unique_sections = tuple(dict.fromkeys(section for section in sections if section))
+    section = unique_sections[0] if len(unique_sections) == 1 else "VARIES"
+    source_objects = tuple(dict.fromkeys(name for group in span_source_objects for name in group))
+    first_index, first_reverse = ordered[0]
+    last_index, last_reverse = ordered[-1]
+    first_line, last_line = lines[first_index], lines[last_index]
+    return _UnnumberedLine(
+        story=first_line.story,
+        beam_type="PB",
+        section=section,
+        source_objects=source_objects,
+        span_source_objects=tuple(span_source_objects),
+        path_points=path_parts[0],
+        span_paths=tuple(span_paths),
+        support_points=_unique_points(support_points, tolerance),
+        is_curved=first_line.is_curved,
+        path_parts=tuple(path_parts),
+        start_point_name=(first_line.end_point_name if first_reverse else first_line.start_point_name),
+        end_point_name=(last_line.start_point_name if last_reverse else last_line.end_point_name),
+    )
+
+
 def _group_parts(
     parts: list[tuple[Point3D, ...]], settings: BeamLineSpanSettings, beam_type: str
 ) -> list[list[tuple[Point3D, ...]]]:
@@ -956,6 +1318,7 @@ def _number_lines(
                     line.source_objects,
                     line.path_points,
                     line.is_curved,
+                    line.path_parts or (line.path_points,),
                 )
                 numbered.append(beam_line)
                 for span_index, path in enumerate(line.span_paths, start=1):
@@ -975,17 +1338,18 @@ def _number_lines(
 
 
 def _line_sort_key(line: _UnnumberedLine) -> tuple[float, float, str]:
+    points = tuple(point for path in (line.path_parts or (line.path_points,)) for point in path)
     start, end = line.path_points[0], line.path_points[-1]
     horizontal = abs(end[0] - start[0]) >= abs(end[1] - start[1])
     if horizontal:
         return (
-            -max(point[1] for point in line.path_points),
-            min(point[0] for point in line.path_points),
+            -max(point[1] for point in points),
+            min(point[0] for point in points),
             line.source_objects[0],
         )
     return (
-        min(point[0] for point in line.path_points),
-        min(point[1] for point in line.path_points),
+        min(point[0] for point in points),
+        min(point[1] for point in points),
         line.source_objects[0],
     )
 
@@ -1195,7 +1559,7 @@ def _path_intersections(
 ) -> tuple[Point3D, ...]:
     intersections: list[Point3D] = []
     for left, right in zip(path, path[1:]):
-        for p_left, p_right in _indexed_candidates(left, right, primary_index, settings.intersection_grid_mm):
+        for p_left, p_right in _indexed_candidates(left, right, primary_index, settings.intersection_grid_mm, settings.coordinate_tolerance_mm):
             if excluded_segments:
                 if _segment_key(p_left, p_right) in excluded_segments:
                     continue
@@ -1247,13 +1611,14 @@ def _indexed_candidates(
     right: Point3D,
     index: dict[tuple[int, int], tuple[tuple[Point3D, Point3D], ...]],
     grid_size: float,
+    tolerance: float = 0.0,
 ) -> tuple[tuple[Point3D, Point3D], ...]:
     min_x, max_x = sorted((left[0], right[0]))
     min_y, max_y = sorted((left[1], right[1]))
     candidates: list[tuple[Point3D, Point3D]] = []
     seen: set[tuple[Point3D, Point3D]] = set()
-    for cell_x in range(_grid_index(min_x, grid_size), _grid_index(max_x, grid_size) + 1):
-        for cell_y in range(_grid_index(min_y, grid_size), _grid_index(max_y, grid_size) + 1):
+    for cell_x in range(_grid_index(min_x - tolerance, grid_size), _grid_index(max_x + tolerance, grid_size) + 1):
+        for cell_y in range(_grid_index(min_y - tolerance, grid_size), _grid_index(max_y + tolerance, grid_size) + 1):
             for segment in index.get((cell_x, cell_y), ()):
                 if segment not in seen:
                     seen.add(segment)
@@ -1281,12 +1646,15 @@ def _segment_intersection(
     q_x, q_y = c[0] - a[0], c[1] - a[1]
     t = (q_x * s_y - q_y * s_x) / denominator
     u = (q_x * r_y - q_y * r_x) / denominator
-    if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
+    t_clamped = max(0.0, min(1.0, t))
+    u_clamped = max(0.0, min(1.0, u))
+    if ((t - t_clamped) ** 2 * (r_x * r_x + r_y * r_y) <= tolerance ** 2
+            and (u - u_clamped) ** 2 * (s_x * s_x + s_y * s_y) <= tolerance ** 2):
         z_a = a[2] + t * (b[2] - a[2])
         z_c = c[2] + u * (d[2] - c[2])
         if abs(z_a - z_c) > z_tolerance:
             return None
-        return (a[0] + t * r_x, a[1] + t * r_y, z_a)
+        return (a[0] + t_clamped * r_x, a[1] + t_clamped * r_y, a[2] + t_clamped * (b[2] - a[2]))
     return None
 
 

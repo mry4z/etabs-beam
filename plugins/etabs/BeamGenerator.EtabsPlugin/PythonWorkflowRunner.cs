@@ -136,6 +136,11 @@ internal sealed class PythonWorkflowRunner : IDisposable
         }
         startInfo.ArgumentList.Add("--selection");
         startInfo.ArgumentList.Add(request.SelectionMode);
+        if (!request.TowerCheck)
+        {
+            startInfo.ArgumentList.Add("--detailing-policy");
+            startInfo.ArgumentList.Add(request.DetailingPolicy);
+        }
         startInfo.ArgumentList.Add("--output-dir");
         startInfo.ArgumentList.Add(request.OutputDirectory);
         if (request.ExportExcel)

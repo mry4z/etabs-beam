@@ -49,6 +49,12 @@ design:
   # 当前配筋引擎仅接受 ACI 318-14；其他规范需先实现独立策略。
   standard: "ACI 318-14"
 
+  # 可选: legacy / drawing_20260924_v1 / drawing_v3。
+  # 保留现有开发默认值；drawing_v3 是显式选择的 Top-10 整梁串推荐策略。
+  detailing_policy: "drawing_20260924_v1"
+  rebar_workers: auto
+  candidate_lookup: "auto"
+
   # 本项目梁措施第 4 节单排容量表按 40 mm 箍筋外缘净保护层计算。
   # 提供时必须同时记录来源，配筋引擎按该显式净保护层计算。
   # 如需改回模型值，必须同时清空本项和来源，届时按每个截面的 ETABS GetRebarBeam CoverTop/CoverBot

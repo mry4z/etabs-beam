@@ -52,7 +52,11 @@ internal static class PluginSettingsStore
             {
                 loaded.DxfTextHeight = 100;
             }
-            loaded.SchemaVersion = 3;
+            if (!DetailingPolicyIds.IsValid(loaded.DetailingPolicy))
+            {
+                loaded.DetailingPolicy = DetailingPolicyIds.Default;
+            }
+            loaded.SchemaVersion = 4;
             return loaded;
         }
         catch (Exception exception)
@@ -75,7 +79,7 @@ internal static class PluginSettingsStore
         var installation = PortableWorkflowLocator.Locate();
         return new PluginSettings
         {
-            SchemaVersion = 3,
+            SchemaVersion = 4,
             ConfigPath = installation.ConfigPath,
             OutputRoot = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),

@@ -13,6 +13,19 @@ from src.core.continuity_analyzer import ContinuityAnalyzer
 from src.core.model_writeback import build_writeback_plan, exclude_writeback_objects
 from src.core.section_review import build_multi_section_span_records, write_multi_section_span_audit
 from src.core.topology_audit import build_requires_split_records, write_requires_split_audit
+from src.design.detailing import make_fresh_detailing_engine
+from src.design.offline_style import (
+    DRAWING_POLICY_REVISION_R8_ID,
+    DRAWING_POLICY_REVISION_R9_ID,
+    DRAWING_V3_REVISION_ID,
+)
+from src.design.region_results import (
+    DRAWING_DETAILING_POLICY_ID,
+    DRAWING_V3_PARTIAL_EVIDENCE_RESEARCH_MODE,
+    DRAWING_V3_POLICY_ID,
+    LEGACY_DETAILING_POLICY_ID,
+)
+from src.design.no_design import excluded_no_design_source_names
 from src.drawing.dxf_export import (
     export_requires_split_dxf,
     export_structural_spans_csv,
@@ -20,7 +33,7 @@ from src.drawing.dxf_export import (
 )
 from src.drawing.beam_result_dxf import export_beam_result_and_section_dxfs
 from src.excel_export import export_beam_schedule
-from src.excel_span_adapter import build_span_schedule
+from src.excel_span_adapter import build_span_schedule, span_object_part_paths
 from src.model_source import SqliteReadSource
 from src.output_layout import model_name_from_path, resolve_output_layout
 from src.rebar_workbook import (
@@ -57,6 +70,21 @@ def run_snapshot_workflow(
     """Run the production read-only consumers without attaching to ETABS."""
 
     _validate_snapshot_arguments(args)
+    detailing_policy_id = (
+        getattr(args, "detailing_policy", None) or config.design.detailing_policy
+    )
+    v3_coverage_schedule = bool(getattr(args, "v3_coverage_schedule", False))
+    if v3_coverage_schedule and detailing_policy_id != DRAWING_V3_POLICY_ID:
+        raise ValueError("--v3-coverage-schedule requires --detailing-policy drawing_v3")
+    if v3_coverage_schedule and not getattr(args, "export_rebar_workbook", False):
+        raise ValueError("--v3-coverage-schedule requires --export-rebar-workbook")
+    detailing_policy_revision_id = (
+        DRAWING_V3_REVISION_ID
+        if detailing_policy_id == "drawing_v3"
+        else (DRAWING_POLICY_REVISION_R9_ID if config.design.candidate_lookup == "auto" else DRAWING_POLICY_REVISION_R8_ID)
+        if detailing_policy_id == DRAWING_DETAILING_POLICY_ID
+        else LEGACY_DETAILING_POLICY_ID
+    )
     model_path = Path(args.expected_model).resolve()
     layout = resolve_output_layout(output_dir, model_path)
     output_dir = layout.root
@@ -77,15 +105,21 @@ def run_snapshot_workflow(
 
     extraction_progress = _scaled_progress(progress, 0, 15)
     if extraction_progress is None:
-        beams = source.extract_beams(args.selection)
+        beams = source.extract_beams(args.selection, include_design_ineligible=True)
     else:
         beams = source.extract_beams(
             args.selection,
+            include_design_ineligible=True,
             progress=extraction_progress,
         )
+    design_exclusions = tuple(source.design_object_exclusions())
+    excluded_no_design_names = excluded_no_design_source_names(design_exclusions)
     if progress is not None:
         progress(15, f"读取几何完成（{len(beams)} 梁）")
     column_supports = source.column_supports()
+    column_anchor_names = getattr(source, "column_anchor_names", lambda: set())()
+    rigid_links = getattr(source, "rigid_links_for_beams", lambda _beams: ())(beams)
+    column_outlines = source.column_outlines()
     if progress is not None:
         progress(20, f"读取支承完成（{len(column_supports)} 个）")
     states = source.frame_states(beams)
@@ -100,6 +134,8 @@ def run_snapshot_workflow(
             story_workers=4,
         ),
         column_support_coordinates=column_supports,
+        column_anchor_names=column_anchor_names,
+        rigid_links=rigid_links,
     )
     if progress is not None:
         progress(35, f"拓扑划分完成（{len(structural.spans)} Span）")
@@ -126,11 +162,21 @@ def run_snapshot_workflow(
         data_dir / "topology_spans.csv",
         span_id_resolver=span_id,
     )
+    numbering_schedule = build_span_schedule(
+        structural,
+        beams,
+        {},
+        config.geometry.coordinate_tolerance_mm,
+    )
     spans_dxf = export_structural_spans_dxf(
         structural.spans,
         layout.span_note,
         model_name=layout.model_name,
         span_id_resolver=span_id,
+        column_outlines=column_outlines,
+        rigid_links=structural.rigid_links,
+        object_part_labels=span_object_part_paths(numbering_schedule, excluded_no_design_names),
+        excluded_source_names=excluded_no_design_names,
     )
     split_json, split_csv = write_requires_split_audit(records, data_dir, "requires_split_audit")
     split_dxf = export_requires_split_dxf(
@@ -161,8 +207,29 @@ def run_snapshot_workflow(
         "multi_section_review_csv": str(section_csv),
         "topology_diagnostics_json": str(diagnostics_json),
     }
+    exclusion_status_counts: dict[str, int] = {}
+    for item in design_exclusions:
+        status = str(item.get("status", "NO_RESULTS"))
+        exclusion_status_counts[status] = exclusion_status_counts.get(status, 0) + 1
+    design_exclusion_path = None
+    if design_exclusions:
+        design_exclusion_path = data_dir / "excluded_non_design_objects.json"
+        design_exclusion_path.write_text(
+            json.dumps(
+                {
+                    "schema": "etabs-beam-generator/excluded-non-design-objects@1",
+                    "count": len(design_exclusions),
+                    "objects": list(design_exclusions),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        outputs["excluded_non_design_objects"] = str(design_exclusion_path)
     designs = None
     beam_dxf_export = None
+    rebar_metadata = None
     if args.export_excel or args.export_rebar_workbook or getattr(args, "export_beam_result_dxf", False):
         design_progress = _scaled_progress(progress, 55, 70)
         if design_progress is None:
@@ -179,6 +246,8 @@ def run_snapshot_workflow(
             beams,
             designs,
             config.geometry.coordinate_tolerance_mm,
+            detailing_policy_id=detailing_policy_id,
+            valid_station_domain=(detailing_policy_revision_id == DRAWING_V3_REVISION_ID),
         )
         if progress is not None:
             progress(73, f"Span schedule 完成（{len(span_schedule.records)} 跨）")
@@ -189,6 +258,7 @@ def run_snapshot_workflow(
                 source.section_info,
                 output_dir,
                 text_height=float(getattr(args, "dxf_text_height", 50)),
+                column_outlines=column_outlines,
             )
             if progress is not None:
                 progress(82, "梁计算结果/截面 DXF 导出完成")
@@ -245,8 +315,23 @@ def run_snapshot_workflow(
                 clear_cover_source=config.design.clear_cover_source,
                 max_aggregate_size_mm=config.design.max_aggregate_size_mm,
                 max_aggregate_size_source=config.design.max_aggregate_size_source,
+                engine=make_fresh_detailing_engine(
+                    detailing_policy_id,
+                    layout_dictionary_path=config.design.layout_dictionary_path,
+                    candidate_lookup=config.design.candidate_lookup,
+                    candidate_lookup_output_dir=output_dir / "_data",
+                ),
+                detailing_policy_id=detailing_policy_id,
+                v3_coverage_schedule=v3_coverage_schedule,
+                rebar_workers=config.design.rebar_workers,
+                sb_frame_type_override=(
+                    "Non Sway"
+                    if detailing_policy_id in {DRAWING_DETAILING_POLICY_ID, DRAWING_V3_POLICY_ID}
+                    else None
+                ),
             )
             write_rebar_payload(payload, payload_path)
+            rebar_metadata = payload["metadata"]
             write_rebar_payload(
                 build_secondary_schedule_payload(payload),
                 secondary_payload_path,
@@ -271,7 +356,10 @@ def run_snapshot_workflow(
                 builder=getattr(args, "workbook_builder", "python"),
             )
             if progress is not None:
-                progress(92, "配筋表输入文件导出完成")
+                progress(92, "配筋表输入文件导出完成；实际进程数={}，梁串分派耗时={:.1f}秒".format(
+                    rebar_metadata["rebar_parallelism"]["workers_effective"],
+                    rebar_metadata.get("rebar_performance", {}).get("dispatch_seconds", 0.0),
+                ))
             outputs.update(
                 {
                     "rebar_payload_json": str(payload_path),
@@ -300,6 +388,8 @@ def run_snapshot_workflow(
         "original_units": "snapshot",
         "export_units": "N_mm_C",
         "design_standard": source.design_code(),
+        "detailing_policy_id": detailing_policy_id,
+        "detailing_policy_revision_id": detailing_policy_revision_id,
         "data_source": source_identity,
         "environment": {
             "etabs_version": {
@@ -314,6 +404,10 @@ def run_snapshot_workflow(
             "pid": None,
         },
         "beams": len(beams),
+        "design_eligible_objects": len(beams) - len(design_exclusions),
+        "excluded_design_object_count": len(design_exclusions),
+        "excluded_no_design_objects": exclusion_status_counts.get("不纳入混凝土设计", 0),
+        "excluded_design_object_status_counts": exclusion_status_counts,
         "beam_lines": len(structural.lines),
         "spans": len(structural.spans),
         "primary_spans": sum(span.beam_type == "PB" for span in structural.spans),
@@ -338,6 +432,14 @@ def run_snapshot_workflow(
     if beam_dxf_export is not None:
         summary["beam_result_dxf_issues"] = [asdict(issue) for issue in beam_dxf_export.issues]
         summary["beam_result_dxf_summary"] = [asdict(item) for item in beam_dxf_export.summaries]
+    if rebar_metadata is not None:
+        summary["rebar_parallelism"] = rebar_metadata["rebar_parallelism"]
+        summary["rebar_performance"] = rebar_metadata.get("rebar_performance", {})
+        summary["rebar_dispatch_seconds"] = summary["rebar_performance"].get("dispatch_seconds")
+        if rebar_metadata.get("region_control_projection_mode"):
+            summary["region_control_projection_mode"] = rebar_metadata["region_control_projection_mode"]
+    elif detailing_policy_id == "drawing_v3" and beam_dxf_export is not None:
+        summary["region_control_projection_mode"] = DRAWING_V3_PARTIAL_EVIDENCE_RESEARCH_MODE
     return summary
 
 

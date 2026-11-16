@@ -5,7 +5,11 @@ param(
 
     [string]$OutputDirectory = "",
 
+    [string]$AdditionalEtabsInstallDirectory = "",
+
     [string]$PythonExecutable = "python",
+
+    [string]$LookupAssetsDirectory = "",
 
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release"
@@ -36,6 +40,12 @@ $validatorPath = Join-Path $workspaceRoot "tools\EtabsPluginValidator\EtabsPlugi
 $portableBuilderPath = Join-Path $workspaceRoot "tools\build_portable_workflow.ps1"
 $guidePath = Join-Path $workspaceRoot "docs\guides\ETABS_PLUGIN.md"
 $releaseNotesPath = Join-Path $workspaceRoot "plugins\etabs\RELEASE_NOTES.md"
+$defaultLookupAssetsDirectory = Join-Path $workspaceRoot "src\design\lookup_assets"
+$resolvedLookupAssetsDirectory = if ([string]::IsNullOrWhiteSpace($LookupAssetsDirectory)) {
+    [System.IO.Path]::GetFullPath($defaultLookupAssetsDirectory)
+} else {
+    [System.IO.Path]::GetFullPath($LookupAssetsDirectory)
+}
 $apiPath = Join-Path $EtabsInstallDirectory "ETABSv1.dll"
 $hostPath = Join-Path $EtabsInstallDirectory "ETABS.exe"
 
@@ -51,6 +61,11 @@ if (-not (Test-Path -LiteralPath $guidePath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $portableBuilderPath -PathType Leaf)) {
     throw "Portable workflow builder not found: $portableBuilderPath"
 }
+if (-not (Test-Path -LiteralPath $resolvedLookupAssetsDirectory -PathType Container)) {
+    throw "Lookup asset directory not found: $resolvedLookupAssetsDirectory"
+}
+$standardLookupManifest = Get-Content -LiteralPath (Join-Path $resolvedLookupAssetsDirectory "standard_indices\manifest.json") -Raw | ConvertFrom-Json
+$contextLookupManifest = Get-Content -LiteralPath (Join-Path $resolvedLookupAssetsDirectory "context_indices_manifest.json") -Raw | ConvertFrom-Json
 
 $apiInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($apiPath)
 $hostInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($hostPath)
@@ -61,8 +76,13 @@ if ($hostMajor -notin @(22, 23)) {
 
 $projectXml = [xml](Get-Content -LiteralPath $projectPath -Raw)
 $pluginVersion = [string]$projectXml.Project.PropertyGroup.Version
-if ($pluginVersion -notmatch '^\d+\.\d+\.\d+$') {
-    throw "Plugin Version must be an explicit three-part version: $pluginVersion"
+if ($pluginVersion -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+    throw "Plugin Version must be an explicit three- or four-part version: $pluginVersion"
+}
+$expectedAssemblyVersion = if ($pluginVersion -match '^\d+\.\d+\.\d+$') {
+    "$pluginVersion.0"
+} else {
+    $pluginVersion
 }
 
 # Record the exact worktree inputs, including intentionally uncommitted fixes.
@@ -73,6 +93,8 @@ $sourcePaths = @(
         (Join-Path $PSScriptRoot "portable_workflow.spec"),
         (Join-Path $PSScriptRoot "portable_workflow_entry.py"),
         (Join-Path $PSScriptRoot "requirements-portable-build.txt"),
+        (Join-Path $PSScriptRoot "compress_lookup_indices_xz.py"),
+        (Join-Path $workspaceRoot "src\design\policies\drawing_20260924_v1.json"),
         (Join-Path $workspaceRoot "plugins\etabs\portable\config.yaml")
 )
 $sourceRecords = @($sourcePaths | Sort-Object FullName -Unique | ForEach-Object {
@@ -129,6 +151,7 @@ Copy-Item -LiteralPath $releaseNotesPath -Destination (Join-Path $resolvedOutput
 & $portableBuilderPath `
     -OutputDirectory (Join-Path $resolvedOutput "workflow") `
     -PythonExecutable $PythonExecutable `
+    -LookupAssetsDirectory $resolvedLookupAssetsDirectory `
     -EtabsApiPath $apiPath
 if ($LASTEXITCODE -ne 0) {
     throw "Portable workflow build failed with exit code $LASTEXITCODE"
@@ -145,8 +168,22 @@ if ($LASTEXITCODE -ne 0) {
 }
 $validatorOutput | Set-Content -LiteralPath (Join-Path $resolvedOutput "contract-validation.json") -Encoding UTF8
 $validation = ($validatorOutput -join [Environment]::NewLine) | ConvertFrom-Json
-if ($validation.verdict -ne "passed" -or $validation.plugin_version -ne "$pluginVersion.0") {
+if ($validation.verdict -ne "passed" -or $validation.plugin_version -ne $expectedAssemblyVersion) {
     throw "Plugin contract/version mismatch."
+}
+$supportedHosts = @($hostMajor)
+if ($AdditionalEtabsInstallDirectory) {
+    $additionalApi = Join-Path $AdditionalEtabsInstallDirectory "ETABSv1.dll"
+    $additionalHost = Join-Path $AdditionalEtabsInstallDirectory "ETABS.exe"
+    if (-not (Test-Path -LiteralPath $additionalApi) -or -not (Test-Path -LiteralPath $additionalHost)) { throw "Additional ETABS installation is incomplete." }
+    $additionalMajor = ([version][System.Diagnostics.FileVersionInfo]::GetVersionInfo($additionalHost).FileVersion).Major
+    if ($additionalMajor -notin @(22, 23) -or $additionalMajor -eq $hostMajor) { throw "Additional host must be the other supported ETABS major version." }
+    $additionalOutput = & dotnet run --project $validatorPath --configuration Release -- $pluginPath $additionalApi
+    if ($LASTEXITCODE -ne 0) { throw "Additional plugin contract validation failed." }
+    $additionalOutput | Set-Content -LiteralPath (Join-Path $resolvedOutput "contract-validation-etabs$additionalMajor.json") -Encoding UTF8
+    $additionalValidation = ($additionalOutput -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($additionalValidation.verdict -ne "passed" -or $additionalValidation.plugin_version -ne $expectedAssemblyVersion) { throw "Additional plugin contract/version mismatch." }
+    $supportedHosts += $additionalMajor
 }
 foreach ($sourceRecord in $sourceRecords) {
     $currentHash = (Get-FileHash -LiteralPath (Join-Path $workspaceRoot $sourceRecord.path) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -179,8 +216,18 @@ $manifest = [ordered]@{
     }
     target = "net8.0-windows/x64"
     portable_workflow = "workflow/BeamGenerator.Workflow/BeamGenerator.Workflow.exe"
+    lookup_assets = [ordered]@{
+        source_directory = $resolvedLookupAssetsDirectory
+        index_compression = if ($contextLookupManifest.compression) { [string]$contextLookupManifest.compression } else { "gzip (legacy)" }
+        geometry_compression = "gzip (unchanged)"
+        standard_index_shards = @($standardLookupManifest.files).Count
+        context_index_shards = @($contextLookupManifest.files).Count
+        runtime_selection = "Prefer XZ shards when XZ and gzip versions coexist; continue to accept gzip."
+    }
     local_python_required = $false
     repository_source_required = $false
+    compile_reference_host = $hostInfo.FileVersion
+    supported_hosts = $supportedHosts
     etabs_host_version = $hostInfo.FileVersion
     etabs_api_file_version = $apiInfo.FileVersion
     etabs_api_reference = $apiPath

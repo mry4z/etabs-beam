@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from src.core.geometry_extractor import BeamGeometry
 from src.design.provider import BeamDesignResult, DesignResultStatus
-from src.model_source import EtabsOapiReadSource
+from src.model_source import EtabsOapiReadSource, SqliteReadSource
 
 
 def _beam(name: str, section: str = "B300X600") -> BeamGeometry:
@@ -98,3 +98,35 @@ def test_oapi_source_keeps_partial_design_results_for_audited_review(monkeypatch
 
     assert [item.name for item in source.extract_beams()] == ["PARTIAL-1"]
     assert source.design_object_exclusions() == ()
+
+
+def test_sqlite_source_keeps_explicit_no_design_outside_the_eligible_set():
+    beams = (_beam("DESIGN-1"), _beam("RIB-1", "RIB 150X370"))
+    results = {
+        "DESIGN-1": BeamDesignResult("DESIGN-1"),
+        "RIB-1": BeamDesignResult(
+            "RIB-1",
+            status=DesignResultStatus.SKIPPED,
+            status_message="EXCLUDED_NO_DESIGN; GetDesignProcedure=7 No Design",
+        ),
+    }
+    source = object.__new__(SqliteReadSource)
+    source._source = SimpleNamespace(extract_beams=lambda: list(beams))
+    source._design = SimpleNamespace(
+        beam_names=lambda: tuple(results),
+        get_beam_design=lambda name: results[name],
+    )
+    source._design_exclusions = []
+
+    eligible = source.extract_beams()
+    assert [beam.name for beam in eligible] == ["DESIGN-1"]
+    all_geometry = source.extract_beams(include_design_ineligible=True)
+    assert [beam.name for beam in all_geometry] == ["DESIGN-1", "RIB-1"]
+    assert source.design_object_exclusions() == ({
+        "object_name": "RIB-1",
+        "label": "RIB-1",
+        "story": "L1",
+        "section": "RIB 150X370",
+        "status": "不纳入混凝土设计",
+        "reason": "EXCLUDED_NO_DESIGN; GetDesignProcedure=7 No Design",
+    },)

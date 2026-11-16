@@ -4,7 +4,7 @@ type: spec
 status: review
 owner: project
 created: 2026-07-25
-updated: 2026-08-27
+updated: 2026-09-20
 related:
   - SPEC-DESIGN-001
   - ADR-0004
@@ -62,10 +62,10 @@ superseded_by:
 
 | ID | 要求 |
 |---|---|
-| DET-R005 | 左/中/右逐 station 反算 `AsFlex=AsTotal-Al/2`；正常模式按 Total 组合排布。 |
-| DET-R006 | “两层后转 face”是项目策略，不是 ACI 的纵筋最多两层规定。Total 组合任一区超过两层时，整跨进入 `FACE_TORSION_MODE`。 |
-| DET-R007 | face 模式下顶/底只按 AsFlex 设计且允许三层以上；两侧 face 各按整跨最大 `Al/2` 设计，不用取整余量抵扣 Al。 |
-| DET-R008 | face 模式必须校核 AsFlex、独立 AsMin、四角/周边和对称；冲突返回 `MIN_FLEXURE_CONFLICT`。 |
+| DET-R005 | 左/中/右逐 station 保留 `AsFlex=max(0,AsTotal-Al/2)` 作为审计字段；顶、底纵筋选配和最终验收始终以 `AsTopTotal/AsBotTotal`（并与 `AsMin` 取大）为唯一控制值。 |
+| DET-R006 | 纵筋候选仅在允许排数、净距、箍筋支承和总面积约束内求解；无合法总面积候选时返回 `NO_FEASIBLE_TOTAL_LONGITUDINAL_LAYOUT` 并阻塞。 |
+| DET-R007 | 原“两层后转 face”及将 `Al/2` 分配到 face bar 的策略已退役，仅保留为历史说明；face/腰筋可按梁高等构造条件生成，但不得抵扣顶、底总纵筋面积。 |
+| DET-R008 | 抗扭仍独立校核 `Al`、闭合箍和周边构造；`AsFlex` 不得进入纵筋选配、排数扩展或“OK”验收路径。 |
 | DET-R009 | 梁高 `h>=800 mm` 时默认单侧 T10、最大间距 250；不足 800 且无抗扭 face 时输出 `N.A.`。 |
 | DET-R010 | 先设计箍筋再设计纵筋；若最终纵筋坐标要求更多 legs，则迭代到稳定，失败时阻塞。 |
 | DET-R011 | 多排纵筋每排至少 2 根；不得留下单根末排。 |
@@ -75,7 +75,7 @@ superseded_by:
 | DET-R015 | 宽度不大于 300 mm 时，在全部要求满足的候选中优先比较 2-leg 方案。 |
 | DET-R016 | ETABS `VMajorArea` 只按 `Av/s` 语义保存；SMF 的 `Vu_ETABS` 首选公共 API 的 `Concrete Beam Shear Envelope - ACI 318-14`。API 不可用时才回退到最终实际配筋的 `Mpr`/重力剪力计算；容量数值仅进入过程 JSONL，不进入交付工作簿。 |
 | DET-R017 | 当前项目配置按措施表格采用 40 mm 箍筋外缘净保护层；有效高度、单排容量和箍筋中心线周长均按该口径及候选钢筋重新计算。只有清空显式项目值后才回退到 ETABS 纵筋重心 cover，两个口径不得混用。 |
-| DET-R019 | 每个梁跨必须输出非空配筋候选；若无满足全部规则的方案，保留 ETABS 读取需求/Provided 值或面积候选，状态高亮为复核，备注“不得直接用于施工图”，不得以空白代替失败。 |
+| DET-R019 | 每个梁跨必须输出非空配筋候选；若无满足全部规则的方案，保留 ETABS 读取需求/Provided 值或面积候选，状态高亮为复核，备注“不得直接用于施工图”，不得以空白代替失败。总面积无解不得降级到 `AsFlex` 或标记 `OK`。 |
 | DET-R018 | 当前项目最大骨料默认 25 mm；显式配置或后续插件可覆盖，但必须携带来源。最终数值和来源必须进入 payload、工作簿和运行配置并控制同层纵筋净间距。 |
 | DET-R020 | SMF 主梁所选截面受拉纵筋率按项目延性限值 `rho<=0.01613` 复核；该值严于 ACI 18.6.3.1 的 `0.025` 上限。 |
 | DET-R021 | SMF 端部 `2h` 加密区按 `min(d/4,6db,150 mm,100 mm)`；非加密区优先 200 mm，并继续受 `d/2`、剪力和其他适用上限控制。 |

@@ -110,7 +110,7 @@ internal static class Program
                 .Assembly.GetType("BeamGenerator.EtabsPlugin.SelectionExporter", throwOnError: true)
                 ?.GetMethod("Write", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
             Require(exporter is not null, "SelectionExporter.Write is unavailable.");
-            exporter!.Invoke(null, new[] { snapshot, selectionOutput, plugin.GetType().Assembly.GetName().Version!.ToString(3) });
+            exporter!.Invoke(null, new[] { snapshot, selectionOutput, plugin.GetType().Assembly.GetName().Version!.ToString() });
             using var document = JsonDocument.Parse(File.ReadAllText(selectionOutput));
             selectionSchema = document.RootElement.GetProperty("schema").GetString() ?? "";
             Require(

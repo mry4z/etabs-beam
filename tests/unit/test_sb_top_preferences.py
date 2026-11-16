@@ -11,6 +11,7 @@ from src.design.detailing import (
     BeamRegionDemand,
     BeamSection,
     ContinuityOption,
+    DetailingError,
     ProjectDetailingPolicy,
     ReinforcementMode,
     coordinate_adjacent_spans,
@@ -95,17 +96,13 @@ def test_sb_shared_support_does_not_reintroduce_avoidable_t25():
     assert max(bar.diameter_mm for bar in first.regions[2].top.bars) <= 20
 
 
-def test_sb_face_mode_keeps_the_same_top_preference_and_matching_pair():
+def test_sb_total_area_without_a_legal_layout_is_blocked():
     demands = tuple(
         BeamRegionDemand(name, station, 9000, 9000, 0.3, 0.2, 16000)
         for name, station in (("left", 0), ("middle", 3000), ("right", 6000))
     )
-    result = BeamDetailingEngine().design(BeamDetailingInput(_section(), demands))
-    assert result.mode is ReinforcementMode.FACE_TORSION
-    for region in result.regions:
-        assert max(bar.diameter_mm for bar in region.top.bars) <= 20
-        assert region.top.provided_area_mm2 >= region.as_flex_top_mm2
-    assert any(bar.count >= 2 for bar in result.regions[1].top.bars)
+    with pytest.raises(DetailingError, match="NO_FEASIBLE_TOTAL_LONGITUDINAL_LAYOUT"):
+        BeamDetailingEngine().design(BeamDetailingInput(_section(), demands))
 
 
 @pytest.mark.parametrize("clear_cover", [None, 40])
@@ -149,7 +146,15 @@ def test_pb38_midspan_reduces_with_four_leg_preference_without_changing_support_
     engine = BeamDetailingEngine()
     result = engine.design(BeamDetailingInput(section, demands))
     assert all(region.stirrup.legs == 4 for region in result.regions)
-    assert tuple(region.stirrup.notation for region in result.regions) == ("T10@100", "T16@200", "T10@100")
+    assert tuple(region.stirrup.notation for region in result.regions) == ("T10@100", "T10@110", "T10@100")
+    middle = result.regions[1].stirrup
+    # Existing selection order is spacing (largest legal first), then
+    # diameter, then legs. T10@110 is the first legal middle candidate:
+    # four T10 legs provide the required Av/s + 2At/s at 110 mm, while 130 mm
+    # falls below the combined demand; no diameter escalation is needed.
+    assert middle.diameter_mm == 10
+    assert middle.spacing_mm == 110
+    assert middle.provided_av_over_s_mm2_per_mm >= middle.required_combo_over_s_mm2_per_mm
     first_rows = [region.top.rows[0] for region in result.regions]
     assert len({row.diameter_mm for row in first_rows}) == 1
     assert all(row.count >= region.stirrup.legs for row, region in zip(first_rows, result.regions))

@@ -19,6 +19,8 @@ from typing import Any, Iterable, Mapping, Sequence
 from src.core.beam_line_span_analyzer import BeamLineSpanResult, BeamSpan
 from src.core.etabs_connector import api_values
 from src.core.geometry_extractor import BeamGeometry
+from src.core.numbering import canonical_object_part_id, canonical_span_id
+from src.utils.geometry import distance
 
 
 class WritebackPlanError(RuntimeError):
@@ -280,8 +282,7 @@ def plan_rename(
                 )
             )
             continue
-        story, beam_type, line_number, span_index = _parse_canonical_span_id(span_id)
-        final_name = f"{story}-{beam_type}{line_number}-{span_index}.{segment_index}"
+        final_name = canonical_object_part_id(span_id, segment_index)
         actions.append(RenameAction(source_name, state.guid, final_name, span_id, segment_index))
     return tuple(actions)
 
@@ -297,10 +298,24 @@ def build_writeback_plan(
     """Build both independent transactions and explain blocked actions."""
 
     beam_list = tuple(beams)
+    beam_by_name = {beam.name: beam for beam in beam_list}
     desired_paths: dict[str, Sequence[tuple[float, float, float]]] = {}
     for line in result.lines:
+        path_parts = tuple(getattr(line, "path_parts", ()) or (line.path_points,))
         for source_name in line.source_objects:
-            desired_paths.setdefault(source_name, line.path_points)
+            source = beam_by_name.get(source_name)
+            selected_path = line.path_points
+            if len(path_parts) > 1 and source is not None:
+                selected_path = next(
+                    (
+                        path
+                        for path in path_parts
+                        if any(distance(point, source.start) <= 1.0 for point in path)
+                        and any(distance(point, source.end) <= 1.0 for point in path)
+                    ),
+                    source.path_points or (source.start, source.end),
+                )
+            desired_paths.setdefault(source_name, selected_path)
     orientations = plan_orientation(
         beam_list,
         states,
@@ -1009,14 +1024,4 @@ def _path_position(path: Sequence[tuple[float, float, float]], point: tuple[floa
 
 
 def _canonical_span_id(span: BeamSpan) -> str:
-    return f"{span.story}-{span.beam_type}{span.line_number}-{span.span_index}"
-
-
-def _parse_canonical_span_id(span_id: str) -> tuple[str, str, int, int]:
-    try:
-        story, beam_token, span_number = span_id.rsplit("-", 2)
-        beam_type = beam_token[:2]
-        line_number = int(beam_token[2:])
-        return story, beam_type, line_number, int(span_number)
-    except (ValueError, IndexError) as exc:
-        raise WritebackPlanError(f"无法解析规范跨编号：{span_id}") from exc
+    return canonical_span_id(span.story, span.beam_type, span.line_number, span.span_index)

@@ -8,12 +8,111 @@ from src.core.beam_line_span_analyzer import (
     _support_path_signature,
     analyze_beam_lines,
 )
-from src.core.geometry_extractor import BeamGeometry
+from src.core.geometry_extractor import BeamGeometry, RigidLinkGeometry
 from src.drawing.dxf_export import _midpoint, export_structural_spans_csv, export_structural_spans_dxf
+from src.excel_span_adapter import build_span_schedule
 
 
 def _beam(name, pi, pj, start, end, section="B"):
     return BeamGeometry(name, name, "F2", pi, pj, start, end, section, 600)
+
+
+def test_rigid_gap_joins_pb_line_without_adding_rigid_length_or_source(tmp_path) -> None:
+    right = _beam("RIGHT", "R1", "B", (1000, 0, 0), (2000, 0, 0))
+    left = _beam("LEFT", "A", "C0", (-1000, 0, 0), (0, 0, 0))
+    rigid = RigidLinkGeometry("RIGID-1", "F2", "C0", "R1", (0, 0, 0), (1000, 0, 0), "B1019_RIGID")
+
+    result = analyze_beam_lines(
+        [right, left],
+        {"C0", "R1"},
+        column_support_coordinates={"C0": (0, 0, 0), "R1": (1000, 0, 0)},
+        column_anchor_names={"C0"},
+        rigid_links=(rigid,),
+    )
+
+    assert len(result.lines) == 1
+    assert result.lines[0].beam_line_id == "F2-PB1"
+    assert result.lines[0].source_objects == ("LEFT", "RIGHT")
+    assert result.lines[0].path_parts == (
+        ((-1000, 0, 0), (0, 0, 0)),
+        ((1000, 0, 0), (2000, 0, 0)),
+    )
+    assert [span.source_objects for span in result.spans] == [("LEFT",), ("RIGHT",)]
+    assert [span.path_points for span in result.spans] == [
+        ((-1000, 0, 0), (0, 0, 0)),
+        ((1000, 0, 0), (2000, 0, 0)),
+    ]
+    assert [sum(abs(a[i] - b[i]) ** 2 for i in range(3)) ** 0.5 for span in result.spans for a, b in zip(span.path_points, span.path_points[1:])] == [1000, 1000]
+    assert not any(item.code == "SOURCE_OBJECT_UNCOVERED" for item in result.diagnostics)
+
+    schedule = build_span_schedule(result, [left, right], {})
+    assert [record.geometry.length for record in schedule.records] == [1000, 1000]
+    assert [tuple(part.source_object for part in record.object_parts) for record in schedule.records] == [
+        ("LEFT",),
+        ("RIGHT",),
+    ]
+    assert schedule.source_to_line_ids == {"LEFT": ("F2-PB1",), "RIGHT": ("F2-PB1",)}
+
+    dxf = export_structural_spans_dxf(
+        result.spans, tmp_path / "rigid-link-span-note.dxf", rigid_links=result.rigid_links
+    )
+    content = dxf.read_text(encoding="ascii")
+    assert content.count("\nLINE\n") == 1
+    assert content.count("\nTEXT\n") == 5
+    assert "RIGID-1" not in content
+    assert "20\n0.000\n30\n0.000\n11\n1000.000\n21\n0.000\n31\n0.000" in content
+
+
+def test_two_one_hop_beam_endpoints_join_only_through_same_column_anchor() -> None:
+    left = _beam("LEFT", "A", "L", (-2000, 0, 0), (-1000, 0, 0))
+    right = _beam("RIGHT", "R", "B", (1000, 0, 0), (2000, 0, 0))
+    links = (
+        RigidLinkGeometry("RL", "F2", "C0", "L", (0, 0, 0), (-1000, 0, 0), "Rigid"),
+        RigidLinkGeometry("RR", "F2", "C0", "R", (0, 0, 0), (1000, 0, 0), "Rigid"),
+    )
+
+    result = analyze_beam_lines(
+        [left, right],
+        {"L", "R"},
+        column_support_coordinates={"L": (-1000, 0, 0), "R": (1000, 0, 0)},
+        column_anchor_names={"C0"},
+        rigid_links=links,
+    )
+
+    assert len(result.lines) == 1
+    assert [span.source_objects for span in result.spans] == [("LEFT",), ("RIGHT",)]
+
+
+def test_rigid_component_path_must_cross_its_actual_column_anchor() -> None:
+    left = _beam("LEFT", "A", "R1", (-2000, 0, 0), (-1000, 0, 0))
+    right = _beam("RIGHT", "R2", "B", (0, 0, 0), (1000, 0, 0))
+    links = (
+        RigidLinkGeometry("ANCHOR-R1", "F2", "C0", "R1", (-500, 0, 0), (-1000, 0, 0), "Rigid"),
+        RigidLinkGeometry("R1-R2", "F2", "R1", "R2", (-1000, 0, 0), (0, 0, 0), "Rigid"),
+    )
+
+    result = analyze_beam_lines(
+        [left, right],
+        {"R1", "R2"},
+        column_support_coordinates={"R1": (-1000, 0, 0), "R2": (0, 0, 0)},
+        column_anchor_names={"C0"},
+        rigid_links=links,
+    )
+
+    assert len([line for line in result.lines if line.beam_type == "PB"]) == 2
+    assert {span.source_objects for span in result.spans} == {("LEFT",), ("RIGHT",)}
+
+
+def test_unanchored_rigid_does_not_promote_or_join_secondary_lines() -> None:
+    left = _beam("LEFT", "A", "L", (-2000, 0, 0), (-1000, 0, 0))
+    right = _beam("RIGHT", "R", "B", (1000, 0, 0), (2000, 0, 0))
+    rigid = RigidLinkGeometry("RIGID", "F2", "L", "R", (-1000, 0, 0), (1000, 0, 0), "Rigid")
+
+    result = analyze_beam_lines([left, right], rigid_links=(rigid,))
+
+    assert len(result.lines) == 2
+    assert {line.beam_type for line in result.lines} == {"SB"}
+    assert result.rigid_links == ()
 
 
 def test_missing_source_object_is_a_blocking_diagnostic() -> None:

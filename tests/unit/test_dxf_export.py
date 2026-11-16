@@ -145,3 +145,68 @@ def test_structural_span_default_delivery_id_omits_internal_s_and_resolver_wins(
     assert "F1-PB3-S2" not in default_csv.read_text(encoding="utf-8-sig")
     assert "DELIVERY-2" in custom_dxf.read_text(encoding="ascii")
     assert "DELIVERY-2" in custom_csv.read_text(encoding="utf-8-sig")
+
+
+def test_mixed_section_child_labels_keep_one_parent_polyline_and_span_count(tmp_path: Path) -> None:
+    span = BeamSpan(
+        "Story1",
+        "SB",
+        41,
+        2,
+        ("645", "646", "647", "648"),
+        ((0, 0, 0), (2852, 0, 0), (5700, 0, 0), (7787, 0, 0), (9600, 0, 0)),
+        False,
+        True,
+    )
+    parent_id = "Story1-SB41-2"
+    parts = tuple(
+        (f"{parent_id}.{index}", (span.path_points[index - 1], span.path_points[index]))
+        for index in range(1, 5)
+    )
+    output = export_structural_spans_dxf(
+        [span],
+        tmp_path / "mixed-span.dxf",
+        object_part_labels={parent_id: parts},
+    )
+    content = output.read_text(encoding="ascii")
+
+    assert content.count("\nPOLYLINE\n") == 1
+    assert "total=1 primary=0" in content
+    assert "Every POLYLINE is one support-defined span" in content
+    assert parent_id in content
+    for index in range(1, 5):
+        assert f"{parent_id}.{index} (CANTILEVER)" in content
+    assert f"{parent_id} (CANTILEVER)" not in content
+
+
+def test_explicitly_excluded_parent_keeps_geometry_without_visible_number(tmp_path: Path) -> None:
+    span = BeamSpan("F1", "PB", 3, 2, ("B3",), ((0, 0, 0), (10, 0, 0)), False, False)
+    output = export_structural_spans_dxf(
+        [span],
+        tmp_path / "excluded-span.dxf",
+        excluded_source_names={"B3"},
+    )
+    content = output.read_text(encoding="ascii")
+
+    assert content.count("\nPOLYLINE\n") == 1
+    assert "F1-PB3-2" not in content
+
+
+def test_mixed_parent_keeps_parent_and_designed_part_number_only(tmp_path: Path) -> None:
+    span = BeamSpan("F1", "PB", 1, 1, ("B1", "B2"), ((0, 0, 0), (5, 0, 0), (10, 0, 0)), False, False)
+    parent_id = "F1-PB1-1"
+    output = export_structural_spans_dxf(
+        [span],
+        tmp_path / "mixed-no-design.dxf",
+        object_part_labels={
+            parent_id: (
+                (f"{parent_id}.1", ((0, 0, 0), (5, 0, 0))),
+            ),
+        },
+        excluded_source_names={"B2"},
+    )
+    content = output.read_text(encoding="ascii")
+
+    assert parent_id in content
+    assert f"{parent_id}.1" in content
+    assert f"{parent_id}.2" not in content

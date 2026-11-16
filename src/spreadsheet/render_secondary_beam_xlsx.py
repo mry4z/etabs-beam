@@ -46,11 +46,15 @@ def _sorted_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def _span_sort_key(row: Mapping[str, Any]) -> tuple[int, Any]:
+def _span_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
     try:
-        return (0, int(row.get("span_no")))
+        object_part_index = int(row.get("object_part_index") or 0)
     except (TypeError, ValueError):
-        return (1, _natural_key(row.get("beam_no")))
+        object_part_index = 0
+    try:
+        return (0, int(row.get("span_no")), object_part_index)
+    except (TypeError, ValueError):
+        return (1, _natural_key(row.get("beam_no")), object_part_index)
 
 
 def _data_row(row: dict[str, Any]) -> list[Any]:
@@ -162,7 +166,7 @@ def _render_legacy_schedule_payload(payload: Mapping[str, Any], output_path: str
         return {
             key: row.get(key, "")
             for key in (
-                "beam_no", "beam_line", "span_no", "story", "beam_type", "section",
+                "beam_no", "beam_line", "span_no", "is_cantilever", "story", "beam_type", "section",
                 "width_mm", "depth_mm", "frame_type", "detailing_profile",
                 "source_objects", "engine_status", "warnings", "legs", "mode",
             )

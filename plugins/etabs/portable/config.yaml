@@ -14,6 +14,9 @@ geometry:
 
 design:
   standard: "ACI 318-14"
+  detailing_policy: "drawing_v3"
+  rebar_workers: auto
+  candidate_lookup: "auto"
   clear_cover_to_stirrup_outer_mm: 40
   clear_cover_source: "Nasiriyah SMF/SB beam measure rev.1 (2026-08-24), section 4 table basis"
   max_aggregate_size_mm: 25

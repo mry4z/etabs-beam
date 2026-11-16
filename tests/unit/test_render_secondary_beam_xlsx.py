@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-from src.spreadsheet.render_secondary_beam_xlsx import _data_row, _natural_key, render_secondary_beam_xlsx
+from src.spreadsheet.render_secondary_beam_xlsx import (
+    _data_row,
+    _natural_key,
+    _span_sort_key,
+    render_secondary_beam_xlsx,
+)
 
 
 def _base(no: str = "SB1-1", line: str = "SB1", status: str = "OK") -> dict:
@@ -70,6 +75,19 @@ def _render(tmp_path: Path, payload: dict | None = None) -> Path:
 def test_natural_key_sorts_numbers_naturally() -> None:
     values = ["F10", "F2", "F1", "F10a"]
     assert sorted(values, key=_natural_key) == ["F1", "F2", "F10", "F10a"]
+
+
+def test_object_part_sorting_is_numeric_not_lexical() -> None:
+    rows = [
+        {"span_no": 2, "object_part_index": 10, "beam_no": "SB1-2.10"},
+        {"span_no": 2, "object_part_index": 2, "beam_no": "SB1-2.2"},
+        {"span_no": 1, "object_part_index": 4, "beam_no": "SB1-1.4"},
+    ]
+    assert [row["beam_no"] for row in sorted(rows, key=_span_sort_key)] == [
+        "SB1-1.4",
+        "SB1-2.2",
+        "SB1-2.10",
+    ]
 
 
 def test_secondary_has_one_static_eleven_column_sheet(tmp_path: Path) -> None:

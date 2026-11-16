@@ -8,9 +8,12 @@ when a code edition or project bar-selection option is replaced.
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Iterable, Sequence
+from pathlib import Path
+from typing import Any, Iterable, Sequence
 
 from src.design.bar_layout_capacity import single_layer_max_bars
 from src.design.constructability import (
@@ -26,14 +29,46 @@ from src.design.constructability import (
     evaluate_ordinary_constructability,
     evaluate_smf_longitudinal,
 )
+from src.design.physical_row_slots import select_physical_row_slots
+from src.design.offline_style import (
+    DRAWING_ALLOWED_SPACINGS_MM,
+    DRAWING_POLICY_EXCEPTIONS,
+    DRAWING_POLICY_ID,
+    DRAWING_V3_POLICY_ID,
+    DRAWING_V3_HIGH_SHEAR_SPACING_EXCEPTION,
+    DRAWING_V3_REVISION_ID,
+    DRAWING_V3_SUPPORTED_REVISION_IDS,
+    DRAWING_V3_SOLVER_REVISION_ID,
+    DRAWING_POLICY_PARAMETERS,
+    DRAWING_POLICY_REVISION_ID,
+    DRAWING_POLICY_REVISION_R4_ID,
+    DRAWING_POLICY_REVISION_R5_ID,
+    DRAWING_POLICY_REVISION_R6_ID,
+    DRAWING_POLICY_REVISION_R7_ID,
+    DRAWING_POLICY_REVISION_R8_ID,
+    DRAWING_POLICY_REVISION_R9_ID,
+    DRAWING_POLICY_R4_PARAMETERS,
+    DRAWING_POLICY_R5_PARAMETERS,
+    DRAWING_POLICY_R6_PARAMETERS,
+    DRAWING_POLICY_R7_PARAMETERS,
+    has_two_row_4_3_layout,
+    DrawingPolicyCodeAdapter,
+    OfflineStyleLibrary,
+    StylePolicyError,
+)
 
 
 class DetailingError(ValueError):
     """Raised when a beam cannot be detailed with the selected project rules."""
 
 
+R7_SPAN_CACHE_MAX_ENTRIES = 4096
+
+
 class ReinforcementMode(str, Enum):
     NORMAL = "NORMAL"
+    # Retained as a read-only legacy label for old payloads and audit readers.
+    # No selector or fallback may emit this mode after the total-area policy.
     FACE_TORSION = "FACE_TORSION_MODE"
 
 
@@ -172,7 +207,10 @@ class BarCatalog:
 class ProjectDetailingPolicy:
     """Project choices, separate from code clauses."""
 
-    version: str = "nasiriyah-smf-sb-2026-09-18-SPACING_THEN_DIAMETER_THEN_LEGS"
+    version: str = (
+        "nasiriyah-smf-sb-2026-09-18-SPACING_THEN_DIAMETER_THEN_LEGS_"
+        "2026-09-20-TOTAL_LONGITUDINAL_NO_FACE_TORSION"
+    )
     catalog: BarCatalog = field(default_factory=BarCatalog)
     enabled_diameters_mm: tuple[int, ...] = (10, 12, 16, 20, 25)
     # Both ordinary and SMF members use the same approved discrete spacing
@@ -182,6 +220,15 @@ class ProjectDetailingPolicy:
     smf_shallow_min_stirrup_diameter_mm: int = 12
     preferred_stirrup_diameters_mm: tuple[int, ...] = (10, 12)
     preferred_longitudinal_diameters_mm: tuple[int, ...] = (20, 25)
+    # Empty role catalogues preserve legacy ordering. V3 uses these explicit
+    # role-specific sets while keeping the global union available to skin bars.
+    pb_main_diameters_mm: tuple[int, ...] = ()
+    pb_preferred_main_diameters_mm: tuple[int, ...] = ()
+    sb_main_diameters_mm: tuple[int, ...] = ()
+    sb_preferred_main_diameters_mm: tuple[int, ...] = ()
+    allowed_stirrup_diameters_mm: tuple[int, ...] = ()
+    # Legacy compatibility metadata only.  Current face/skin construction
+    # output never selects torsion diameter or credits Al/2 to it.
     preferred_torsion_face_diameters_mm: tuple[int, ...] = (20, 25, 16, 12, 10)
     default_face_diameter_mm: int = 10
     face_min_depth_mm: float = 800.0
@@ -208,6 +255,14 @@ class ProjectDetailingPolicy:
             raise DetailingError("箍筋优选直径必须属于项目启用目录。")
         if any(value not in enabled for value in self.preferred_longitudinal_diameters_mm):
             raise DetailingError("纵筋优选直径必须属于项目启用目录。")
+        for catalogue, preferred in (
+            (self.pb_main_diameters_mm, self.pb_preferred_main_diameters_mm),
+            (self.sb_main_diameters_mm, self.sb_preferred_main_diameters_mm),
+            (self.allowed_stirrup_diameters_mm, self.preferred_stirrup_diameters_mm),
+        ):
+            if catalogue and (not set(catalogue).issubset(enabled)
+                              or any(value not in catalogue for value in preferred)):
+                raise DetailingError("角色钢筋目录及优选直径必须属于项目启用目录。")
         if any(value not in enabled for value in self.preferred_torsion_face_diameters_mm):
             raise DetailingError("抗扭 face bar 优选直径必须属于项目启用目录。")
         if self.default_face_diameter_mm not in enabled:
@@ -247,6 +302,11 @@ class ProjectDetailingPolicy:
             raise DetailingError("主梁优选箍筋肢数上限必须为不小于 2 的偶数。")
 
     def ordered_stirrup_diameters(self) -> tuple[int, ...]:
+        if self.allowed_stirrup_diameters_mm:
+            return _preferred_order(
+                self.preferred_stirrup_diameters_mm,
+                self.allowed_stirrup_diameters_mm,
+            )
         return _preferred_order(self.preferred_stirrup_diameters_mm, self.enabled_diameters_mm)
 
     def ordered_longitudinal_diameters(self) -> tuple[int, ...]:
@@ -290,15 +350,38 @@ class ProjectDetailingPolicy:
     def minimum_main_diameter_for(self, section: Any) -> int:
         """Return the active primary-flexural diameter floor for one section."""
 
+        role_catalogue = (
+            self.sb_main_diameters_mm if getattr(section, "is_secondary", False)
+            else self.pb_main_diameters_mm
+        )
+        if role_catalogue:
+            floor = min(role_catalogue)
+            if getattr(section, "is_smf", False) and not getattr(section, "is_secondary", False):
+                floor = max(floor, self.smf_end_zone_min_flexural_diameter_mm)
+            return floor
+
         if getattr(section, "is_smf", False):
             return max(self.minimum_main_diameter_mm, self.smf_end_zone_min_flexural_diameter_mm)
         return self.minimum_main_diameter_mm
 
     def ordered_longitudinal_diameters_for(self, section: Any) -> tuple[int, ...]:
+        catalogue = (
+            self.sb_main_diameters_mm if getattr(section, "is_secondary", False)
+            else self.pb_main_diameters_mm
+        )
+        if catalogue:
+            preferred = (
+                self.sb_preferred_main_diameters_mm if getattr(section, "is_secondary", False)
+                else self.pb_preferred_main_diameters_mm
+            )
+            floor = self.minimum_main_diameter_for(section)
+            return tuple(value for value in _preferred_order(preferred, catalogue) if value >= floor)
         floor = self.minimum_main_diameter_for(section)
         return tuple(value for value in self.ordered_longitudinal_diameters() if value >= floor)
 
     def ordered_torsion_face_diameters(self) -> tuple[int, ...]:
+        """Return legacy metadata order; no active solver calls this method."""
+
         return _preferred_order(self.preferred_torsion_face_diameters_mm, self.enabled_diameters_mm)
 
 
@@ -491,6 +574,7 @@ class BeamSection:
     max_aggregate_size_source: str = ""
     profile_source: str = ""
     beam_role: str = "PB"
+    actual_frame_type: str = ""
 
     def __post_init__(self) -> None:
         values = (
@@ -604,6 +688,7 @@ class BeamDetailingInput:
     right_support: SupportFaceContext | None = None
     seismic_context: SeismicDetailingContext | None = None
     yield_locations_mm: tuple[float, ...] = ()
+    parent_context: "ParentSpanContext | None" = None
 
     def __post_init__(self) -> None:
         expected = ("left", "middle", "right")
@@ -744,13 +829,44 @@ class LongitudinalDesign:
 
     @property
     def notation(self) -> str:
-        main = tuple(row for row in self.rows if row.role != "hanger")
-        hanger = tuple(row for row in self.rows if row.role == "hanger")
+        return self.notation_for_face("top")
+
+    @property
+    def physical_notation(self) -> str:
+        """Return rows in physical order: tension face toward the section core."""
+
+        return self._notation_for_rows(self.rows)
+
+    def notation_for_face(self, face: str) -> str:
+        """Format rows in section-reading order without changing physical rows.
+
+        Physical rows are always stored from the tension face inward.  A top
+        face is therefore already in top-to-bottom reading order; a bottom
+        face is read bottom-to-top on the section, so its display order is the
+        reverse of the stored rows.  This is deliberately a presentation
+        operation only and never mutates the row data or credited areas.
+        """
+
+        normalized = str(face).strip().casefold()
+        if normalized not in {"top", "bottom"}:
+            raise DetailingError(f"LONGITUDINAL_FACE_INVALID: {face!r}")
+        rows = self.rows if normalized == "top" else tuple(reversed(self.rows))
+        return self._notation_for_rows(rows)
+
+    @staticmethod
+    def _notation_for_rows(rows: Sequence[PhysicalRow]) -> str:
+        main = tuple(row for row in rows if row.role != "hanger")
+        hanger = tuple(row for row in rows if row.role == "hanger")
         if not main:
-            return "/".join(row.notation for row in self.rows)
+            return "/".join(row.notation for row in rows)
         if len({row.diameter_mm for row in main}) == 1:
             diameter = main[0].diameter_mm
-            text = "/".join(f"{row.count}T{diameter}" for row in main)
+            if len(main) == 1:
+                text = f"{main[0].count}T{diameter}"
+            else:
+                text = f"{sum(row.count for row in main)}T{diameter} " + "/".join(
+                    str(row.count) for row in main
+                )
         else:
             text = "/".join(row.notation for row in main)
         if hanger:
@@ -823,13 +939,300 @@ class BeamDetailingEngine:
         self,
         code_policy: ACI318_14_DetailingPolicy | None = None,
         project_policy: ProjectDetailingPolicy | None = None,
+        *,
+        detailing_policy_id: str = "legacy",
+        detailing_policy_revision_id: str | None = None,
+        rules_path: str | None = None,
+        ranking_mode: str | None = None,
+        layout_dictionary_bank: Any | None = None,
+        layout_dictionary_path: str | Path | None = None,
+        candidate_lookup_provider: Any | None = None,
     ) -> None:
-        self.code = code_policy or ACI318_14_DetailingPolicy()
-        self.project = project_policy or ProjectDetailingPolicy()
+        if detailing_policy_id not in {"legacy", DRAWING_POLICY_ID, DRAWING_V3_POLICY_ID}:
+            raise DetailingError(f"DETAILING_POLICY_UNKNOWN: {detailing_policy_id}")
+        drawing_policy = detailing_policy_id in {DRAWING_POLICY_ID, DRAWING_V3_POLICY_ID}
+        v3_policy = detailing_policy_id == DRAWING_V3_POLICY_ID
+        resolved_ranking_mode = ranking_mode or ("style" if drawing_policy else "legacy")
+        if resolved_ranking_mode not in {"legacy", "style"}:
+            raise DetailingError(f"DETAILING_RANKING_MODE_UNKNOWN: {resolved_ranking_mode}")
+        if not drawing_policy and resolved_ranking_mode != "legacy":
+            raise DetailingError("STYLE_RANKING_REQUIRES_DRAWING_POLICY")
+        if detailing_policy_id == "legacy":
+            if detailing_policy_revision_id is not None:
+                raise DetailingError("POLICY_REVISION_REQUIRES_DRAWING_POLICY")
+            resolved_revision_id = "legacy"
+        elif v3_policy:
+            resolved_revision_id = detailing_policy_revision_id or DRAWING_V3_REVISION_ID
+            if resolved_revision_id not in DRAWING_V3_SUPPORTED_REVISION_IDS:
+                raise DetailingError(f"DETAILING_POLICY_REVISION_UNKNOWN: {resolved_revision_id}")
+        else:
+            resolved_revision_id = detailing_policy_revision_id or DRAWING_POLICY_REVISION_ID
+            if resolved_revision_id not in {
+                DRAWING_POLICY_REVISION_ID,
+                DRAWING_POLICY_REVISION_R4_ID,
+                DRAWING_POLICY_REVISION_R5_ID,
+                DRAWING_POLICY_REVISION_R6_ID,
+                DRAWING_POLICY_REVISION_R7_ID,
+                DRAWING_POLICY_REVISION_R8_ID,
+                DRAWING_POLICY_REVISION_R9_ID,
+            }:
+                raise DetailingError(
+                    f"DETAILING_POLICY_REVISION_UNKNOWN: {resolved_revision_id}"
+                )
+        if layout_dictionary_bank is not None and layout_dictionary_path is not None:
+            raise DetailingError("LAYOUT_DICTIONARY_BANK_AND_PATH_ARE_MUTUALLY_EXCLUSIVE")
+        if layout_dictionary_bank is not None or layout_dictionary_path is not None:
+            if not drawing_policy or v3_policy or resolved_revision_id not in {DRAWING_POLICY_REVISION_R6_ID, DRAWING_POLICY_REVISION_R7_ID, DRAWING_POLICY_REVISION_R8_ID, DRAWING_POLICY_REVISION_R9_ID}:
+                raise DetailingError("LAYOUT_DICTIONARY_REQUIRES_EXPLICIT_R6_ENGINE")
+            from src.design.layout_dictionary import LayoutDictionaryBank
 
-    def design(self, input_data: BeamDetailingInput) -> BeamDetailingResult:
+            if layout_dictionary_path is not None:
+                try:
+                    layout_dictionary_bank = LayoutDictionaryBank.load(layout_dictionary_path)
+                except (OSError, ValueError) as exc:
+                    raise DetailingError(f"LAYOUT_DICTIONARY_BANK_LOAD_FAILED: {exc}") from exc
+            elif not isinstance(layout_dictionary_bank, LayoutDictionaryBank):
+                raise DetailingError("LAYOUT_DICTIONARY_BANK_TYPE_INVALID")
+            if resolved_revision_id in {DRAWING_POLICY_REVISION_R7_ID, DRAWING_POLICY_REVISION_R8_ID, DRAWING_POLICY_REVISION_R9_ID}:
+                bank_revisions = {
+                    item["normalized_context"]["engine"]["detailing_policy_revision_id"]
+                    for item in layout_dictionary_bank.data["entries"]
+                }
+                if bank_revisions != {DRAWING_POLICY_REVISION_R7_ID}:
+                    raise DetailingError(
+                        "LAYOUT_DICTIONARY_REVISION_MISMATCH: fresh R7 requires an R7 bank; "
+                        f"recorded={sorted(bank_revisions)}"
+                    )
+        base_code = code_policy or ACI318_14_DetailingPolicy()
+        if drawing_policy:
+            self.code = (
+                base_code
+                if isinstance(base_code, DrawingPolicyCodeAdapter)
+                else DrawingPolicyCodeAdapter(base_code, policy_id=detailing_policy_id)
+            )
+        else:
+            self.code = base_code
+        base_project = project_policy or ProjectDetailingPolicy()
+        if drawing_policy:
+            revision_project = {
+                "allowed_spacings_mm": DRAWING_ALLOWED_SPACINGS_MM,
+                "smf_allowed_spacings_mm": DRAWING_ALLOWED_SPACINGS_MM,
+            }
+            if v3_policy:
+                revision_project.update(
+                    pb_main_diameters_mm=(20, 25),
+                    pb_preferred_main_diameters_mm=(20, 25),
+                    sb_main_diameters_mm=(12, 16, 20, 25),
+                    sb_preferred_main_diameters_mm=(16, 12, 20, 25),
+                    allowed_stirrup_diameters_mm=(10, 12),
+                    preferred_stirrup_diameters_mm=(10, 12),
+                    max_main_bar_layers=3,
+                    smf_max_longitudinal_ratio=0.02,
+                )
+            if resolved_revision_id in {
+                DRAWING_POLICY_REVISION_R5_ID,
+                DRAWING_POLICY_REVISION_R6_ID,
+                DRAWING_POLICY_REVISION_R7_ID,
+                DRAWING_POLICY_REVISION_R8_ID,
+                DRAWING_POLICY_REVISION_R9_ID,
+            }:
+                revision_project.update(
+                    max_main_bar_layers=3,
+                    smf_max_longitudinal_ratio=0.02,
+                )
+            self.project = replace(base_project, **revision_project)
+        else:
+            self.project = base_project
+        self.detailing_policy_id = detailing_policy_id
+        self.detailing_policy_revision_id = resolved_revision_id
+        self.avoid_two_row_4_3 = (v3_policy or (
+            drawing_policy
+            and resolved_revision_id in {
+                DRAWING_POLICY_REVISION_R4_ID,
+                DRAWING_POLICY_REVISION_R5_ID,
+                DRAWING_POLICY_REVISION_R6_ID,
+                DRAWING_POLICY_REVISION_R7_ID,
+                DRAWING_POLICY_REVISION_R8_ID,
+                DRAWING_POLICY_REVISION_R9_ID,
+            }
+        ))
+        self.uniform_stirrup_diameter_per_span = self.avoid_two_row_4_3
+        self.exact_candidate_state_dedup = (
+            drawing_policy
+            and (v3_policy or resolved_revision_id in {DRAWING_POLICY_REVISION_R6_ID, DRAWING_POLICY_REVISION_R7_ID, DRAWING_POLICY_REVISION_R8_ID, DRAWING_POLICY_REVISION_R9_ID})
+        )
+        self.etabs_design_results_only = v3_policy or resolved_revision_id in {DRAWING_POLICY_REVISION_R7_ID, DRAWING_POLICY_REVISION_R8_ID, DRAWING_POLICY_REVISION_R9_ID}
+        self.coordination_solver_revision_id = (DRAWING_V3_SOLVER_REVISION_ID if v3_policy else "coordination_20261031_indexed_candidates_v1" if resolved_revision_id == DRAWING_POLICY_REVISION_R9_ID else "coordination_20261028_support_pool_v1" if resolved_revision_id == DRAWING_POLICY_REVISION_R8_ID else None)
+        self.independent_skin_rebar = self.etabs_design_results_only
+        self.strict_symmetric_rows = v3_policy
+        # Internal exact-oracle switch; no result is retained between spans.
+        self._r7_span_caches_enabled = self.etabs_design_results_only
+        self._r7_span_caches = None
+        self._r7_cache_statistics = {
+            name: 0
+            for name in (
+                "span_scopes_started", "span_scopes_released",
+                "geometry_requests", "geometry_hits", "geometry_computations",
+                "geometry_failures", "geometry_limit_bypasses", "geometry_entries_stored", "geometry_evictions",
+                "economic_hoops_requests", "economic_hoops_hits", "economic_hoops_computations",
+                "economic_hoops_failures", "economic_hoops_limit_bypasses", "economic_hoops_entries_stored",
+                "economic_region_options_requests", "economic_region_options_hits",
+                "economic_region_options_computations", "economic_region_options_failures",
+                "economic_region_options_limit_bypasses", "economic_region_options_entries_stored",
+                "economic_spacing_requests", "economic_spacing_hits", "economic_spacing_computations",
+                "economic_spacing_failures", "economic_spacing_limit_bypasses", "economic_spacing_entries_stored",
+                "rule_summary_requests", "rule_summary_hits", "rule_summary_computations",
+            )
+        }
+        revision_parameters = (
+            DRAWING_POLICY_R7_PARAMETERS
+            if resolved_revision_id in {DRAWING_POLICY_REVISION_R7_ID, DRAWING_POLICY_REVISION_R8_ID, DRAWING_POLICY_REVISION_R9_ID}
+            else DRAWING_POLICY_R6_PARAMETERS
+            if resolved_revision_id == DRAWING_POLICY_REVISION_R6_ID
+            else DRAWING_POLICY_R5_PARAMETERS
+            if resolved_revision_id == DRAWING_POLICY_REVISION_R5_ID
+            else DRAWING_POLICY_R4_PARAMETERS
+            if self.avoid_two_row_4_3
+            else DRAWING_POLICY_PARAMETERS
+        )
+        self.detailing_policy_parameters = (
+            {
+                **revision_parameters,
+                "allowed_spacings_mm": list(DRAWING_ALLOWED_SPACINGS_MM),
+                "smf_allowed_spacings_mm": list(DRAWING_ALLOWED_SPACINGS_MM),
+                "economic_reference_hoop": dict(revision_parameters["economic_reference_hoop"]),
+                "ranking_order": list(revision_parameters["ranking_order"]),
+            }
+            if drawing_policy
+            else {}
+        )
+        if self.coordination_solver_revision_id:
+            self.detailing_policy_parameters["coordination_solver_revision_id"] = self.coordination_solver_revision_id
+        if v3_policy:
+            self.detailing_policy_parameters["high_shear_spacing_limit"] = "EFFECTIVE_DEPTH_OVER_2"
+        self.detailing_policy_exceptions = (
+            (*DRAWING_POLICY_EXCEPTIONS, DRAWING_V3_HIGH_SHEAR_SPACING_EXCEPTION)
+            if v3_policy
+            else DRAWING_POLICY_EXCEPTIONS if drawing_policy else ()
+        )
+        self.ranking_mode = resolved_ranking_mode
+        self.rules_path = rules_path
+        self.layout_dictionary_bank = layout_dictionary_bank
+        if v3_policy and candidate_lookup_provider is None:
+            from .lookup_catalog import LookupCatalog
+
+            candidate_lookup_provider = LookupCatalog()
+        self.candidate_lookup_provider = candidate_lookup_provider
+        self.candidate_lookup_mode = "auto" if v3_policy else "off"
+        self._style_candidate_pool_cache = {}
+        try:
+            self.offline_style_library = (
+                OfflineStyleLibrary(rules_path, policy_id=detailing_policy_id)
+                if drawing_policy
+                else None
+            )
+        except StylePolicyError as exc:
+            raise DetailingError(str(exc)) from exc
+        if self.offline_style_library is not None:
+            self.detailing_policy_parameters["runtime_rule_filter"] = (
+                self.offline_style_library.effective_rule_summary(self)
+            )
+            if self._r7_span_caches_enabled:
+                self._r7_fixed_rule_summary = (
+                    self.offline_style_library,
+                    self.offline_style_library.rules,
+                    self.offline_style_library._rule_summary_context(self),
+                    self.detailing_policy_parameters["runtime_rule_filter"],
+                )
+
+    @contextmanager
+    def _r7_span_cache_scope(self, input_data):
+        """Share exact computations only while one R7 span is being solved."""
+        if (not self._r7_span_caches_enabled
+                or self.detailing_policy_revision_id not in {
+                    DRAWING_POLICY_REVISION_R7_ID,
+                    DRAWING_POLICY_REVISION_R8_ID,
+                    DRAWING_POLICY_REVISION_R9_ID,
+                    *DRAWING_V3_SUPPORTED_REVISION_IDS,
+                }):
+            yield
+            return
+        previous = self._r7_span_caches
+        if previous is not None and previous["input_data"] == input_data:
+            yield
+            return
+        self._r7_span_caches = {
+            "input_data": input_data,
+            "geometry": OrderedDict(),
+            "economic_hoops": {},
+            "economic_region_options": {},
+            "economic_spacing": {},
+        }
+        self._r7_cache_statistics["span_scopes_started"] += 1
+        try:
+            yield
+        finally:
+            self._r7_span_caches = previous
+            self._r7_cache_statistics["span_scopes_released"] += 1
+
+    def _r7_cache_statistics_snapshot(self):
+        """Cumulative physical-work counters, separate from search budgets."""
+        return dict(self._r7_cache_statistics)
+
+    def legacy_ranking_engine(self) -> "BeamDetailingEngine":
+        """Return this code policy with the legacy candidate ordering."""
+        base_code = self.code.base_policy if isinstance(self.code, DrawingPolicyCodeAdapter) else self.code
+        engine = BeamDetailingEngine(
+            base_code,
+            self.project,
+            detailing_policy_id=self.detailing_policy_id,
+            detailing_policy_revision_id=(
+                self.detailing_policy_revision_id
+                if self.detailing_policy_id == DRAWING_POLICY_ID
+                else None
+            ),
+            rules_path=self.rules_path,
+            ranking_mode="legacy",
+            layout_dictionary_bank=self.layout_dictionary_bank,
+            candidate_lookup_provider=self.candidate_lookup_provider,
+        )
+        engine._r7_span_caches_enabled = self._r7_span_caches_enabled
+        return engine
+
+    @property
+    def layout_dictionary_metadata(self) -> dict[str, Any] | None:
+        if self.layout_dictionary_bank is None:
+            return None
+        return self.layout_dictionary_bank.metadata()
+
+    def design(self, input_data: BeamDetailingInput, *, prepare_coordination_pool: bool = True) -> BeamDetailingResult:
         from src.design.row_solver import design_span
+        if self.etabs_design_results_only:
+            input_data = self._etabs_only_input(input_data)
+            return design_span(input_data, self, prepare_coordination_pool=prepare_coordination_pool)
         return design_span(input_data, self)
+
+    @staticmethod
+    def _etabs_only_demands(regions):
+        return tuple(replace(
+            demand,
+            capacity_shear_av_over_s_mm2_per_mm=None,
+            capacity_shear_demand_kN=None,
+            capacity_shear_source="",
+            capacity_shear_vc_zero=False,
+        ) for demand in regions)
+
+    def _etabs_only_input(self, input_data: BeamDetailingInput) -> BeamDetailingInput:
+        context = input_data.seismic_context
+        if context is not None:
+            context = replace(
+                context, left_mpr_kNm=None, right_mpr_kNm=None,
+                mpr_strength_factor=None, mpr_strength_source="",
+                capacity_shear_final_kN=None,
+                capacity_shear_required_av_over_s_mm2_per_mm=None,
+                capacity_shear_control_source="",
+            )
+        return replace(input_data, regions=self._etabs_only_demands(input_data.regions), seismic_context=context)
 
     def _legacy_design(self, input_data: BeamDetailingInput) -> BeamDetailingResult:
         section = input_data.section
@@ -954,7 +1357,8 @@ class BeamDetailingEngine:
 
         return self._build_row_result(input_data, mode, regions, iteration_count=iteration_count)
 
-    def _build_row_result(self, input_data, mode, regions, *, iteration_count=1):
+    def _build_row_result(self, input_data, mode, regions, *, iteration_count=1,
+                          face_rebar_override: FaceRebarDesign | None = None):
         section = input_data.section
         regions = tuple(
             replace(
@@ -964,10 +1368,12 @@ class BeamDetailingEngine:
             )
             for region in regions
         )
+        self._validate_revision_layout(section, regions)
+        self._validate_total_longitudinal_layout(section, regions)
         iteration_status = "STABLE"
         capacity_review = self._calculate_capacity_review(section, regions, input_data.seismic_context)
         final_seismic_context = self._context_with_capacity_review(input_data.seismic_context, capacity_review)
-        face = self._select_face_rebar(section, input_data.regions, mode)
+        face = face_rebar_override or self._select_face_rebar(section, input_data.regions, mode)
         final_stirrup_diameter = max(region.stirrup.diameter_mm for region in regions)
         final_main_diameter = min(self._final_main_db(region, section) for region in regions)
         effective_depth = min(
@@ -1018,6 +1424,8 @@ class BeamDetailingEngine:
             beam_width_mm=section.width_mm,
             concrete_strength_mpa=section.fc_mpa,
             layout_geometry=layout_geometry,
+            etabs_design_results_only=self.etabs_design_results_only,
+            parent_context=input_data.parent_context,
         )
         smf_checks = (
             evaluate_smf_longitudinal(
@@ -1059,7 +1467,7 @@ class BeamDetailingEngine:
         extra_warnings.extend(
             check.status for check in smf_checks if check.status not in {"PASS", "INFO", "WARN"}
         )
-        if section.is_smf and (
+        if not self.etabs_design_results_only and section.is_smf and (
             final_seismic_context is None
             or (
                 capacity_review is not None
@@ -1072,11 +1480,11 @@ class BeamDetailingEngine:
                 set(
                     (
                         *(
-                            "FLEXURAL_DEMAND_BELOW_AS_MIN"
+                            "TOTAL_LONGITUDINAL_DEMAND_BELOW_AS_MIN"
                             for region in regions
                             if (
-                                region.demand.as_flex_top_mm2 < region.as_min_mm2
-                                or region.demand.as_flex_bottom_mm2 < region.as_min_mm2
+                                region.demand.as_top_total_mm2 < region.as_min_mm2
+                                or region.demand.as_bottom_total_mm2 < region.as_min_mm2
                             )
                         ),
                         *extra_warnings,
@@ -1105,7 +1513,118 @@ class BeamDetailingEngine:
             input_data=input_data,
         )
 
+    @staticmethod
+    def _validate_total_longitudinal_layout(
+        section: BeamSection,
+        regions: Sequence[RegionDetailing],
+    ) -> None:
+        """Fail closed unless every physical top/bottom layout meets Total.
+
+        ``AsFlex`` remains available as an audit field from the ETABS source,
+        but it is intentionally absent from this acceptance path.  Face/skin
+        reinforcement is also excluded because it is not a top/bottom row.
+        """
+
+        for region in regions:
+            checks = (
+                ("top", region.top, region.demand.as_top_total_mm2),
+                ("bottom", region.bottom, region.demand.as_bottom_total_mm2),
+            )
+            for face, design, required in checks:
+                minimum = max(
+                    0.0,
+                    region.as_min_mm2,
+                )
+                if design.provided_area_mm2 + 1e-9 < max(required, minimum):
+                    raise DetailingError(
+                        f"{section.name}/{region.name}/{face}: "
+                        "NO_FEASIBLE_TOTAL_LONGITUDINAL_LAYOUT"
+                    )
+
+    def _validate_revision_layout(
+        self,
+        section: BeamSection,
+        regions: Sequence[RegionDetailing],
+    ) -> None:
+        if self.detailing_policy_revision_id in {
+            DRAWING_POLICY_REVISION_R5_ID,
+            DRAWING_POLICY_REVISION_R6_ID,
+            DRAWING_POLICY_REVISION_R7_ID,
+            DRAWING_POLICY_REVISION_R8_ID,
+            DRAWING_POLICY_REVISION_R9_ID,
+            *DRAWING_V3_SUPPORTED_REVISION_IDS,
+        }:
+            for region in regions:
+                for face in (region.top, region.bottom):
+                    main_layer_count = sum(row.role != "hanger" for row in face.rows)
+                    if main_layer_count > self.project.max_main_bar_layers:
+                        raise DetailingError(
+                            f"{section.name}/{region.name}: "
+                            "POLICY_MAX_MAIN_BAR_LAYERS_EXCEEDED"
+                        )
+        if self.avoid_two_row_4_3:
+            for region in regions:
+                if has_two_row_4_3_layout(region.top.rows) or has_two_row_4_3_layout(region.bottom.rows):
+                    raise DetailingError(
+                        f"{section.name}/{region.name}: POLICY_TWO_ROW_4_3_LAYOUT_PROHIBITED"
+                    )
+        if self.uniform_stirrup_diameter_per_span and len(
+            {region.stirrup.diameter_mm for region in regions}
+        ) > 1:
+            raise DetailingError(
+                f"{section.name}: POLICY_SPAN_STIRRUP_DIAMETER_MUST_BE_UNIFORM"
+            )
+
     def _resolve_physical_layout(
+        self,
+        section: BeamSection,
+        stirrup: StirrupDesign,
+        design: LongitudinalDesign,
+        *,
+        face: str,
+    ) -> LongitudinalDesign:
+        if self.coordination_solver_revision_id in {
+            "coordination_20261031_indexed_candidates_v1",
+            DRAWING_V3_SOLVER_REVISION_ID,
+        } and self.candidate_lookup_provider is not None:
+            return self.candidate_lookup_provider.resolve_geometry(section, stirrup, design, face=face, engine=self)
+        scope = self._r7_span_caches if self._r7_span_caches_enabled else None
+        if scope is None:
+            return self._resolve_physical_layout_uncached(section, stirrup, design, face=face)
+        cache = scope["geometry"]
+        stats = self._r7_cache_statistics
+        stats["geometry_requests"] += 1
+        # Retain full immutable records, including real coordinates, credited
+        # areas, control metadata and the section name used by error messages.
+        key = (section, stirrup, design, face)
+        cached = cache.get(key)
+        if cached is not None:
+            stats["geometry_hits"] += 1
+            cache.move_to_end(key)
+            succeeded, value = cached
+            if succeeded:
+                return value
+            error_type, error_args = value
+            raise error_type(*error_args)
+        stats["geometry_computations"] += 1
+        try:
+            resolved = self._resolve_physical_layout_uncached(section, stirrup, design, face=face)
+        except DetailingError as error:
+            stats["geometry_failures"] += 1
+            if len(cache) >= R7_SPAN_CACHE_MAX_ENTRIES:
+                cache.popitem(last=False)
+                stats["geometry_evictions"] += 1
+            cache[key] = (False, (type(error), error.args))
+            stats["geometry_entries_stored"] += 1
+            raise
+        if len(cache) >= R7_SPAN_CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
+            stats["geometry_evictions"] += 1
+        cache[key] = (True, resolved)
+        stats["geometry_entries_stored"] += 1
+        return resolved
+
+    def _resolve_physical_layout_uncached(
         self,
         section: BeamSection,
         stirrup: StirrupDesign,
@@ -1120,8 +1639,9 @@ class BeamDetailingEngine:
         publish an empty geometry audit.
         """
         cover = section.clear_cover_for_layout_mm(stirrup.diameter_mm, design.maximum_main_diameter_mm)
-        clear_gap = max(25.0, float(section.aggregate_mm) * 4.0 / 3.0,
-                        float(max(row.diameter_mm for row in design.rows)))
+        clear_gap = self.code.minimum_clear_spacing(
+            max(row.diameter_mm for row in design.rows), section.aggregate_mm
+        )
         centers: list[float] = []
         previous_diameter = 0.0
         for row in design.rows:
@@ -1155,12 +1675,29 @@ class BeamDetailingEngine:
             needed = row.count * row.diameter_mm + (row.count - 1) * gap
             if needed > section.width_mm - 2 * (cover + stirrup.diameter_mm) + 1e-9:
                 raise DetailingError(f"{section.name}/{face}: ROW_HORIZONTAL_CLEARANCE_FAILED")
-            feasible = (candidate for candidate in combinations(slots, row.count)
-                        if all(b - a >= row.diameter_mm + gap - 1e-9
-                               for a, b in zip(candidate, candidate[1:])))
-            chosen = min(feasible, key=lambda values: (
-                abs(values[0] + values[-1] - section.width_mm),
-                -(values[-1] - values[0]), values), default=None)
+            if self.strict_symmetric_rows:
+                from src.design.v3_physical_row_slots import select_symmetric_physical_row_slots
+
+                chosen = select_symmetric_physical_row_slots(
+                    slots,
+                    row.count,
+                    row.diameter_mm + gap,
+                    section.width_mm,
+                )
+            elif self.exact_candidate_state_dedup:
+                chosen = select_physical_row_slots(
+                    slots,
+                    row.count,
+                    row.diameter_mm + gap,
+                    section.width_mm,
+                )
+            else:
+                feasible = (candidate for candidate in combinations(slots, row.count)
+                            if all(b - a >= row.diameter_mm + gap - 1e-9
+                                   for a, b in zip(candidate, candidate[1:])))
+                chosen = min(feasible, key=lambda values: (
+                    abs(values[0] + values[-1] - section.width_mm),
+                    -(values[-1] - values[0]), values), default=None)
             if chosen is None:
                 raise DetailingError(f"{section.name}/{face}: ROW_ALIGNMENT_INFEASIBLE")
             row_x.append(chosen)
@@ -1183,7 +1720,11 @@ class BeamDetailingEngine:
             effective_depth_mm=round(effective_depth, 6),
             constraint_sources=tuple(dict.fromkeys((*design.constraint_sources,
                                       basis,
-                                      "ROW_VERTICAL_CLEARANCE_25MM_OR_4/3_AGGREGATE",
+                                      getattr(
+                                          self.code,
+                                          "spacing_rule_id",
+                                          "ROW_VERTICAL_CLEARANCE_25MM_OR_4/3_AGGREGATE",
+                                      ),
                                       "ROW_X_ALIGNED_SLOTS"))),
         )
 
@@ -1200,6 +1741,14 @@ class BeamDetailingEngine:
         capacity-shear evidence.
         """
 
+        if self.etabs_design_results_only:
+            return replace(
+                result,
+                regions=tuple(replace(region, demand=demand) for region, demand in zip(
+                    result.regions, self._etabs_only_demands(tuple(region.demand for region in result.regions))
+                )),
+                capacity_shear_review=self._calculate_capacity_review(result.section, result.regions, result.seismic_context),
+            )
         if not result.section.is_smf or result.seismic_context is None:
             return result
         review = self._calculate_capacity_review(
@@ -1256,6 +1805,14 @@ class BeamDetailingEngine:
         regions: tuple[RegionDetailing, ...],
         context: SeismicDetailingContext | None,
     ) -> CapacityShearReview | None:
+        if self.etabs_design_results_only:
+            return CapacityShearReview(
+                status="ETABS_DESIGN_RESULTS_ONLY",
+                control_source="ETABS_DESIGN_RESULTS_ONLY",
+                source="normalized ETABS design results; VMajorArea / TArea / TLArea",
+                vc_zero=None,
+                message="采用 ETABS 原始剪扭配筋需求；未按所选纵筋计算或验算容量剪力。",
+            )
         if not section.is_smf or context is None or len(regions) < 3:
             return None
         effective_depth = min(
@@ -1299,6 +1856,8 @@ class BeamDetailingEngine:
         review: CapacityShearReview | None,
         input_data: BeamDetailingInput,
     ) -> tuple[BeamRegionDemand, ...]:
+        if self.etabs_design_results_only:
+            return self._etabs_only_demands(base_regions)
         required = review.required_av_over_s_mm2_per_mm if review is not None else None
         affected = self._capacity_region_names(input_data) if required is not None else set()
         return tuple(
@@ -1347,7 +1906,6 @@ class BeamDetailingEngine:
     ) -> tuple[ReinforcementMode, tuple[RegionDetailing, ...]]:
         section = input_data.section
         normal_regions: list[RegionDetailing] = []
-        normal_fails = False
         minimum_main_count = 2 if section.is_secondary else None
         for demand, stirrup in zip(input_data.regions, selected_stirrups):
             effective_depth = self.code.effective_depth(
@@ -1365,7 +1923,7 @@ class BeamDetailingEngine:
                 stirrup.diameter_mm,
                 max_layers=self.project.max_main_bar_layers,
                 hanger_support_count=stirrup.legs if section.is_secondary else None,
-                allow_minimum_credit_hanger=(section.is_secondary and demand.as_flex_top_mm2 <= as_min + 1e-9),
+                allow_minimum_credit_hanger=(section.is_secondary and demand.as_top_total_mm2 <= as_min + 1e-9),
                 top_region=demand.name,
             )
             bottom = self._select_longitudinal(
@@ -1375,10 +1933,13 @@ class BeamDetailingEngine:
                 stirrup.diameter_mm,
                 max_layers=self.project.max_main_bar_layers,
                 hanger_support_count=stirrup.legs if section.is_secondary else None,
-                allow_minimum_credit_hanger=(section.is_secondary and demand.as_flex_bottom_mm2 <= as_min + 1e-9),
+                allow_minimum_credit_hanger=(section.is_secondary and demand.as_bottom_total_mm2 <= as_min + 1e-9),
             )
             if top is None or bottom is None:
-                normal_fails = True
+                raise DetailingError(
+                    f"{section.name}/{demand.name}: "
+                    "NO_FEASIBLE_TOTAL_LONGITUDINAL_LAYOUT"
+                )
             else:
                 normal_regions.append(
                     RegionDetailing(
@@ -1393,20 +1954,11 @@ class BeamDetailingEngine:
                     )
                 )
 
-        mode = ReinforcementMode.FACE_TORSION if normal_fails else ReinforcementMode.NORMAL
-        if mode is ReinforcementMode.NORMAL:
-            regions = tuple(normal_regions)
-        else:
-            regions = tuple(
-                self._redesign_face_region(
-                    section,
-                    demand,
-                    stirrup,
-                    self.project.minimum_main_diameter_for(section),
-                )
-                for demand, stirrup in zip(input_data.regions, selected_stirrups)
-            )
-        return mode, regions
+        # Total top/bottom areas are the sole longitudinal control.  The
+        # historical face-torsion redesign path is intentionally not called;
+        # face/skin reinforcement is generated independently below and cannot
+        # reduce these requirements.
+        return ReinforcementMode.NORMAL, tuple(normal_regions)
 
     def _final_main_db(self, region: RegionDetailing, section: BeamSection | None = None) -> int:
         minimum = (
@@ -1427,6 +1979,8 @@ class BeamDetailingEngine:
         regions: tuple[RegionDetailing, ...],
     ) -> tuple[RegionDetailing, ...]:
         """Recheck every region with its final as-detailed longitudinal db."""
+
+        self._validate_revision_layout(section, regions)
 
         output: list[RegionDetailing] = []
         for region in regions:
@@ -1593,7 +2147,7 @@ class BeamDetailingEngine:
         )
         required = max(region.bottom.required_area_mm2 for region in regions)
         allow_minimum_credit_hanger = section.is_secondary and all(
-            region.as_flex_bottom_mm2 <= region.as_min_mm2 + 1e-9
+            region.demand.as_bottom_total_mm2 <= region.as_min_mm2 + 1e-9
             for region in regions
         )
         coordinated = self._select_longitudinal(
@@ -1809,50 +2363,14 @@ class BeamDetailingEngine:
             maximum_spacing_mm=min(first.maximum_spacing_mm, second.maximum_spacing_mm),
         )
 
-    def _redesign_face_region(
+    def _select_stirrup(
         self,
         section: BeamSection,
         demand: BeamRegionDemand,
-        stirrup: StirrupDesign,
         max_main: int,
-    ) -> RegionDetailing:
-        effective_depth = self.code.effective_depth(section, stirrup.diameter_mm, max_main)
-        as_min = self.code.minimum_longitudinal_area(section.width_mm, effective_depth, section.fc_mpa, section.fy_mpa)
-        minimum_main_count = 2 if section.is_secondary else stirrup.legs
-        hanger_support_count = stirrup.legs if section.is_secondary else None
-        top = self._select_longitudinal(
-            section,
-            max(demand.as_flex_top_mm2, as_min),
-            minimum_main_count,
-            stirrup.diameter_mm,
-            None,
-            hanger_support_count,
-            section.is_secondary and demand.as_flex_top_mm2 <= as_min + 1e-9,
-            top_region=demand.name,
-        )
-        bottom = self._select_longitudinal(
-            section,
-            max(demand.as_flex_bottom_mm2, as_min),
-            minimum_main_count,
-            stirrup.diameter_mm,
-            None,
-            hanger_support_count,
-            section.is_secondary and demand.as_flex_bottom_mm2 <= as_min + 1e-9,
-        )
-        if top is None or bottom is None:
-            raise DetailingError(f"{section.name}/{demand.name}: MIN_FLEXURE_CONFLICT")
-        return RegionDetailing(
-            demand.name,
-            demand,
-            as_min,
-            demand.as_flex_top_mm2,
-            demand.as_flex_bottom_mm2,
-            stirrup,
-            top,
-            bottom,
-        )
-
-    def _select_stirrup(self, section: BeamSection, demand: BeamRegionDemand, max_main: int) -> StirrupDesign:
+        *,
+        fixed_diameter_mm: int | None = None,
+    ) -> StirrupDesign:
         """Select one hoop using spacing, diameter, then leg preferences.
 
         The width band fixes the preferred leg count while the catalogue is
@@ -1904,7 +2422,12 @@ class BeamDetailingEngine:
                 limits,
             )
 
-        for diameter_rank, diameter in enumerate(self.project.ordered_stirrup_diameters()):
+        diameters = (
+            (fixed_diameter_mm,)
+            if fixed_diameter_mm is not None
+            else self.project.ordered_stirrup_diameters()
+        )
+        for diameter_rank, diameter in enumerate(diameters):
             if diameter < self.project.minimum_stirrup_diameter_for(section):
                 continue
             area = self.project.catalog.area(diameter)
@@ -2339,40 +2862,105 @@ class BeamDetailingEngine:
         )
         if clear_cover <= 0:
             return 0
-        return single_layer_max_bars(
+        arguments = (
             section.width_mm,
             clear_cover,
             stirrup_diameter,
             section.aggregate_mm,
             main_diameter,
         )
+        if self.detailing_policy_id == DRAWING_POLICY_ID:
+            return single_layer_max_bars(
+                *arguments,
+                minimum_clear_spacing_override_mm=self.code.minimum_clear_spacing(
+                    main_diameter, section.aggregate_mm
+                ),
+            )
+        return single_layer_max_bars(*arguments)
 
     def _select_face_rebar(
         self, section: BeamSection, demands: Sequence[BeamRegionDemand], mode: ReinforcementMode
     ) -> FaceRebarDesign:
-        max_required = max((demand.al_torsion_mm2 / 2.0 for demand in demands), default=0.0)
+        if self.independent_skin_rebar:
+            return self._construction_face_rebar(section)
         face_length = section.depth_mm - 2.0 * section.face_rebar_boundary_cover_mm
         default_count = max(0, math.ceil(face_length / self.project.face_max_spacing_mm) - 1)
         depth_skin = section.depth_mm >= self.project.face_min_depth_mm
-        if mode is ReinforcementMode.FACE_TORSION:
-            bars = self._select_face_bars(max_required, max(default_count, 1), section, torsion=True)
-            if bars is None:
-                raise DetailingError(f"{section.name}: face rebar 无法满足 Al/2。")
-            face_mode = FaceRebarMode.TORSION_AND_SKIN if depth_skin else FaceRebarMode.TORSION
-            reason = "任一区域 Total 纵筋超过两层；整跨按最大 Al/2"
-            return FaceRebarDesign(face_mode, bars, max_required, bars.total_area_mm2, reason)
         if not depth_skin:
-            return FaceRebarDesign(FaceRebarMode.NOT_APPLICABLE, None, 0.0, 0.0, "h<800 mm 且未触发抗扭 face 模式")
-        bars = self._select_face_bars(0.0, default_count, section, torsion=False)
+            return FaceRebarDesign(
+                FaceRebarMode.NOT_APPLICABLE,
+                None,
+                0.0,
+                0.0,
+                "h<800 mm；face/腰筋仅按构造条件生成",
+            )
+        # Historical note: an earlier implementation allocated Al/2 to face
+        # bars after a two-layer failure and subtracted it from AsTotal.  That
+        # policy is retired.  Face/skin bars are now construction-only output;
+        # they never contribute to top/bottom total-area selection or checks.
+        bars = self._select_face_bars(0.0, default_count, section)
         if bars is None:
             raise DetailingError(f"{section.name}: 构造 face rebar 无法排布。")
-        return FaceRebarDesign(FaceRebarMode.SKIN, bars, 0.0, bars.total_area_mm2, "h>=800 mm 的项目构造 face rebar")
-
-    def _select_face_bars(self, required, minimum_count, section, torsion):
-        diameters = (
-            self.project.ordered_torsion_face_diameters() if torsion else (self.project.default_face_diameter_mm,)
+        return FaceRebarDesign(
+            FaceRebarMode.SKIN,
+            bars,
+            0.0,
+            bars.total_area_mm2,
+            "h>=800 mm 的项目构造 face/腰筋；不抵扣顶底总纵筋面积",
         )
-        diameter = diameters[0]
+
+    def _construction_face_rebar(self, section: BeamSection) -> FaceRebarDesign:
+        from src.design.skin_rebar import SkinConstructionPolicy, select_skin_rebar
+
+        skin = select_skin_rebar(section, SkinConstructionPolicy(
+            minimum_depth_mm=self.project.face_min_depth_mm,
+            diameter_mm=self.project.default_face_diameter_mm,
+            maximum_spacing_mm=self.project.face_max_spacing_mm,
+        ))
+        bars = BarSpec(skin.diameter_mm, skin.count_each_side, (skin.count_each_side,),
+                       math.pi * skin.diameter_mm**2 / 4.0, role="face") if skin.applies else None
+        return FaceRebarDesign(
+            FaceRebarMode.SKIN if skin.applies else FaceRebarMode.NOT_APPLICABLE,
+            bars, 0.0, skin.area_each_side_mm2, skin.message,
+        )
+
+    def _approved_face_rebar_candidates(self, input_data, applicable_rules):
+        """Return the legacy face layout plus physically feasible rule layouts."""
+        section = input_data.section
+        mode = ReinforcementMode.NORMAL
+        output = [self._select_face_rebar(section, input_data.regions, mode)]
+        face_length = section.depth_mm - 2.0 * section.face_rebar_boundary_cover_mm
+        full_catalog = set(self.project.enabled_diameters_mm)
+        for rule in applicable_rules:
+            signature = rule.get("pattern_signature") or {}
+            if signature.get("scope") != "each_side":
+                continue
+            bars = signature.get("bars_per_side_by_diameter")
+            if not isinstance(bars, list) or len(bars) != 1:
+                continue
+            diameter = int(bars[0].get("diameter_mm", 0))
+            count = int(bars[0].get("count", 0))
+            if diameter not in full_catalog or count < 1:
+                continue
+            if face_length <= 0 or face_length / (count + 1) > self.project.face_max_spacing_mm + 1e-9:
+                continue
+            area = self.project.catalog.area(diameter)
+            candidate = FaceRebarDesign(
+                mode=FaceRebarMode.SKIN,
+                bars_each_side=BarSpec(diameter, count, (count,), area, role="face"),
+                required_each_side_mm2=0.0,
+                provided_each_side_mm2=count * area,
+                control_reason=f"APPROVED_STYLE_PATTERN:{rule.get('rule_id', '')}",
+            )
+            if not any(
+                current.notation == candidate.notation and current.mode is candidate.mode
+                for current in output
+            ):
+                output.append(candidate)
+        return tuple(output)
+
+    def _select_face_bars(self, required, minimum_count, section):
+        diameter = self.project.default_face_diameter_mm
         area = self.project.catalog.area(diameter)
         count = max(minimum_count, math.ceil(required / area - 1e-9))
         if count <= 0:
@@ -2461,20 +3049,40 @@ def _refresh_result_physical_layout(
     result: BeamDetailingResult,
     engine: BeamDetailingEngine,
 ) -> BeamDetailingResult:
-    regions = tuple(
-        replace(
-            region,
-            top=engine._resolve_physical_layout(result.section, region.stirrup, region.top, face="top"),
-            bottom=engine._resolve_physical_layout(result.section, region.stirrup, region.bottom, face="bottom"),
+    indexed = getattr(engine, "coordination_solver_revision_id", None) == "coordination_20261031_indexed_candidates_v1"
+    if indexed:
+        refreshed = []
+        for region in result.regions:
+            top = engine._resolve_physical_layout(result.section, region.stirrup, region.top, face="top")
+            bottom = engine._resolve_physical_layout(result.section, region.stirrup, region.bottom, face="bottom")
+            if (top is region.top or top == region.top) and (bottom is region.bottom or bottom == region.bottom):
+                refreshed.append(region)
+            else:
+                refreshed.append(replace(region, top=top, bottom=bottom))
+        regions = tuple(refreshed)
+    else:
+        regions = tuple(
+            replace(
+                region,
+                top=engine._resolve_physical_layout(result.section, region.stirrup, region.top, face="top"),
+                bottom=engine._resolve_physical_layout(result.section, region.stirrup, region.bottom, face="bottom"),
+            )
+            for region in result.regions
         )
-        for region in result.regions
-    )
     for region in regions:
         top_inner = region.top.row_centers_mm[-1] + region.top.rows[-1].diameter_mm / 2
         bottom_inner = region.bottom.row_centers_mm[-1] + region.bottom.rows[-1].diameter_mm / 2
-        gap = max(25.0, 4 * result.section.aggregate_mm / 3)
+        if engine.detailing_policy_id == DRAWING_POLICY_ID:
+            gap = engine.code.minimum_clear_spacing(
+                max(region.top.rows[-1].diameter_mm, region.bottom.rows[-1].diameter_mm),
+                result.section.aggregate_mm,
+            )
+        else:
+            gap = max(25.0, 4 * result.section.aggregate_mm / 3)
         if top_inner + bottom_inner + gap > result.section.depth_mm + 1e-9:
             raise DetailingError(f"{result.beam_name}/{region.name}: TOP_BOTTOM_ROWS_COLLIDE")
+    if indexed and all(new is old for new, old in zip(regions, result.regions)):
+        return result
     return replace(result, regions=regions)
 
 
@@ -2523,11 +3131,9 @@ def _common_support_layout(
         diameters = tuple(
             sorted(diameters, key=lambda value: value > engine.project.sb_top_preferred_max_diameter_mm)
         )
-    max_layers = (
-        None
-        if first_result.mode is ReinforcementMode.FACE_TORSION and second_result.mode is ReinforcementMode.FACE_TORSION
-        else engine.project.max_main_bar_layers
-    )
+    # The retired face-torsion fallback no longer expands the row limit.  All
+    # support coordination is solved against the same total-area catalogue.
+    max_layers = engine.project.max_main_bar_layers
     if not exact_count:
         if not allow_supplement:
             first_minimum = 2 if first_result.section.is_secondary else first_region.stirrup.legs
@@ -2559,7 +3165,7 @@ def _common_support_layout(
             anchor,
             max_layers,
             first_region.stirrup.legs,
-            first_region.as_flex_bottom_mm2 <= first_region.as_min_mm2 + 1e-9,
+            first_region.demand.as_bottom_total_mm2 <= first_region.as_min_mm2 + 1e-9,
         )
         second_output = engine._base_diameter_design(
             second_result.section,
@@ -2568,7 +3174,7 @@ def _common_support_layout(
             anchor,
             max_layers,
             second_region.stirrup.legs,
-            second_region.as_flex_bottom_mm2 <= second_region.as_min_mm2 + 1e-9,
+            second_region.demand.as_bottom_total_mm2 <= second_region.as_min_mm2 + 1e-9,
         )
         return first_output, second_output
 
@@ -2714,6 +3320,92 @@ def coordinate_span_segment(results, option, engine=None):
 
 def coordinate_adjacent_spans(left, right, option, engine=None):
     return coordinate_span_segment((left, right), option, engine)
+
+
+def make_detailing_engine(
+    detailing_policy_id: str = "legacy",
+    rules_path: str | None = None,
+    ranking_mode: str | None = None,
+    *,
+    code_policy: ACI318_14_DetailingPolicy | None = None,
+    project_policy: ProjectDetailingPolicy | None = None,
+    detailing_policy_revision_id: str | None = None,
+    layout_dictionary_bank: Any | None = None,
+    layout_dictionary_path: str | Path | None = None,
+    candidate_lookup_provider: Any | None = None,
+) -> BeamDetailingEngine:
+    """Construct a legacy or approved offline drawing-policy engine.
+
+    The drawing policy is opt-in. Its approved revision uses the frozen style
+    library with the 2026-10-25 stirrup-spacing rules. Comparison runs can ask
+    for legacy ordering while holding those drawing requirements constant.
+    """
+
+    return BeamDetailingEngine(
+        code_policy=code_policy,
+        project_policy=project_policy,
+        detailing_policy_id=detailing_policy_id,
+        detailing_policy_revision_id=detailing_policy_revision_id,
+        rules_path=rules_path,
+        ranking_mode=ranking_mode,
+        layout_dictionary_bank=layout_dictionary_bank,
+        layout_dictionary_path=layout_dictionary_path,
+        candidate_lookup_provider=candidate_lookup_provider,
+    )
+
+
+def make_fresh_detailing_engine(
+    detailing_policy_id: str,
+    *,
+    layout_dictionary_path: str | Path | None = None,
+    candidate_lookup: str = "off",
+    candidate_lookup_output_dir: str | Path | None = None,
+) -> BeamDetailingEngine:
+    """Construct the engine for a fresh production run.
+
+    Historical payload replay continues to use ``make_detailing_engine`` and
+    its recorded revision. New drawing-policy runs explicitly select R7 here.
+    """
+
+    if detailing_policy_id == DRAWING_V3_POLICY_ID:
+        if candidate_lookup not in {"auto", "off"}:
+            raise ValueError("candidate_lookup must be auto or off")
+        if layout_dictionary_path is not None:
+            raise DetailingError("V3_CANDIDATE_LOOKUP_INCOMPATIBLE_WITH_LAYOUT_DICTIONARY")
+        from .lookup_catalog import LookupCatalog
+
+        engine = make_detailing_engine(
+            detailing_policy_id=detailing_policy_id,
+            detailing_policy_revision_id=DRAWING_V3_REVISION_ID,
+            candidate_lookup_provider=LookupCatalog(),
+        )
+        engine.candidate_lookup_mode = candidate_lookup
+        engine.candidate_lookup_output_dir = candidate_lookup_output_dir
+        return engine
+    if detailing_policy_id == DRAWING_POLICY_ID:
+        if candidate_lookup not in {"auto", "off"}:
+            raise ValueError("candidate_lookup must be auto or off")
+        if candidate_lookup == "auto":
+            if layout_dictionary_path is not None:
+                raise DetailingError("CANDIDATE_LOOKUP_INCOMPATIBLE_WITH_LAYOUT_DICTIONARY")
+            from .lookup_catalog import LookupCatalog
+            engine = make_detailing_engine(detailing_policy_id=detailing_policy_id,
+                detailing_policy_revision_id=DRAWING_POLICY_REVISION_R9_ID,
+                candidate_lookup_provider=LookupCatalog())
+            engine.candidate_lookup_output_dir = candidate_lookup_output_dir
+            return engine
+        return make_detailing_engine(
+            detailing_policy_id=detailing_policy_id,
+            detailing_policy_revision_id=DRAWING_POLICY_REVISION_R8_ID,
+            layout_dictionary_path=layout_dictionary_path,
+        )
+    if detailing_policy_id == "legacy" and layout_dictionary_path is None:
+        if candidate_lookup != "off":
+            raise DetailingError("CANDIDATE_LOOKUP_REQUIRES_DRAWING_POLICY")
+        return make_detailing_engine(detailing_policy_id=detailing_policy_id)
+    if layout_dictionary_path is not None:
+        raise DetailingError("LAYOUT_DICTIONARY_REQUIRES_DRAWING_POLICY")
+    raise DetailingError(f"DETAILING_POLICY_UNKNOWN: {detailing_policy_id}")
 
 
 def _preferred_order(preferred: Iterable[int], enabled: Iterable[int]) -> tuple[int, ...]:

@@ -77,7 +77,7 @@ superseded_by:
 4. SB 内部边界均为 PB/确认支承。
 5. SB-SB 交点不出现在 Span 边界集合。
 6. 源 Object 覆盖完整；一对多映射有 `REQUIRES_SPLIT`。
-7. DXF 一跨一条 polyline 且恰有一个同色编号文字。
+7. DXF 一父结构跨一条 polyline 且恰有一个同色父跨编号文字；有多个连续截面段时额外标注沿 I→J 排序的 `.n` 子编号；连续相同截面的 Object 合并为一段，A-B-A 为三段，源 Object 身份保留审计；payload 2.3 采用此语义，旧 2.0/2.1/2.2 payload 不自动重号，但不增加结构跨数或 polyline 数。
 8. 相同输入重复运行的路径、角色、方向和编号一致。
 
 ## 7. 最小验收场景

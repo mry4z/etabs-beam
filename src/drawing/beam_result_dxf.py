@@ -6,28 +6,41 @@ from dataclasses import dataclass, field, replace
 from math import ceil, cos, isfinite, radians, sin
 from pathlib import Path
 import re
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
-from src.core.geometry_extractor import BeamGeometry
+from src.core.geometry_extractor import BeamGeometry, ColumnOutline
+from src.core.numbering import canonical_object_part_id, canonical_span_id
 from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
-from src.design.region_results import group_design_stations
+from src.design.no_design import is_explicit_no_design
+from src.design.region_results import (
+    DRAWING_DETAILING_POLICY_ID,
+    DRAWING_V3_PARTIAL_EVIDENCE_RESEARCH_MODE,
+    LEGACY_DETAILING_POLICY_ID,
+    SUPPORTED_DETAILING_POLICY_IDS,
+    V3_DETAILING_POLICY_ID,
+    build_region_controls,
+    group_design_stations,
+)
 from src.drawing.dxf_export import (
     _header,
     _midpoint,
     _polyline,
+    _column_outline_entities,
     _safe_text,
     _tables,
     _text_angle,
 )
-from src.excel_span_adapter import SpanScheduleMapping, SpanScheduleRecord
+from src.excel_span_adapter import SpanObjectPart, SpanScheduleMapping, SpanScheduleRecord, section_runs
 from src.utils.geometry import Point3D, distance
 
 _RESULT_LAYERS = (
+    ("col", 2),
     ("BEAM_RESULT_LINE", 7),
     ("dsptext_beam", 7),
     ("BEAM_RESULT_ERROR", 1),
 )
 _SECTION_LAYERS = (
+    ("col", 2),
     ("BEAM_SECTION_LINE", 7),
     ("dsptext_beam", 7),
     ("BEAM_SECTION_ERROR", 1),
@@ -87,6 +100,9 @@ class _SpanSegment:
     end: float
     section: str
     section_error: tuple[str, str] | None = None
+    design: BeamDesignResult | None = None
+    object_part_index: int | None = None
+    valid_domain_status: str = ""
 
 
 def export_beam_result_and_section_dxfs(
@@ -96,11 +112,21 @@ def export_beam_result_and_section_dxfs(
     output_dir: str | Path,
     *,
     text_height: float = 50.0,
+    column_outlines: Iterable[ColumnOutline] = (),
+    detailing_policy_id: str | None = None,
+    region_controls_by_row_id: Mapping[str, Mapping[str, Mapping[str, Any] | None] | None] | None = None,
 ) -> BeamDxfExport:
     """Write calculation-result and section-only DXFs for every story."""
 
     if text_height not in {25.0, 50.0, 75.0, 100.0}:
         raise ValueError("DXF text height must be one of 25, 50, 75 or 100 mm.")
+    policy_id = detailing_policy_id or schedule.detailing_policy_id
+    if policy_id not in SUPPORTED_DETAILING_POLICY_IDS:
+        raise ValueError(f"Unsupported detailing policy: {policy_id}")
+    if policy_id != schedule.detailing_policy_id:
+        raise ValueError(
+            f"SPAN_SCHEDULE_POLICY_MISMATCH: schedule={schedule.detailing_policy_id}, drawing={policy_id}"
+        )
     destination = Path(output_dir)
     # ``output_dir`` is the already-resolved model delivery root.  Both DXF
     # families are final per-story deliverables and therefore live directly
@@ -110,6 +136,7 @@ def export_beam_result_and_section_dxfs(
     by_name = dict(beams) if isinstance(beams, Mapping) else {beam.name: beam for beam in beams}
     section_cache: dict[str, tuple[Mapping[str, Any] | None, str]] = {}
     by_story = _group_logical_stories(schedule.records)
+    all_column_outlines = tuple(column_outlines)
 
     result_paths: list[Path] = []
     section_paths: list[Path] = []
@@ -120,11 +147,67 @@ def export_beam_result_and_section_dxfs(
         records = by_story[story]
         result_entities: list[str] = []
         section_entities: list[str] = []
+        story_elevations = {
+            float(point[2]) for record in records for point in record.span.path_points
+        }
+        story_outlines = tuple(
+            outline
+            for outline in all_column_outlines
+            if any(abs(float(outline.support[2]) - elevation) <= 1.0 for elevation in story_elevations)
+        )
+        result_entities.extend(_column_outline_entities(story_outlines))
+        section_entities.extend(_column_outline_entities(story_outlines))
         for record in records:
-            base_span_id = f"{record.span.beam_line_id}-{record.span.span_index}"
-            for segment_index, segment in enumerate(_span_segments(record, by_name), start=1):
-                span_id = f"{base_span_id}#{segment_index}"
+            base_span_id = canonical_span_id(
+                record.span.story,
+                record.span.beam_type,
+                record.span.line_number,
+                record.span.span_index,
+            )
+            part_sections = {
+                part.section.strip()
+                or (part.geometry.section.strip() if part.geometry is not None else "")
+                for part in record.object_parts
+            }
+            part_sections.discard("")
+            mixed_sections = len(part_sections) > 1
+            use_object_parts = mixed_sections and bool(record.object_parts)
+            segments = _object_part_segments(record.object_parts) if use_object_parts else _span_segments(record, by_name)
+            parent_end_depths = None
+            if use_object_parts and segments:
+                parent_domain_segments = tuple(
+                    segment for segment in segments
+                    if segment.valid_domain_status != "OUTSIDE_VALID_STATION_DOMAIN"
+                )
+                first_depth = _segment_section_label(parent_domain_segments[0], section_loader, section_cache)[1] if parent_domain_segments else None
+                last_depth = _segment_section_label(parent_domain_segments[-1], section_loader, section_cache)[1] if parent_domain_segments else None
+                if first_depth is not None and last_depth is not None:
+                    parent_end_depths = (first_depth, last_depth)
+            if use_object_parts:
+                for part in record.object_parts:
+                    if part.geometry is not None:
+                        continue
+                    span_id = part.object_part_id
+                    reason = part.geometry_error or "Object 子段几何无法定位，未绘制该子段。"
+                    code = "OBJECT_PART_GEOMETRY_UNRESOLVED"
+                    for output in ("section", "result"):
+                        issues.append(BeamDxfIssue(output, story, span_id, code, reason))
+                        summaries.append(BeamDxfSpanSummary(output, story, span_id, code, reason))
+            for segment_index, segment in enumerate(segments, start=1):
+                part_index = segment.object_part_index or segment_index
+                span_id = canonical_object_part_id(base_span_id, part_index)
                 points = _flatten(segment.path_points)
+                segment_record = _segment_record(record, segment, span_id)
+                excluded_no_design = _is_excluded_no_design(segment_record.design)
+                if excluded_no_design:
+                    reason = segment_record.design.status_message
+                    summaries.append(
+                        BeamDxfSpanSummary("section", story, span_id, "EXCLUDED_NO_DESIGN", reason)
+                    )
+                    summaries.append(
+                        BeamDxfSpanSummary("result", story, span_id, "EXCLUDED_NO_DESIGN", reason)
+                    )
+                    continue
                 section_label, depth_mm, section_error = _segment_section_label(
                     segment,
                     section_loader,
@@ -150,8 +233,28 @@ def export_beam_result_and_section_dxfs(
                         error=False,
                     )
 
-                segment_record = _segment_record(record, segment, span_id)
-                result_labels, result_error = _result_labels(segment_record, depth_mm)
+                control_row_id = span_id if use_object_parts else base_span_id
+                domain_error = _station_domain_error(record, segment)
+                if (region_controls_by_row_id is not None and control_row_id not in region_controls_by_row_id
+                        and not domain_error):
+                    raise KeyError(f"FROZEN_REGION_CONTROLS_MISSING_ROW: {control_row_id}")
+                if domain_error:
+                    result_labels, result_error = ("", "", "", ""), domain_error
+                elif use_object_parts and parent_end_depths is None:
+                    result_labels, result_error = ("", "", "", ""), (
+                        "PARENT_END_SECTION_UNRESOLVED", "无法确定父跨两端真实截面高度。")
+                elif region_controls_by_row_id is not None:
+                    result_labels, result_error = _result_labels_from_region_controls(
+                        region_controls_by_row_id[control_row_id],
+                        segment_record.geometry.length,
+                        depth_mm,
+                    )
+                else:
+                    result_labels, result_error = _result_labels(
+                        segment_record, depth_mm, detailing_policy_id=policy_id,
+                        parent_length_mm=record.geometry.length, segment_start_mm=segment.start,
+                        parent_end_depths_mm=parent_end_depths,
+                    )
                 if result_error:
                     issues.append(BeamDxfIssue("result", story, span_id, result_error[0], result_error[1]))
                     summaries.append(
@@ -241,6 +344,40 @@ def _result_summary_status(design: BeamDesignResult, code: str) -> str:
     return code
 
 
+def _station_domain_error(
+    record: SpanScheduleRecord,
+    segment: _SpanSegment,
+) -> tuple[str, str] | None:
+    if segment.valid_domain_status == "OUTSIDE_VALID_STATION_DOMAIN":
+        return (
+            "OUTSIDE_VALID_STATION_DOMAIN",
+            "该子段完全位于父跨有效原生站点域之外；不生成需求。",
+        )
+    domain = record.station_domain
+    if domain is None:
+        return None
+    if domain.status != "AVAILABLE":
+        return (
+            "NO_VALID_STATION_DOMAIN",
+            f"没有可构建设计长度的有效站点域：{domain.reason or domain.status}",
+        )
+    if domain.invalid_in_domain_count:
+        return (
+            "VALID_STATION_DOMAIN_SOURCE_STATION_INVALID",
+            "有效站点域内保留了存在无效必需值或源设计错误的原始站点。",
+        )
+    if domain.unmapped_station_count:
+        return (
+            "VALID_STATION_DOMAIN_SOURCE_STATION_UNMAPPED",
+            "存在无法投影到父跨的源站点；不宣称需求输入完整。",
+        )
+    return None
+
+
+def _is_excluded_no_design(design: BeamDesignResult) -> bool:
+    return is_explicit_no_design(design.status, design.status_message)
+
+
 def _span_segments(
     record: SpanScheduleRecord,
     by_name: Mapping[str, BeamGeometry],
@@ -254,7 +391,7 @@ def _span_segments(
     coalesced; a later object with the same section is deliberately not.
     """
 
-    raw_points = tuple(record.span.path_points)
+    raw_points = tuple(record.geometry.path_points or record.span.path_points)
     span_length = _path_length(raw_points)
     if len(raw_points) < 2 or not isfinite(span_length) or span_length <= 0.0:
         section = str(record.geometry.section).strip()
@@ -394,6 +531,29 @@ def _span_segments(
     return tuple(segments)
 
 
+def _object_part_segments(parts: tuple[SpanObjectPart, ...]) -> tuple[_SpanSegment, ...]:
+    segments: list[_SpanSegment] = []
+    for part in section_runs(parts):
+        geometry = part.geometry
+        if geometry is None:
+            continue
+        points = tuple(geometry.path_points) or (geometry.start, geometry.end)
+        segments.append(
+            _SpanSegment(
+                geometry.source_names or (part.source_object,),
+                points,
+                part.parent_offset_mm,
+                part.parent_offset_mm + _path_length(points),
+                geometry.section,
+                None,
+                part.design,
+                part.object_part_index,
+                part.valid_domain_status,
+            )
+        )
+    return tuple(segments)
+
+
 def _segment_section_label(
     segment: _SpanSegment,
     section_loader: Callable[[str], Mapping[str, Any]],
@@ -425,7 +585,7 @@ def _segment_section_label(
 
 
 def _segment_record(record: SpanScheduleRecord, segment: _SpanSegment, span_id: str) -> SpanScheduleRecord:
-    design = _segment_design(record, segment, span_id)
+    design = segment.design or _segment_design(record, segment, span_id)
     span = replace(record.span, source_objects=segment.source_objects, path_points=segment.path_points)
     geometry = replace(
         record.geometry,
@@ -574,8 +734,15 @@ def _section_dimension(section: Mapping[str, Any], *names: str) -> Any:
 def _result_labels(
     record: SpanScheduleRecord,
     depth_mm: float | None,
+    *,
+    detailing_policy_id: str = LEGACY_DETAILING_POLICY_ID,
+    parent_length_mm: float | None = None,
+    segment_start_mm: float = 0.0,
+    parent_end_depths_mm: tuple[float, float] | None = None,
 ) -> tuple[tuple[str, str, str, str], tuple[str, str] | None]:
     design = record.design
+    if _is_excluded_no_design(design):
+        return ("", "", "", ""), None
     if design.status != DesignResultStatus.AVAILABLE:
         status_name = str(getattr(design.status, "name", design.status))
         status_value = str(getattr(design.status, "value", design.status))
@@ -605,17 +772,53 @@ def _result_labels(
                 "INVALID_DESIGN_VALUE",
                 "设计站点位置或面积包含负值、非有限值或超出梁跨。",
             )
-    groups = group_design_stations(design, record.geometry.length, depth_mm)
-    if groups is None:
+    controls = build_region_controls(
+        design,
+        record.geometry.length,
+        depth_mm,
+        detailing_policy_id=detailing_policy_id,
+        parent_length_mm=parent_length_mm,
+        segment_start_mm=segment_start_mm,
+        parent_end_depths_mm=parent_end_depths_mm,
+        projection_mode=(
+            DRAWING_V3_PARTIAL_EVIDENCE_RESEARCH_MODE
+            if detailing_policy_id == V3_DETAILING_POLICY_ID
+            else "APPROVED_REGION_CONTROLS"
+        ),
+    )
+    if detailing_policy_id == V3_DETAILING_POLICY_ID:
+        return _result_labels_from_region_controls(controls, record.geometry.length, depth_mm)
+    groups = group_design_stations(design, record.geometry.length, depth_mm,
+        parent_length_mm=parent_length_mm, segment_start_mm=segment_start_mm,
+        parent_end_depths_mm=parent_end_depths_mm)
+    if controls is None or groups is None:
         return ("", "", "", ""), ("NO_DESIGN_STATIONS", "梁跨没有可用设计站点。")
     if any(not groups[name] for name in ("left", "middle", "right")):
         return ("", "", "", ""), ("NO_DESIGN_STATIONS", "梁跨某个计算区域没有可用设计站点。")
+    if detailing_policy_id in {DRAWING_DETAILING_POLICY_ID, V3_DETAILING_POLICY_ID}:
+        invalid_reason = str(controls["middle"].get("middle_top_window_invalid_reason", "")).strip()
+        if invalid_reason:
+            return ("", "", "", ""), (
+                "DRAWING_MIDDLE_TOP_DEMAND_INVALID",
+                invalid_reason,
+            )
+        if controls["middle"].get("middle_top_window_station_count") == 0:
+            return ("", "", "", ""), (
+                "DRAWING_MIDDLE_QUARTER_NO_STATIONS",
+                "中央四分之一顶筋需求窗口没有原始设计站点。",
+            )
 
     top = tuple(
-        max(station.as_total_top_mm2 for station in groups[name]) / 100.0 for name in ("left", "middle", "right")
+        float(
+            controls[name].get("top_demand_mm2", controls[name]["top_total_mm2"])
+            if name == "middle"
+            else controls[name]["top_total_mm2"]
+        )
+        / 100.0
+        for name in ("left", "middle", "right")
     )
     bottom = tuple(
-        max(station.as_total_bottom_mm2 for station in groups[name]) / 100.0 for name in ("left", "middle", "right")
+        float(controls[name]["bottom_total_mm2"]) / 100.0 for name in ("left", "middle", "right")
     )
     end_stations = (*groups["left"], *groups["right"])
     asv = max(_combined_transverse(station) for station in end_stations) * 10.0
@@ -631,6 +834,89 @@ def _result_labels(
         f"G{_ceil_text(asv, 0.1)}-{_ceil_text(asv0, 0.1)}",
         "-".join(_ceil_text(value, 1.0) for value in top),
         "-".join(_ceil_text(value, 1.0) for value in bottom),
+        f"VT{_ceil_text(ast, 0.1)}-{_ceil_text(ast1, 0.1)}",
+    )
+    return labels, None
+
+
+def _result_labels_from_region_controls(
+    region_controls: Mapping[str, Mapping[str, Any] | None] | None,
+    length_mm: float,
+    depth_mm: float | None,
+) -> tuple[tuple[str, str, str, str], tuple[str, str] | None]:
+    """Render labels only from an explicitly supplied frozen row control view."""
+
+    error_labels = ("", "", "", "")
+    if not isinstance(region_controls, Mapping):
+        return error_labels, ("FROZEN_CONTROL_UNKNOWN", "当前行没有可用的冻结需求控制。")
+    if depth_mm is None or not isfinite(float(depth_mm)) or float(depth_mm) <= 0.0:
+        return error_labels, ("SECTION_DIMENSION_ERROR", "缺少真实梁高，无法划分 2h 区域。")
+    try:
+        length = float(length_mm)
+    except (TypeError, ValueError):
+        length = float("nan")
+    if not isfinite(length) or length <= 0.0:
+        return error_labels, ("INVALID_SPAN_LENGTH", "梁跨长度必须为正有限值。")
+
+    controls: dict[str, Mapping[str, Any]] = {}
+    for name in ("left", "middle", "right"):
+        value = region_controls.get(name)
+        if not isinstance(value, Mapping):
+            return error_labels, ("FROZEN_CONTROL_UNKNOWN", f"冻结需求控制缺少 {name} 区。")
+        controls[name] = value
+        if str(value.get("design_errors", "")).strip():
+            return error_labels, ("FROZEN_CONTROL_INVALID", f"{name} 区冻结需求包含设计错误。")
+
+    if str(controls["middle"].get("middle_top_window_invalid_reason", "")).strip():
+        return error_labels, (
+            "DRAWING_MIDDLE_TOP_DEMAND_INVALID",
+            str(controls["middle"]["middle_top_window_invalid_reason"]),
+        )
+    if controls["middle"].get("middle_top_window_station_count") == 0:
+        return error_labels, ("DRAWING_MIDDLE_QUARTER_NO_STATIONS", "中央顶筋需求窗口没有原始设计站点。")
+
+    def number(region: str, field: str) -> float | None:
+        try:
+            value = float(controls[region][field])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not isfinite(value) or value < 0.0:
+            return None
+        return value
+
+    top_values: list[float] = []
+    bottom_values: list[float] = []
+    for region, field in (("left", "top_total_mm2"), ("middle", "top_demand_mm2"), ("right", "top_total_mm2")):
+        value = number(region, field)
+        if value is None:
+            return error_labels, ("FROZEN_CONTROL_UNKNOWN", f"{region}.{field} 冻结需求未知。")
+        top_values.append(value / 100.0)
+    for region in ("left", "middle", "right"):
+        value = number(region, "bottom_total_mm2")
+        if value is None:
+            return error_labels, ("FROZEN_CONTROL_UNKNOWN", f"{region}.bottom_total_mm2 冻结需求未知。")
+        bottom_values.append(value / 100.0)
+
+    transverse: dict[str, float] = {}
+    for region in ("left", "middle", "right"):
+        av = number(region, "av_over_s")
+        at = number(region, "at_over_s")
+        if av is None or at is None:
+            return error_labels, ("FROZEN_CONTROL_UNKNOWN", f"{region} 区 Av/At 冻结需求未知。")
+        transverse[region] = av + 2.0 * at
+    al_values = [number(region, "al_mm2") for region in ("left", "middle", "right")]
+    at_values = [number(region, "at_over_s") for region in ("left", "middle", "right")]
+    if any(value is None for value in (*al_values, *at_values)):
+        return error_labels, ("FROZEN_CONTROL_UNKNOWN", "冻结扭转需求未知。")
+
+    asv = max(transverse["left"], transverse["right"]) * 10.0
+    asv0 = transverse["middle"] * 10.0 if length > 4.0 * float(depth_mm) else 0.0
+    ast = max(value for value in al_values if value is not None) / 100.0
+    ast1 = max(value for value in at_values if value is not None) * 10.0
+    labels = (
+        f"G{_ceil_text(asv, 0.1)}-{_ceil_text(asv0, 0.1)}",
+        "-".join(_ceil_text(value, 1.0) for value in top_values),
+        "-".join(_ceil_text(value, 1.0) for value in bottom_values),
         f"VT{_ceil_text(ast, 0.1)}-{_ceil_text(ast1, 0.1)}",
     )
     return labels, None

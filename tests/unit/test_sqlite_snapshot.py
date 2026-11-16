@@ -411,6 +411,14 @@ def test_reader_rejects_stale_source_and_changed_snapshot(tmp_path) -> None:
 
 
 def test_sqlite_source_reconstructs_anchored_rigid_supports_and_frame_types(tmp_path) -> None:
+    coordinates = {
+        "P0": (0, 0, 0),
+        "P1": (0, 0, 3000),
+        "P2": (1000, 0, 3000),
+        "P3": (2000, 0, 3000),
+        "P4": (3000, 0, 3000),
+        "P5": (4000, 0, 3000),
+    }
     points = OapiTable(
         "Point Object Connectivity",
         "Point Object Connectivity",
@@ -418,7 +426,18 @@ def test_sqlite_source_reconstructs_anchored_rigid_supports_and_frame_types(tmp_
         1,
         SqliteSnapshotSource.POINT_FIELDS,
         tuple(
-            (name, "No", "T1", "F1", str(index), "No", str(index * 1000), "0", "3000", f"g-{name}")
+            (
+                name,
+                "No",
+                "T1",
+                "F1",
+                str(index),
+                "No",
+                str(coordinates[name][0]),
+                str(coordinates[name][1]),
+                str(coordinates[name][2]),
+                f"g-{name}",
+            )
             for index, name in enumerate(("P0", "P1", "P2", "P3", "P4", "P5"))
         ),
     )
@@ -480,6 +499,11 @@ def test_sqlite_source_reconstructs_anchored_rigid_supports_and_frame_types(tmp_
     )
     source = SqliteSnapshotSource(SnapshotReader(destination))
 
-    assert set(source.column_supports()) == {"P0", "P1", "P2", "P3"}
-    assert source.column_supports()["P3"] == (3000.0, 0.0, 3000.0)
+    assert set(source.column_supports()) == {"P1", "P2", "P3"}
+    assert source.column_supports()["P3"] == (2000.0, 0.0, 3000.0)
+    assert source.raw_table_column_anchor_names() == {"P1"}
+    selected = BeamGeometry("SELECTED", "SELECTED", "F1", "P3", "P4", (2000, 0, 3000), (3000, 0, 3000), "B", 600)
+    assert {link.name for link in source.rigid_links_for_beams([selected])} == {"R1", "R2"}
+    with pytest.raises(SnapshotTableError, match="SNAPSHOT_COLUMN_OUTLINES_UNAVAILABLE"):
+        source.column_outlines()
     assert source.frame_types() == {"B1": "Sway Special", "B2": "Program Determined"}

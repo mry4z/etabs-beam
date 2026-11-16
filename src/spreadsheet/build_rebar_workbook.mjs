@@ -46,6 +46,8 @@ const NON_CURRENT_REVIEW_CODES = new Set([
   "CAPACITY_SHEAR_SOURCE_UNVERIFIED",
   "SMF_DESIGN_SOURCE_UNVERIFIED",
   "SMF_SUPPORT_FACE_UNRESOLVED",
+  "EXCLUDED_NO_DESIGN",
+  "V3_PARENT_CONTINUITY_EXTERNAL_SCOPE_NO_DESIGN",
   "MIXED_SECTION_REVIEW_REQUIRED",
 ]);
 
@@ -105,9 +107,17 @@ function spanCompare(left, right) {
   const leftNumber = Number(left.span_no);
   const rightNumber = Number(right.span_no);
   if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
-    return leftNumber - rightNumber;
+    const spanOrder = leftNumber - rightNumber;
+    if (spanOrder) return spanOrder;
+    const leftPart = Number(left.object_part_index ?? 0);
+    const rightPart = Number(right.object_part_index ?? 0);
+    return (Number.isFinite(leftPart) ? leftPart : 0) - (Number.isFinite(rightPart) ? rightPart : 0);
   }
-  return compareNatural(left.beam_no, right.beam_no);
+  const idOrder = compareNatural(left.parent_span_id ?? left.beam_no, right.parent_span_id ?? right.beam_no);
+  if (idOrder) return idOrder;
+  const leftPart = Number(left.object_part_index ?? 0);
+  const rightPart = Number(right.object_part_index ?? 0);
+  return (Number.isFinite(leftPart) ? leftPart : 0) - (Number.isFinite(rightPart) ? rightPart : 0);
 }
 
 function asNumber(value) {
@@ -132,13 +142,15 @@ function exceptionReason(...rows) {
   const reasons = [];
   const status = String(values.engine_status ?? "").trim();
   if (status && status.toUpperCase() !== "OK" && !NON_CURRENT_REVIEW_CODES.has(status.toUpperCase())) reasons.push(status);
+  if (values.coordination_status === "FEASIBLE_OPTIMIZATION_INCOMPLETE") reasons.push("优化未完成");
   const blocking = String(values.constructability_blocking_statuses ?? "")
     .split(/[;,|]/)
     .map((token) => token.trim())
     .filter((token) => token && !NON_CURRENT_REVIEW_CODES.has(token.toUpperCase()))
     .join("; ");
   if (blocking) reasons.push(blocking);
-  if (values.bottom_reinforcement_strategy !== "FULL_SPAN_UNIFORM_PER_SPAN") {
+  if (status.toUpperCase() !== "EXCLUDED_NO_DESIGN"
+      && values.bottom_reinforcement_strategy !== "FULL_SPAN_UNIFORM_PER_SPAN") {
     reasons.push("LEGACY_REDETAIL_REQUIRED");
   }
   if (values.bottom_uniform_regions_match === false) {
@@ -161,7 +173,7 @@ function rowValues(row) {
   const bottom = row.bottom_uniform_text ?? row.b1 ?? row.eb1 ?? "";
   const values = {
     beam_line: String(row.beam_line ?? ""),
-    beam_no: String(row.beam_no ?? ""),
+    beam_no: `${String(row.beam_no ?? "")}${row.is_cantilever === true ? " (CANTILEVER)" : ""}`,
     width_mm: asNumber(row.width_mm),
     depth_mm: asNumber(row.depth_mm),
     et1: String(row.et1 ?? ""),
@@ -187,6 +199,7 @@ for (let index = 0; index < payload.final_rows.length; index += 1) {
   const raw = payload.raw_rows[index] ?? {};
   const review = payload.review_rows[index] ?? {};
   const source = Object.assign({}, raw, review, final);
+  if (String(source.engine_status ?? "").trim().toUpperCase() === "EXCLUDED_NO_DESIGN") continue;
   entries.push({ values: rowValues(source), source, reason: exceptionReason(raw, review, final) });
 }
 entries.sort((left, right) => {
@@ -344,6 +357,12 @@ const maxRow = Math.max(currentRow, 12);
 const widths = beamType === "PB"
   ? [17, 16, 10, 10, 16, 16, 16, 18, 19, 19, 12, 19]
   : [17, 16, 10, 10, 16, 16, 16, 18, 19, 12, 19];
+widths[1] = entries.reduce(
+  (width, entry) => entry.source.is_cantilever === true
+    ? Math.max(width, String(entry.values.beam_no).length + 2)
+    : width,
+  widths[1],
+);
 for (let index = 0; index < widths.length; index += 1) {
   sheet.getRange(`${colLetter(index)}1:${colLetter(index)}${maxRow}`).format.columnWidth = widths[index];
 }

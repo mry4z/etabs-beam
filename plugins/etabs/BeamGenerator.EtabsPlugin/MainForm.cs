@@ -22,6 +22,7 @@ internal sealed partial class MainForm : Form
     private readonly TextBox _etabsApiText = new();
     private readonly TextBox _outputRootText = new();
     private readonly ComboBox _selectionMode = new();
+    private readonly ComboBox _detailingPolicy = new();
     private readonly CheckBox _exportExcel = new();
     private readonly CheckBox _exportRebarWorkbook = new();
     private readonly CheckBox _exportBeamResultDxf = new();
@@ -62,7 +63,7 @@ internal sealed partial class MainForm : Form
     public int CompletionErrorFlag => _completionErrorFlag;
 
     private static string PluginVersion =>
-        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "unknown";
+        Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown";
 
     private void BuildUi()
     {
@@ -152,7 +153,7 @@ internal sealed partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 3,
-            RowCount = 8,
+            RowCount = 9,
             Padding = new Padding(12),
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 135));
@@ -162,6 +163,7 @@ internal sealed partial class MainForm : Form
         {
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         }
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
@@ -179,7 +181,21 @@ internal sealed partial class MainForm : Form
         _selectionMode.Width = 150;
         layout.Controls.Add(_selectionMode, 1, 4);
 
-        layout.Controls.Add(new Label { Text = "可选成果", TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill }, 0, 5);
+        layout.Controls.Add(new Label { Text = "配筋规则", TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill }, 0, 5);
+        _detailingPolicy.DropDownStyle = ComboBoxStyle.DropDownList;
+        _detailingPolicy.Items.AddRange(new object[]
+        {
+            new DetailingPolicyOption(DetailingPolicyIds.Drawing20260924V1, "新配筋规则（图纸风格）"),
+            new DetailingPolicyOption(DetailingPolicyIds.DrawingV3, "V3（10套推荐快选）"),
+            new DetailingPolicyOption(DetailingPolicyIds.Legacy, "旧配筋规则"),
+        });
+        _detailingPolicy.SelectedIndex = 0;
+        _detailingPolicy.Dock = DockStyle.Left;
+        _detailingPolicy.Width = 240;
+        _toolTip.SetToolTip(_detailingPolicy, "选择本次运行的配筋策略；选择会保存并覆盖 config.yaml。V3为每条梁线搜索不超过10套对齐建议并在推荐集中择优；输入或父跨缺口会标注未知。搜索范围、计数和停止原因见JSON；不证明全域最优或完整规范符合。");
+        layout.Controls.Add(_detailingPolicy, 1, 5);
+
+        layout.Controls.Add(new Label { Text = "可选成果", TextAlign = ContentAlignment.MiddleRight, Dock = DockStyle.Fill }, 0, 6);
         var outputOptions = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -210,7 +226,7 @@ internal sealed partial class MainForm : Form
             new Label { Text = "字高", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(8, 7, 0, 0) },
             _dxfTextHeight,
         });
-        layout.Controls.Add(outputOptions, 1, 5);
+        layout.Controls.Add(outputOptions, 1, 6);
         layout.SetColumnSpan(outputOptions, 2);
 
         var actions = new FlowLayoutPanel
@@ -234,14 +250,14 @@ internal sealed partial class MainForm : Form
         saveSettingsButton.Click += (_, _) => SaveSettings(showConfirmation: true);
         ConfigureTowerActions(actions);
         actions.Controls.AddRange(new Control[] { _runButton, _cancelButton, _openOutputButton, saveSettingsButton });
-        layout.Controls.Add(actions, 1, 6);
+        layout.Controls.Add(actions, 1, 7);
         layout.SetColumnSpan(actions, 2);
 
         _logText.Dock = DockStyle.Fill;
         _logText.ReadOnly = true;
         _logText.Font = new Font("Consolas", 9F);
         _logText.BackColor = Color.FromArgb(250, 250, 250);
-        layout.Controls.Add(_logText, 0, 7);
+        layout.Controls.Add(_logText, 0, 8);
         layout.SetColumnSpan(_logText, 3);
         page.Controls.Add(layout);
         return page;
@@ -277,6 +293,9 @@ internal sealed partial class MainForm : Form
             : installation.ConfigPath;
         _outputRootText.Text = settings.OutputRoot;
         _selectionMode.SelectedItem = settings.SelectionMode is "all" ? "all" : "selected";
+        _detailingPolicy.SelectedItem = _detailingPolicy.Items
+            .OfType<DetailingPolicyOption>()
+            .Single(option => option.Id == settings.DetailingPolicy);
         _exportExcel.Checked = settings.ExportExcel;
         _exportRebarWorkbook.Checked = settings.ExportRebarWorkbook;
         _exportBeamResultDxf.Checked = settings.ExportBeamResultDxf;
@@ -299,7 +318,7 @@ internal sealed partial class MainForm : Form
             PluginSettingsStore.Save(
                 new PluginSettings
                 {
-                    SchemaVersion = 3,
+                    SchemaVersion = 4,
                     ConfigPath = _configText.Text.Trim(),
                     OutputRoot = _outputRootText.Text.Trim(),
                     SelectionMode = Convert.ToString(_selectionMode.SelectedItem) ?? "selected",
@@ -307,6 +326,7 @@ internal sealed partial class MainForm : Form
                     ExportRebarWorkbook = _exportRebarWorkbook.Checked,
                     ExportBeamResultDxf = _exportBeamResultDxf.Checked,
                     DxfTextHeight = Convert.ToInt32(_dxfTextHeight.SelectedItem ?? 100),
+                    DetailingPolicy = SelectedDetailingPolicyId,
                     EtabsApiPath = _etabsApiText.Text.Trim(),
                 }
             );
@@ -320,6 +340,10 @@ internal sealed partial class MainForm : Form
             ShowError("保存插件设置失败", exception);
         }
     }
+
+    private string SelectedDetailingPolicyId =>
+        (_detailingPolicy.SelectedItem as DetailingPolicyOption)?.Id
+        ?? DetailingPolicyIds.Default;
 
     private void UpdateRuntimeMode()
     {
@@ -372,7 +396,8 @@ internal sealed partial class MainForm : Form
             var status = _snapshot.Complete
                 ? $"刷新完成：选择了 {_snapshot.SelectedFrames.Count:N0} 个 Frame。"
                 : $"刷新完成，但存在 {_snapshot.Diagnostics.Count + _snapshot.SelectedFrames.Count(frame => !frame.Complete)} 项诊断。";
-            if (string.IsNullOrWhiteSpace(_etabsApiText.Text) && !string.IsNullOrWhiteSpace(_snapshot.ApiAssemblyPath))
+            if (!string.IsNullOrWhiteSpace(_snapshot.ApiAssemblyPath)
+                && !ApiPathMatchesHost(_etabsApiText.Text, _snapshot))
             {
                 _etabsApiText.Text = _snapshot.ApiAssemblyPath;
             }
@@ -388,6 +413,23 @@ internal sealed partial class MainForm : Form
         finally
         {
             UseWaitCursor = false;
+        }
+    }
+
+    private static bool ApiPathMatchesHost(string path, ModelSnapshot snapshot)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return false;
+            if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(snapshot.ApiAssemblyPath), StringComparison.OrdinalIgnoreCase)) return true;
+            var hostExecutable = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, "ETABS.exe");
+            return File.Exists(hostExecutable)
+                && snapshot.HostMajorVersion.HasValue
+                && FileVersionInfo.GetVersionInfo(hostExecutable).ProductMajorPart == snapshot.HostMajorVersion.Value;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return false;
         }
     }
 
@@ -487,6 +529,7 @@ internal sealed partial class MainForm : Form
             AppendLog($"ETABS PID：{_snapshot.ProcessId}");
             AppendLog($"期望模型：{expectedModel}");
             AppendLog($"输出目录：{_lastOutputDirectory}");
+            AppendLog($"配筋规则：{SelectedDetailingPolicyId}");
             AppendLog("Tower 分配检查是独立可选操作，不阻塞本次梁表生成；如需检查请单独点击“检查 Tower 分配”。");
 
             var request = new WorkflowRunRequest(
@@ -502,7 +545,8 @@ internal sealed partial class MainForm : Form
                 expectedModel,
                 TowerCheck: false,
                 ExportBeamResultDxf: _exportBeamResultDxf.Checked,
-                DxfTextHeight: Convert.ToInt32(_dxfTextHeight.SelectedItem ?? 100)
+                DxfTextHeight: Convert.ToInt32(_dxfTextHeight.SelectedItem ?? 100),
+                DetailingPolicy: SelectedDetailingPolicyId
             );
 
             _runButton.Enabled = false;

@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from openpyxl import load_workbook
+from openpyxl.cell.rich_text import CellRichText
 
 from src.spreadsheet.render_rebar_workbook_xlsx import (
     _display_stirrup,
     _exception_reason,
     _rebar_area_formula,
     _scan_formula_errors,
+    _span_key,
     _stirrup_at_formula,
     render_rebar_workbook_xlsx,
 )
+from src.rebar_workbook import _apply_v3_recommendation_row_audits
 
 
 def _row(
@@ -140,6 +145,15 @@ def test_floor_and_numeric_span_sorting_and_merge_scope(tmp_path: Path) -> None:
     workbook.close()
 
 
+def test_object_part_sorting_is_numeric_not_lexical() -> None:
+    rows = [
+        {"span_no": 2, "object_part_index": 10, "beam_no": "B-2.10"},
+        {"span_no": 2, "object_part_index": 2, "beam_no": "B-2.2"},
+        {"span_no": 1, "object_part_index": 4, "beam_no": "B-1.4"},
+    ]
+    assert [row["beam_no"] for row in sorted(rows, key=_span_key)] == ["B-1.4", "B-2.2", "B-2.10"]
+
+
 def test_exception_candidate_is_retained_red_and_commented(tmp_path: Path) -> None:
     output = _render(tmp_path)
     workbook = load_workbook(output, data_only=False)
@@ -153,6 +167,90 @@ def test_exception_candidate_is_retained_red_and_commented(tmp_path: Path) -> No
     assert "NO_RESULTS" in sheet.cell(row=row, column=2).comment.text
     assert sheet.cell(row=row, column=2).font.color.type == "rgb"
     assert sheet.cell(row=row, column=2).font.color.rgb.endswith("C00000")
+    workbook.close()
+
+
+@pytest.mark.parametrize("beam_type", ["PB", "SB"])
+def test_final_workbook_omits_only_explicit_no_design_rows(
+    tmp_path: Path,
+    beam_type: str,
+) -> None:
+    rows = [
+        _row(beam_type=beam_type, line="B1", status="OK"),
+        _row(beam_type=beam_type, line="B2", status="EXCLUDED_NO_DESIGN"),
+        _row(beam_type=beam_type, line="B3", status="NO_RESULTS", face="N.A."),
+    ]
+    payload = _payload(rows)
+    output = _render(tmp_path, payload, beam_type=beam_type)
+    workbook = load_workbook(output, data_only=True)
+    sheet = workbook["整理梁表"]
+    displayed = [sheet.cell(row=row, column=2).value for row in _data_rows(sheet)]
+
+    assert displayed == ["B1-1", "B3-1"]
+    assert payload["final_rows"][1]["engine_status"] == "EXCLUDED_NO_DESIGN"
+    assert payload["final_rows"][2]["face"] == "N.A."
+    workbook.close()
+
+
+@pytest.mark.parametrize("beam_type", ["PB", "SB"])
+def test_cantilever_span_suffix_is_red_and_preserves_span_number(
+    tmp_path: Path,
+    beam_type: str,
+) -> None:
+    rows = [
+        _row(beam_type=beam_type, story="GF", line="T1-LG-PB23", span=1),
+        _row(beam_type=beam_type, story="GF", line="T1-LG-PB23", span=2),
+        _row(beam_type=beam_type, story="GF", line="T1-LG-PB23", span=3),
+    ]
+    rows[0].update({"is_cantilever": True, "width_mm": 400, "depth_mm": 1000})
+    rows[1].update({"is_cantilever": False, "width_mm": 400, "depth_mm": 750})
+    rows[2].update({"is_cantilever": False, "width_mm": 400, "depth_mm": 750})
+    output = _render(tmp_path, _payload(rows), beam_type=beam_type)
+    workbook = load_workbook(output, data_only=False, rich_text=True)
+    sheet = workbook["整理梁表"]
+    data_rows = [
+        row
+        for row in range(1, sheet.max_row + 1)
+        if str(sheet.cell(row=row, column=2).value).startswith("T1-LG-PB23-")
+    ]
+
+    cantilever_cell = sheet.cell(row=data_rows[0], column=2)
+    assert isinstance(cantilever_cell.value, CellRichText)
+    assert str(cantilever_cell.value) == "T1-LG-PB23-1 (CANTILEVER)"
+    assert cantilever_cell.value[0] == "T1-LG-PB23-1"
+    assert cantilever_cell.value[1].text == " (CANTILEVER)"
+    assert cantilever_cell.value[1].font.color.rgb.endswith("C00000")
+    assert cantilever_cell.font.color.rgb.endswith("000000")
+    assert [str(sheet.cell(row=row, column=2).value) for row in data_rows] == [
+        "T1-LG-PB23-1 (CANTILEVER)",
+        "T1-LG-PB23-2",
+        "T1-LG-PB23-3",
+    ]
+    assert [sheet.cell(row=row, column=4).value for row in data_rows] == [1000, 750, 750]
+    assert sheet.column_dimensions["B"].width >= len(str(cantilever_cell.value)) + 2
+    assert "A7:A9" in {str(value) for value in sheet.merged_cells.ranges}
+    workbook.close()
+
+
+def test_cantilever_marker_keeps_existing_exception_row_comment(tmp_path: Path) -> None:
+    row = _row(status="NO_RESULTS")
+    row["is_cantilever"] = True
+    output = _render(tmp_path, _payload([row]))
+    workbook = load_workbook(output, data_only=False, rich_text=True)
+    sheet = workbook["整理梁表"]
+    data_row = next(
+        row_number
+        for row_number in range(1, sheet.max_row + 1)
+        if str(sheet.cell(row=row_number, column=2).value).startswith("B2-1")
+    )
+    cell = sheet.cell(row=data_row, column=2)
+
+    assert str(cell.value) == "B2-1 (CANTILEVER)"
+    assert cell.font.color.rgb.endswith("C00000")
+    assert cell.value[1].font.color.rgb.endswith("C00000")
+    assert cell.fill.fgColor.rgb.endswith("FCE4D6")
+    assert cell.comment is not None
+    assert "NO_RESULTS" in cell.comment.text
     workbook.close()
 
 
@@ -188,6 +286,69 @@ def test_current_phase_engine_or_layout_issue_still_marks_row_for_review() -> No
     reason = _exception_reason(row)
 
     assert "BEAM_LINE_COORDINATION_BLOCKED" in reason
+
+
+def test_partial_v3_line_keeps_local_bars_and_marks_selected_row_in_xlsx(tmp_path: Path) -> None:
+    row = _row()
+    row.update({
+        "coordination_status": "V3_RECOMMENDATION_SET_ONLY",
+        "mode": "NORMAL",
+        "engine_warnings": "ANCHORAGE_UNVERIFIED",
+        "longitudinal_rows": {
+            region: {
+                "top": [{"count": 4, "diameter_mm": 20, "role": "longitudinal"}],
+                "bottom": [{"count": 4, "diameter_mm": 25, "role": "longitudinal"}],
+            }
+            for region in ("left", "middle", "right")
+        },
+        "region_stirrups": {
+            region: {"diameter_mm": 10, "spacing_mm": 150, "legs": 2}
+            for region in ("left", "middle", "right")
+        },
+    })
+    raw = [dict(row)]
+    review = [dict(row)]
+    review[0]["longitudinal_rows"] = None
+    review[0]["region_stirrups"] = None
+    final = [dict(row)]
+    final[0]["longitudinal_rows"] = None
+    engine = SimpleNamespace(_last_v3_recommendation_row_audits={
+        0: {
+            "v3_recommendation_status": "PARTIAL_RECOMMENDATION_UNKNOWN_ACROSS_UNSOLVED_SPAN",
+            "v3_recommendation_rank": 1,
+            "v3_candidate_count": 10,
+            "v3_candidate_limit": 10,
+        }
+    })
+
+    _apply_v3_recommendation_row_audits(raw, engine, review, final)
+
+    assert final[0]["engine_status"] == "OK"
+    assert final[0]["et1"] == "4T20"
+    assert "ANCHORAGE_UNVERIFIED" in final[0]["engine_warnings"]
+    assert "局部配筋已通过当前方案校核" in final[0]["review_note"]
+    assert "跨缺口连续性未知" in final[0]["review_note"]
+    payload = _payload()
+    payload.update({"raw_rows": raw, "review_rows": review, "final_rows": final})
+
+    output = _render(tmp_path, payload)
+    workbook = load_workbook(output, data_only=False)
+    sheet = workbook["整理梁表"]
+    data_row = next(
+        row_number
+        for row_number in range(1, sheet.max_row + 1)
+        if str(sheet.cell(row=row_number, column=2).value).startswith("B2-1")
+    )
+    span_cell = sheet.cell(row=data_row, column=2)
+    et1_cell = sheet.cell(row=data_row, column=5)
+    b1_cell = sheet.cell(row=data_row, column=8)
+    assert et1_cell.value == "4T20"
+    assert b1_cell.value == "4T25"
+    assert span_cell.fill.fgColor.rgb.endswith("FCE4D6")
+    assert span_cell.comment is not None
+    assert "PARTIAL_RECOMMENDATION_UNKNOWN_ACROSS_UNSOLVED_SPAN" in span_cell.comment.text
+    assert "跨缺口连续性未知" in span_cell.comment.text
+    workbook.close()
 
 
 def test_sb_projection_has_exactly_eleven_columns(tmp_path: Path) -> None:

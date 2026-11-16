@@ -9,7 +9,7 @@ from src.core.etabs_connector import (
     etabs_version_info,
     model_paths_match,
 )
-from src.core.geometry_extractor import GeometryExtractor, expand_rigid_support_points
+from src.core.geometry_extractor import BeamGeometry, GeometryExtractor, expand_rigid_support_points
 
 
 class FakeSapModel:
@@ -200,5 +200,69 @@ def test_column_supports_reads_coordinates_not_limited_to_beam_endpoints(monkeyp
 
     supports = GeometryExtractor(sap).column_supports()
 
-    assert supports == Points.coordinates
+    assert supports == {name: Points.coordinates[name] for name in ("C1", "R1", "R2")}
     assert sap.PointObj.calls == 0
+
+
+def test_rigid_link_geometry_is_anchored_and_scoped_to_selected_beam_endpoints(monkeypatch) -> None:
+    points = {
+        "C0": (0.0, 0.0, -3000.0),
+        "C1": (0.0, 0.0, 0.0),
+        "R1": (500.0, 0.0, 0.0),
+        "R2": (1000.0, 0.0, 0.0),
+        "R3": (1500.0, 0.0, 0.0),
+        "A": (-1000.0, 0.0, 0.0),
+        "B": (2000.0, 0.0, 0.0),
+        "X0": (0.0, 500.0, 0.0),
+        "X1": (500.0, 500.0, 0.0),
+    }
+    connectivity = {
+        "COL": ("C0", "C1"),
+        "RIGID1": ("C1", "R1"),
+        "RIGID2": ("R1", "R2"),
+        "RIGID3": ("R2", "R3"),
+        "RIGID_FREE": ("X0", "X1"),
+        "LEFT": ("A", "C1"),
+        "RIGHT": ("R2", "B"),
+    }
+
+    class Frames:
+        def GetAllFrames(self, *_):
+            names = list(connectivity)
+            point_i = [connectivity[name][0] for name in names]
+            point_j = [connectivity[name][1] for name in names]
+            starts = [points[name] for name in point_i]
+            ends = [points[name] for name in point_j]
+            sections = ["B1019_RIGID" if name.startswith("RIGID") else "B400X600" for name in names]
+            arrays = [
+                names,
+                sections,
+                ["F2"] * len(names),
+                point_i,
+                point_j,
+                [point[0] for point in starts],
+                [point[1] for point in starts],
+                [point[2] for point in starts],
+                [point[0] for point in ends],
+                [point[1] for point in ends],
+                [point[2] for point in ends],
+            ]
+            arrays.extend([[0] * len(names) for _ in range(8)])
+            return 0, len(names), *arrays
+
+        def GetDesignOrientation(self, name, *_):
+            return 0, 1 if name == "COL" else 2
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ETABSv1",
+        SimpleNamespace(eFrameDesignOrientation=SimpleNamespace(Column=1)),
+    )
+    beams = [
+        BeamGeometry("LEFT", "LEFT", "F2", "A", "C1", points["A"], points["C1"], "B400X600", 600),
+        BeamGeometry("RIGHT", "RIGHT", "F2", "R2", "B", points["R2"], points["B"], "B400X600", 600),
+    ]
+    extractor = GeometryExtractor(SimpleNamespace(FrameObj=Frames()))
+
+    assert extractor.column_anchor_names() == {"C1"}
+    assert {link.name for link in extractor.rigid_links_for_beams(beams)} == {"RIGID1", "RIGID2"}

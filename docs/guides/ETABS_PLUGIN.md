@@ -4,7 +4,7 @@ type: guide
 status: current
 owner: project
 created: 2026-07-30
-updated: 2026-09-10
+updated: 2026-10-26
 related:
   - SPEC-PLUGIN-001
   - ADR-0005
@@ -14,14 +14,16 @@ supersedes: []
 superseded_by:
 ---
 
-# ETABS Beam Generator 插件 v0.4.1（v2）
+# ETABS Beam Generator 插件 v0.4.4.6（v2）
 
 本指南适用于 x64 `.NET 8` 便携插件。交互界面全部位于 ETABS 插件 DLL 内；发布包同时携带一个无窗口
 后台计算引擎，已经封装 Python 3.11、项目算法和运行依赖。目标机器只需要 ETABS 22/23，不需要安装
 Python、克隆仓库或配置 `src/cli.py`。普通成果运行不写回、保存、解锁、分析或设计模型。
 
-本文的分塔检查/选择集恢复与单页静态成果说明适用于 v0.4.1 的 v2 完整插件包；旧版 ZIP 不会自动具备这些修改。
+本文的分塔检查/选择集恢复、单页静态成果、纵向钢筋总面积控制、canonical topology 修复、下柱支承识别、柱轮廓 DXF 和配筋规则说明适用于 v0.4.4.7 的 v2 完整插件包；旧版 ZIP 不会自动具备这些修改。
 源码验证边界见[分塔选择集恢复记录](../state/validation/VAL-20260827_TOWER_SELECTION_RECOVERY.md)。
+
+普通只读成果统一使用设计合格对象集和同一个拓扑/编号源：span note、`topology_spans.csv`、basic/final Excel、rebar、`wpj`/截面 DXF 彼此可按梁跨编号对应。`NO_RESULTS`、`SKIPPED`、`API_ERROR` 对象不参与拓扑、跨构造或 PB/SB 表，仅写入 `_data/excluded_non_design_objects.json`。开启梁计算结果 DXF 不会扩大对象集或重新编号。
 
 ## 1. 构建
 
@@ -78,16 +80,16 @@ Python、克隆仓库或配置 `src/cli.py`。普通成果运行不写回、保�
 ## 2. 在 ETABS 中添加
 
 如果已经加载过旧版，先由用户保存工作，再在 `Tools > Add/Show Plugins` 删除旧条目并完全退出所有加载过旧 DLL 的
-ETABS 进程。把 v0.4.1 ZIP **完整解压到新目录**后再重新启动 ETABS。不能只复制 DLL；`workflow/`
+ETABS 进程。把 v0.4.4.6 ZIP **完整解压到新目录**后再重新启动 ETABS。不能只复制 DLL；`workflow/`
 目录是发布包的一部分。
 
 1. 打开目标 ETABS 22/23 模型。
 2. 选择 `Tools > Add/Show Plugins`。
-3. 浏览并选择 **v0.4.1 完整发布目录**中的 `BeamGenerator.EtabsPlugin.dll`。
+3. 浏览并选择 **v0.4.4.6 完整发布目录**中的 `BeamGenerator.EtabsPlugin.dll`。
 4. 点击 `Add`；确认 Status 表明插件已加载。
 5. 从 `Tools` 菜单点击新增的插件项。
 
-首次加载新包时，请核对标题为 `v0.4.1`，配置路径指向新包
+首次加载新包时，请核对标题为 `v0.4.4.6`，配置路径指向新包
 `workflow/BeamGenerator.Workflow/config.yaml`；保留的个人设置可能仍指向旧包。不要自动覆盖确有需要的自定义配置。
 
 首次添加时，ETABS 会调用插件 `Info` 显示用途和版本。插件窗口关闭时会调用
@@ -115,11 +117,50 @@ ETABS 进程。把 v0.4.1 ZIP **完整解压到新目录**后再重新启动 ETA
 - **ETABS API DLL** 路径（默认自动填入当前宿主程序集路径，可浏览选择其它机器的 ETABS 安装位置）；
 - 输出根目录；
 - `selected` 或 `all`；
+- 配筋规则：新安装的插件设置和随包配置默认使用 V3（`drawing_v3`）；也可选择“新配筋规则（图纸风格）”(`drawing_20260924_v1`) 或“旧配筋规则”(`legacy`)。插件保留已有有效设置，并将所选稳定 ID 显式传给本次普通工作流，因此会覆盖所选 `config.yaml` 中的策略值；
 - 是否附加 `--export-excel`（基础梁表）；
 - 是否附加 `--export-rebar-workbook`（主梁、次梁各一个单页静态结果文件，无公式）。
 
 ETABS 仍只加载插件 DLL。`BeamGenerator.Workflow.exe` 不提供第二套 UI，也不需要用户手动运行或注册；
 插件使用 `CreateNoWindow=true` 在后台调用它。该进程隔离避免 Python/.NET 依赖进入 ETABS 宿主进程。
+
+### 4.0 R7 配筋与升级配置
+
+图纸风格规则的稳定 ID 为 `drawing_20260924_v1`，普通 fresh 生成使用 R7 revision
+`drawing_20261025_etabs_only_independent_skin_v1`，允许最多 3 排纵筋及 SMF 最大纵筋配筋率 2.0%。
+需求与抗剪控制采用 ETABS 设计结果；所选纵筋不另行推算 capacity shear，侧筋独立作构造配置且不计强度贡献。
+旧 `legacy` 及历史 R2、R4、R5、R6 的记录策略重放继续保留，不能把旧 R4 重放结果解释成本版 R7 成果。
+
+V3 稳定 ID 为 `drawing_v3`，每条梁线搜索最多 10 套对齐建议并在推荐集中择优，不证明全域最优或完整规范符合。
+明确标记为 No Design 的父跨子段保留为 N.A. 和外部范围审计；未知输入、未求解结果及多个已设计子段的父跨协调仍按复核状态展示。
+
+随包和示例配置默认 `design.rebar_workers: auto`，旧配置缺少该字段时也按 auto 解析：
+`max(1, (os.cpu_count() or 1) - 1)`。本机 8 个逻辑 CPU 请求 7 个进程；实际进程数继续按梁串任务数、
+CPU cap 及 Windows ProcessPoolExecutor 的 61 进程 runtime 上限取最小值。
+手动整数 1..64 和 CLI `--rebar-workers auto|整数` 保留，CLI 优先于配置；核心函数直接调用默认仍为 1。
+R7 使用当前跨内的精确有界缓存与纯查询复用，几何缓存最多 4096 项并按 LRU 淘汰，不读取历史模型选筋结果作缓存。
+
+升级后必须核对“配置文件”实际指向本次解压目录下的
+`workflow/BeamGenerator.Workflow/config.yaml`。个人设置会保留仍存在的旧路径，旧配置若明确指定整数会继续采用该值；缺少 worker 项则自动解析。
+请显式选择新包配置；本版不会代替用户覆盖设置、自定义配置或已加载的 DLL。
+
+此前源码离线验收在当前模型的 L2 六进程首次生成 295.294 秒、独立复测 298.906 秒，计时含引擎初始化、spawn 和配筋返回，
+不含输入/导出；3,118 行三表及逻辑预算与 R7 基线一致，95 行未 OK/待复核状态保留。
+用户已接受此前包内 L2 301.817 秒的耗时，时间继续如实记录，不再作为严格 300 秒发布门禁。
+这项此前源码成绩不是本包二进制成绩或其它模型/硬件保证；本版包内自检、并行重算及 L2 实测单独记录于
+[v0.4.4.4 发布验证](../state/validation/VAL-20261026_ETABS_PLUGIN_V0444.md)。
+
+离线重算默认保留记录的策略和 revision。同策略历史 revision 显式迁移到 fresh R7 时，可使用：
+
+```text
+BeamGenerator.Workflow.exe --replay-payload <ORIGINAL_INPUT_JSON> \
+  --detailing-policy drawing_20260924_v1 --allow-policy-revision-change \
+  --config <NEW_PACKAGE_CONFIG> --output-dir <NEW_OUTPUT_DIRECTORY>
+```
+
+该选项默认关闭，仅在离线重算且显式指定策略时有效；它不绕过跨策略的原始快照门禁，也不改变数值规则。
+本次发布验证采用原始冻结 R4 需求输入生成 R7。直接对已生成 R7 结果二次重放会继承部分旧审计/协调列的既有问题
+另记于发布验证；不要把旧审计签名直接作为当前实际钢筋变化的证据，本版不修改既有 gold。
 
 ### 4.1 ETABS API DLL 定位
 
@@ -149,7 +190,8 @@ Excel 仅展示静态结果，不承担人工改筋后的自动复核；完整�
 ```text
 BeamGenerator.Workflow.exe --pid <ETABS_PID> --expected-model <EDB> \
   --etabs-api <HOST_ETABSV1_DLL> --config <CONFIG> --read-only \
-  --selection <all|selected> --output-dir <NEW_DIR> \
+  --selection <all|selected> --detailing-policy <legacy|drawing_20260924_v1|drawing_v3> \
+  --output-dir <NEW_DIR> \
   [--export-excel] [--export-rebar-workbook]
 ```
 

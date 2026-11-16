@@ -36,6 +36,8 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
         beams = extractor.extract(mode)
         raw_beams = list(beams)
         column_supports = extractor.column_supports()
+        column_anchor_names = extractor.column_anchor_names()
+        rigid_links = extractor.rigid_links_for_beams(raw_beams)
         logger.info("已读取 %s 根梁（模式：%s）。", len(beams), mode)
 
         provider = EtabsResultProvider(sap)
@@ -82,6 +84,8 @@ def run(config: AppConfig, selection_mode: str | None = None) -> Path:
                 story_workers=4,
             ),
             column_support_coordinates=column_supports,
+            column_anchor_names=column_anchor_names,
+            rigid_links=rigid_links,
         )
         span_schedule = build_span_schedule(
             structural_result,

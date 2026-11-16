@@ -4,7 +4,7 @@ type: spec
 status: accepted
 owner: project
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-09-20
 related:
   - SPEC-DET-001
   - REF-API-DESIGN-RESULTS
@@ -26,13 +26,14 @@ superseded_by:
 | DES-R001 | 旧 `GetSummaryResultsBeam.TopArea/BotArea` 对应 `AsTop/AsBot`，不含受扭纵筋，但已受最小配筋率下限控制，只作兼容和审计。 |
 | DES-R002 | `_2.TopArea/BotArea` 对应 `AsTopTotal/AsBotTotal`，必须映射为 `top_total_area/bottom_total_area`，不得命名为纯受弯面积。 |
 | DES-R003 | `VMajorArea` 是抗剪箍筋 `Av/s`；`TTArea` 是抗扭闭合箍单腿 `At/s`；`TLArea` 是总抗扭纵筋 `Al`。 |
-| DES-R004 | 真实受弯排布需求逐 station 计算 `AsFlex=max(0, AsTotal-Al/2)`；不得用不同 station 的区域峰值相减。 |
+| DES-R004 | `AsFlex=max(0, AsTotal-Al/2)` 仍逐 station 计算并保留为审计证据；它不得替代 `AsTopTotal/AsBotTotal` 进入梁纵筋选配或最终验收。不得用不同 station 的区域峰值相减。 |
 | DES-R005 | `TopAreaProvided/BotAreaProvided=-1` 表示不可用，schema/Excel 归一化为空值，同时保留原始证据。 |
 | DES-R006 | 保留原始字段名、station、组合、单位、Req/Min/Provided、error 和 warning。 |
 | DES-R007 | ETABS API `ret=0` 只证明调用成功；设计 error/warning 是工程结果，必须报告，不能吞掉。 |
 | DES-R008 | 空设计数组、未知字段映射和未完成设计必须显式阻塞或报告，不能解释为零需求。 |
 | DES-R009 | 当前配筋策略执行前必须确认设计规范为 ACI 318-14。 |
 | DES-R010 | 所有数值在 `N_mm_C` 上下文读取，并恢复原单位。 |
+| DES-R011 | 梁顶、底纵筋的 `provided_area_mm2` 必须分别不小于对应 `top_total_mm2/bottom_total_mm2`（及 `AsMin`）；无合法布局时显式阻塞，不得输出 `OK`。 |
 
 ## 3. 兼容边界
 
@@ -44,3 +45,6 @@ superseded_by:
 - Provided `-1`、空数组、error/warning 和未知规范均有测试。
 - `AsFlex` 逐 station 计算测试覆盖不同控制 station。
 - Excel/JSON 列名与内部语义一致。
+
+
+`FEASIBLE_OPTIMIZATION_INCOMPLETE` 表示已获得完整协调且通过实际检查的钢筋方案，但预算耗尽后择优尚未完成；`search_complete=false` 记录这一事实。该状态保留实际钢筋和坐标，与未验证的面积 fallback 和无解状态不同。

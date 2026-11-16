@@ -12,6 +12,7 @@ from typing import AbstractSet, Any, Iterable, Mapping
 from src.core.beam_line_span_analyzer import BeamLineSpanResult
 from src.core.etabs_connector import api_values
 from src.core.geometry_extractor import BeamGeometry
+from src.core.numbering import canonical_span_id
 from src.utils.geometry import Point3D
 
 
@@ -31,10 +32,6 @@ class MultiSectionSpanRecord:
     etabs_group_name: str
     status: str = "REQUIRES_SECTION_REVIEW"
     reason: str = "同一结构跨包含多个截面，必须由用户确认 step beam 或调整分跨。"
-
-
-def canonical_span_id(story: str, beam_type: str, line: int, span: int) -> str:
-    return f"{story}-{beam_type}{line}-{span}"
 
 
 def build_multi_section_span_records(

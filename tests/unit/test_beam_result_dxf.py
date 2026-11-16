@@ -6,9 +6,11 @@ import pytest
 from src.core.beam_line_span_analyzer import BeamSpan
 from src.core.geometry_extractor import BeamGeometry
 from src.design.provider import BeamDesignResult, DesignResultStatus, DesignStation
+from src.design.region_results import DRAWING_DETAILING_POLICY_ID
 import src.drawing.beam_result_dxf as beam_result_dxf_module
-from src.drawing.beam_result_dxf import export_beam_result_and_section_dxfs
-from src.excel_span_adapter import SpanScheduleMapping, SpanScheduleRecord
+from src.drawing.beam_result_dxf import _result_labels, export_beam_result_and_section_dxfs
+from src.excel_span_adapter import SpanObjectPart, SpanScheduleMapping, SpanScheduleRecord
+from src.utils.geometry import distance
 
 
 def _beam(name: str = "B1", section: str = "B400X800") -> BeamGeometry:
@@ -74,6 +76,23 @@ def _sample_design() -> BeamDesignResult:
     return BeamDesignResult("F1-PB1-S1", stations)
 
 
+def _frozen_controls(top: tuple[float, float, float], bottom: tuple[float, float, float]):
+    controls = {}
+    for region, top_value, bottom_value in zip(("left", "middle", "right"), top, bottom):
+        controls[region] = {
+            "top_total_mm2": top_value,
+            "top_demand_mm2": top_value,
+            "bottom_total_mm2": bottom_value,
+            "av_over_s": 0.0,
+            "at_over_s": 0.0,
+            "al_mm2": 0.0,
+            "design_errors": "",
+            "middle_top_window_invalid_reason": "",
+            "middle_top_window_station_count": 1,
+        }
+    return controls
+
+
 def test_result_and_section_dxfs_have_sample_labels_and_true_xy_geometry(tmp_path: Path) -> None:
     beam = _beam()
     exported = export_beam_result_and_section_dxfs(
@@ -98,6 +117,263 @@ def test_result_and_section_dxfs_have_sample_labels_and_true_xy_geometry(tmp_pat
     assert z_values and set(z_values) == {"0.000"}
     assert "10000.000" in result
     assert not exported.issues
+
+
+def test_drawing_result_labels_share_upper_middle_top_demand_view() -> None:
+    beam = _beam()
+    design = BeamDesignResult(
+        beam.name,
+        tuple(
+            DesignStation(
+                location,
+                "T",
+                top,
+                "B",
+                1000.0,
+                "V",
+                0.1,
+                "TL",
+                10.0,
+                "TV",
+                0.02,
+                top_total_area=top,
+                top_min_area=top_min,
+                bottom_total_area=1000.0,
+            )
+            for location, top, top_min in (
+                (0.0, 4000.0, 3000.0),
+                (2000.0, 5000.0, 3000.0),
+                (3750.0, 1000.0, 1000.0),
+                (5000.0, 2000.0, 2000.0),
+                (6250.0, 3000.0, 6000.0),
+                (10000.0, 5000.0, 3000.0),
+            )
+        ),
+    )
+    record = SpanScheduleRecord(
+        BeamSpan("F1", "PB", 1, 1, (beam.name,), beam.path_points, False, False),
+        beam,
+        design,
+    )
+
+    legacy, legacy_error = _result_labels(record, 800.0)
+    drawing, drawing_error = _result_labels(
+        record,
+        800.0,
+        detailing_policy_id=DRAWING_DETAILING_POLICY_ID,
+        parent_length_mm=beam.length,
+    )
+
+    assert legacy_error is None
+    assert drawing_error is None
+    assert legacy[1] == "40-50-50"
+    assert drawing[1] == "40-60-50"
+
+
+def test_explicit_frozen_controls_drive_result_text_even_when_source_stations_differ(tmp_path: Path) -> None:
+    beam = _beam()
+    exported = export_beam_result_and_section_dxfs(
+        _schedule(beam, _sample_design()),
+        [beam],
+        lambda _: {"width_mm": 400.0, "depth_mm": 800.0},
+        tmp_path,
+        region_controls_by_row_id={
+            "F1-PB1-1": _frozen_controls((100.0, 200.0, 300.0), (400.0, 500.0, 600.0)),
+        },
+    )
+    result = exported.result_paths[0].read_text(encoding="ascii")
+    assert "1-2-3" in result
+    assert "4-5-6" in result
+    assert "21-12-0" not in result
+
+
+def test_v3_station_path_marks_missing_middle_top_window_unknown() -> None:
+    beam = _beam()
+    template = _sample_design().stations[0]
+    design = BeamDesignResult(
+        "F1-PB1-1",
+        tuple(replace(template, location=location) for location in (0.0, 2000.0, 8000.0, 10000.0)),
+    )
+    span = BeamSpan("F1", "PB", 1, 1, (beam.name,), beam.path_points, False, False)
+    record = SpanScheduleRecord(span, beam, design)
+
+    legacy, legacy_error = _result_labels(record, 800.0)
+    v3, v3_error = _result_labels(
+        record,
+        800.0,
+        detailing_policy_id=beam_result_dxf_module.V3_DETAILING_POLICY_ID,
+        parent_length_mm=beam.length,
+    )
+
+    assert legacy_error is None
+    assert legacy[1]
+    assert v3 == ("", "", "", "")
+    assert v3_error is not None
+    assert v3_error[0] == "DRAWING_MIDDLE_QUARTER_NO_STATIONS"
+
+
+def test_v3_direct_dxf_uses_partial_region_evidence_without_nearest_grouping(monkeypatch) -> None:
+    from src.design.region_results import DRAWING_V3_PARTIAL_EVIDENCE_RESEARCH_MODE
+
+    beam = _beam()
+    template = _sample_design().stations[0]
+    design = BeamDesignResult(
+        "F1-PB1-1",
+        (replace(template, location=0.0), replace(template, location=10000.0)),
+    )
+    span = BeamSpan("F1", "PB", 1, 1, (beam.name,), beam.path_points, False, False)
+    record = SpanScheduleRecord(span, beam, design)
+    original = beam_result_dxf_module.build_region_controls
+    observed = {}
+
+    def capture_controls(*args, **kwargs):
+        observed["projection_mode"] = kwargs.get("projection_mode")
+        controls = original(*args, **kwargs)
+        observed["middle"] = controls["middle"]
+        return controls
+
+    def fail_nearest_grouping(*_args, **_kwargs):
+        raise AssertionError("V3 DXF must consume strict region controls without nearest grouping")
+
+    monkeypatch.setattr(beam_result_dxf_module, "build_region_controls", capture_controls)
+    monkeypatch.setattr(beam_result_dxf_module, "group_design_stations", fail_nearest_grouping)
+    labels, error = _result_labels(
+        record,
+        800.0,
+        detailing_policy_id=beam_result_dxf_module.V3_DETAILING_POLICY_ID,
+        parent_length_mm=beam.length,
+    )
+
+    assert labels == ("", "", "", "")
+    assert error is not None and error[0] == "DRAWING_MIDDLE_QUARTER_NO_STATIONS"
+    assert observed["projection_mode"] == DRAWING_V3_PARTIAL_EVIDENCE_RESEARCH_MODE
+    assert observed["middle"]["region_evidence"]["status"] == "UNKNOWN"
+    assert observed["middle"]["region_evidence"]["station_count"] == 0
+
+
+def test_explicit_no_design_is_n_a_in_dxf_summary_and_emits_no_error_text(tmp_path: Path) -> None:
+    beam = _beam()
+    design = BeamDesignResult(
+        beam.name,
+        status=DesignResultStatus.SKIPPED,
+        status_message="EXCLUDED_NO_DESIGN; GetDesignProcedure=7 No Design",
+    )
+    schedule = replace(
+        _schedule(beam, design),
+        detailing_policy_id=beam_result_dxf_module.V3_DETAILING_POLICY_ID,
+    )
+    exported = export_beam_result_and_section_dxfs(
+        schedule,
+        [beam],
+        lambda _: (_ for _ in ()).throw(AssertionError("excluded section must not be queried")),
+        tmp_path,
+        detailing_policy_id=beam_result_dxf_module.V3_DETAILING_POLICY_ID,
+    )
+
+    assert not exported.issues
+    assert {(summary.output, summary.status) for summary in exported.summaries} == {
+        ("section", "EXCLUDED_NO_DESIGN"),
+        ("result", "EXCLUDED_NO_DESIGN"),
+    }
+    assert _text_entities(exported.result_paths[0].read_text(encoding="ascii")) == []
+    assert _text_entities(exported.section_paths[0].read_text(encoding="ascii")) == []
+    labels, error = _result_labels(
+        SpanScheduleRecord(schedule.records[0].span, beam, design),
+        800.0,
+        detailing_policy_id=beam_result_dxf_module.V3_DETAILING_POLICY_ID,
+    )
+    assert labels == ("", "", "", "")
+    assert error is None
+
+
+def test_no_design_phrase_does_not_hide_a_real_api_failure_section(tmp_path: Path) -> None:
+    beam = _beam()
+    design = BeamDesignResult(
+        beam.name,
+        status=DesignResultStatus.API_ERROR,
+        status_message="No Design API result was available",
+    )
+    exported = export_beam_result_and_section_dxfs(
+        _schedule(beam, design),
+        [beam],
+        lambda _: {"width_mm": 400.0, "depth_mm": 800.0},
+        tmp_path,
+    )
+
+    section = exported.section_paths[0].read_text(encoding="ascii")
+    result_summaries = [summary.status for summary in exported.summaries if summary.output == "result"]
+    assert "400*800" in section
+    assert result_summaries == ["API_ERROR"]
+
+
+def test_mixed_section_no_design_part_has_no_section_or_result_annotation(tmp_path: Path) -> None:
+    first = BeamGeometry(
+        "B1", "B1", "F1", "P1", "P2", (0.0, 0.0, 3000.0), (5000.0, 0.0, 3000.0),
+        "A", 800.0, path_points=((0.0, 0.0, 3000.0), (5000.0, 0.0, 3000.0)),
+    )
+    second = BeamGeometry(
+        "B2", "B2", "F1", "P2", "P3", (5000.0, 0.0, 3000.0), (10000.0, 0.0, 3000.0),
+        "B", 900.0, path_points=((5000.0, 0.0, 3000.0), (10000.0, 0.0, 3000.0)),
+    )
+    parent_id = "F1-PB1-1"
+    span = BeamSpan("F1", "PB", 1, 1, ("B1", "B2"), first.path_points + second.path_points[1:], False, False)
+    normal_design = replace(
+        _sample_design(),
+        stations=tuple(replace(station, location=station.location / 2.0)
+                       for station in _sample_design().stations),
+    )
+    parts = (
+        SpanObjectPart(
+            parent_id,
+            f"{parent_id}.1",
+            1,
+            "B1",
+            first,
+            normal_design,
+            True,
+            False,
+            section="A",
+            parent_offset_mm=0.0,
+        ),
+        SpanObjectPart(
+            parent_id,
+            f"{parent_id}.2",
+            2,
+            "B2",
+            second,
+            BeamDesignResult(
+                "B2",
+                status=DesignResultStatus.SKIPPED,
+                status_message="EXCLUDED_NO_DESIGN; GetDesignProcedure=7 No Design",
+            ),
+            False,
+            True,
+            section="B",
+            parent_offset_mm=5000.0,
+        ),
+    )
+    schedule = SpanScheduleMapping(
+        (SpanScheduleRecord(span, first, normal_design, parts),), {}, {}
+    )
+
+    exported = export_beam_result_and_section_dxfs(
+        schedule,
+        [first, second],
+        lambda section: {"width_mm": 400.0 if section == "A" else 500.0,
+                         "depth_mm": 800.0 if section == "A" else 900.0},
+        tmp_path,
+    )
+
+    section = exported.section_paths[0].read_text(encoding="ascii")
+    result = exported.result_paths[0].read_text(encoding="ascii")
+    result_summaries = {(summary.span_id, summary.status) for summary in exported.summaries
+                        if summary.output == "result"}
+    assert "400*800" in section
+    assert "500*900" not in section
+    assert section.count("\nPOLYLINE\n") == 1
+    assert result.count("\nPOLYLINE\n") == 1
+    assert (f"{parent_id}.1", "AVAILABLE") in result_summaries
+    assert (f"{parent_id}.2", "EXCLUDED_NO_DESIGN") in result_summaries
 
 
 def test_unavailable_units_and_invalid_values_are_red_err_without_zero_fill(tmp_path: Path) -> None:
@@ -200,9 +476,58 @@ def test_mixed_source_sections_are_split_into_independent_subsegments(tmp_path: 
     assert result.count("\nPOLYLINE\n") == 2
     assert not any(issue.code == "MIXED_OR_MISSING_SECTION" for issue in exported.issues)
     assert {item.span_id for item in exported.summaries} == {
-        "F1-PB1-1#1",
-        "F1-PB1-1#2",
+        "F1-PB1-1.1",
+        "F1-PB1-1.2",
     }
+
+
+def test_mixed_section_children_use_their_own_frozen_control_row_ids(tmp_path: Path) -> None:
+    first = BeamGeometry(
+        "B1", "B1", "F1", "P1", "P2", (0.0, 0.0, 3000.0), (5000.0, 0.0, 3000.0),
+        "B400X800", 800.0, path_points=((0.0, 0.0, 3000.0), (5000.0, 0.0, 3000.0)),
+    )
+    second = BeamGeometry(
+        "B2", "B2", "F1", "P2", "P3", (5000.0, 0.0, 3000.0), (10000.0, 0.0, 3000.0),
+        "B500X900", 900.0, path_points=((5000.0, 0.0, 3000.0), (10000.0, 0.0, 3000.0)),
+    )
+    span = BeamSpan(
+        "F1", "PB", 1, 1, ("B1", "B2"),
+        ((0.0, 0.0, 3000.0), (5000.0, 0.0, 3000.0), (10000.0, 0.0, 3000.0)), False, False,
+    )
+    design = _sample_design()
+    parts = (
+        SpanObjectPart("F1-PB1-1", "F1-PB1-1.1", 1, "B1", first, design, True, False,
+                       section="B400X800", parent_offset_mm=0.0),
+        SpanObjectPart("F1-PB1-1", "F1-PB1-1.2", 2, "B2", second, design, False, True,
+                       section="B500X900", parent_offset_mm=5000.0),
+    )
+    schedule = SpanScheduleMapping((SpanScheduleRecord(span, first, design, parts),), {}, {})
+    frozen = {
+        "F1-PB1-1.1": _frozen_controls((100.0, 200.0, 300.0), (400.0, 500.0, 600.0)),
+        "F1-PB1-1.2": _frozen_controls((700.0, 800.0, 900.0), (1000.0, 1100.0, 1200.0)),
+    }
+    exported = export_beam_result_and_section_dxfs(
+        schedule,
+        [first, second],
+        lambda section: {"width_mm": 400.0 if section == "B400X800" else 500.0,
+                         "depth_mm": 800.0 if section == "B400X800" else 900.0},
+        tmp_path,
+        region_controls_by_row_id=frozen,
+    )
+    result = exported.result_paths[0].read_text(encoding="ascii")
+    assert "1-2-3" in result
+    assert "7-8-9" in result
+    assert "21-12-0" not in result
+
+    with pytest.raises(KeyError, match="FROZEN_REGION_CONTROLS_MISSING_ROW: F1-PB1-1.1"):
+        export_beam_result_and_section_dxfs(
+            schedule,
+            [first, second],
+            lambda section: {"width_mm": 400.0 if section == "B400X800" else 500.0,
+                             "depth_mm": 800.0 if section == "B400X800" else 900.0},
+            tmp_path / "missing-child",
+            region_controls_by_row_id={"F1-PB1-1": frozen["F1-PB1-1.1"]},
+        )
 
 
 def test_adjacent_same_section_source_objects_are_merged(tmp_path: Path) -> None:
@@ -294,9 +619,82 @@ def test_missing_design_stations_mark_only_the_affected_subsegment(tmp_path: Pat
     )
     result = exported.result_paths[0].read_text(encoding="ascii")
     statuses = {(item.span_id, item.status) for item in exported.summaries if item.output == "result"}
-    assert ("F1-PB1-1#1", "AVAILABLE") in statuses
-    assert ("F1-PB1-1#2", "NO_RESULTS") in statuses
+    assert ("F1-PB1-1.1", "AVAILABLE") in statuses
+    assert ("F1-PB1-1.2", "NO_RESULTS") in statuses
     assert result.count("GERR-ERR") == 1
+
+
+def test_unresolved_mixed_object_part_keeps_ordinal_and_does_not_fallback_to_merged_parent_design(
+    tmp_path: Path,
+) -> None:
+    points = tuple((value, 0.0, 0.0) for value in (0.0, 2.5, 5.0, 7.5, 10.0))
+    beams = (
+        BeamGeometry("B1", "B1", "F1", "P1", "P2", points[0], points[1], "A"),
+        BeamGeometry("B2", "B2", "F1", "P2", "P3", points[1], points[2], "B"),
+        BeamGeometry("B3", "B3", "F1", "P3", "P4", points[2], points[3], "B"),
+        BeamGeometry("B4", "B4", "F1", "P4", "P5", points[3], points[4], "A"),
+    )
+    span = BeamSpan("F1", "PB", 1, 1, tuple(beam.name for beam in beams), points, False, False)
+    parent_design = _sample_design()
+    parts = tuple(
+        SpanObjectPart(
+            "F1-PB1-1",
+            f"F1-PB1-1.{index}",
+            index,
+            beam.name,
+            None if index == 2 else beam,
+            BeamDesignResult(
+                f"F1-PB1-1.{index}",
+                status=DesignResultStatus.API_ERROR if index == 2 else DesignResultStatus.NO_RESULTS,
+                status_message="geometry unresolved" if index == 2 else "missing part stations",
+                source_objects=(beam.name,),
+            ),
+            index == 1,
+            index == 4,
+            "Object B2 cannot be projected" if index == 2 else "",
+            beam.section,
+            sum(distance(points[i], points[i + 1]) for i in range(index - 1)),
+        )
+        for index, beam in enumerate(beams, start=1)
+    )
+    schedule = SpanScheduleMapping(
+        (SpanScheduleRecord(span, beams[0], parent_design, parts),),
+        {},
+        {},
+    )
+
+    exported = export_beam_result_and_section_dxfs(
+        schedule,
+        beams,
+        lambda section: {"width_mm": 400.0, "depth_mm": 800.0},
+        tmp_path,
+    )
+
+    assert {item.span_id for item in exported.summaries if item.output == "section"} == {
+        "F1-PB1-1.1",
+        "F1-PB1-1.2",
+        "F1-PB1-1.3",
+        "F1-PB1-1.4",
+    }
+    assert {item.span_id for item in exported.summaries if item.output == "result"} == {
+        "F1-PB1-1.1",
+        "F1-PB1-1.2",
+        "F1-PB1-1.3",
+        "F1-PB1-1.4",
+    }
+    unresolved = [issue for issue in exported.issues if issue.span_id == "F1-PB1-1.2"]
+    assert {(issue.output, issue.code) for issue in unresolved} == {
+        ("section", "OBJECT_PART_GEOMETRY_UNRESOLVED"),
+        ("result", "OBJECT_PART_GEOMETRY_UNRESOLVED"),
+    }
+    assert sum(
+        path.read_text(encoding="ascii").count("\nPOLYLINE\n")
+        for path in exported.section_paths
+    ) == 3
+    assert sum(
+        path.read_text(encoding="ascii").count("\nPOLYLINE\n")
+        for path in exported.result_paths
+    ) == 3
 
 
 def test_each_story_gets_independent_result_and_section_files(tmp_path: Path) -> None:

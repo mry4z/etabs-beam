@@ -27,7 +27,7 @@ superseded_by:
 | ID | 要求 |
 |---|---|
 | DRAW-R001 | 交付 Span 编号为 `<楼层>-<PB|SB><梁线序号>-<跨号>`，例如 `F1-PB5-3`；跨号不含 `S`。 |
-| DRAW-R002 | 同一 Span 内 Object 为 `<Span编号>.1`, `.2`, ...，顺序沿 I→J。 |
+| DRAW-R002 | 同一父 Span 内连续相同截面的 Object 合并为截面段，段编号为 `<Span编号>.1`, `.2`, ...，沿 I→J 排序；A-B-A 为三段。源 Object 的 GUID 和名称仍保留用于审计，父 Span 不变。payload 2.3 使用此语义；兼容读取 2.0/2.1/2.2，旧 payload 不自动重号。 |
 | DRAW-R003 | Excel、DXF、JSON、工作簿和写回调用同一 formatter/resolver，不得各自拼接字符串。 |
 | DRAW-R004 | GUID 是身份，编号是可变投影；新增对象导致编号变化时必须生成 added/removed/renumbered 差异。 |
 | DRAW-R005 | 未受 override 影响的楼层和梁线应保持编号稳定。 |

@@ -9,18 +9,21 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from math import atan2, degrees
+from math import atan2, cos, degrees, radians, sin
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping, Sequence
 
 from src.core.beam_line_span_analyzer import BeamSpan
+from src.core.geometry_extractor import ColumnOutline, RigidLinkGeometry
 from src.core.merge_comparison import MergeAngleDifference
-from src.core.section_review import canonical_span_id
+from src.core.numbering import canonical_span_id
 from src.utils.geometry import Point3D, distance
 
 _LAYERS = (
+    ("col", 2),  # yellow column outlines
     ("BEAM_PRIMARY", 2),  # yellow: beam touching a column joint
     ("BEAM_SECONDARY", 3),  # green: beam not touching a column joint
+    ("RIGID_LINK", 1),  # red: true rigid helper geometry used for numbering context
     ("MERGE15_NEW", 1),  # red: newly connected at 15 degrees
     ("MERGE3_GROUP", 5),  # blue: original 3-degree groups
     ("MERGE15_MID", 2),  # yellow: 15-degree logical midpoint
@@ -151,6 +154,27 @@ def _polyline(layer: str, color: int, points: tuple[Point3D, ...]) -> list[str]:
         )
     values.extend(["0", "SEQEND", "8", layer])
     return values
+
+
+def _closed_polyline(layer: str, color: int, vertices: tuple[tuple[float, float], ...]) -> list[str]:
+    """Write a closed classic POLYLINE, suitable for column plan outlines."""
+
+    if len(vertices) < 3:
+        return []
+    values = ["0", "POLYLINE", "8", layer, "62", str(color), "66", "1", "70", "1"]
+    for x, y in vertices:
+        values.extend(
+            ["0", "VERTEX", "8", layer, "10", f"{x:.3f}", "20", f"{y:.3f}", "30", "0.000"]
+        )
+    values.extend(["0", "SEQEND", "8", layer])
+    return values
+
+
+def _column_outline_entities(outlines: Iterable[ColumnOutline]) -> list[str]:
+    entities: list[str] = []
+    for outline in outlines:
+        entities.extend(_closed_polyline("col", 2, outline.vertices))
+    return entities
 
 
 def _circle(layer: str, color: int, center: Point3D, radius: float) -> list[str]:
@@ -444,10 +468,31 @@ def export_structural_spans_dxf(
     model_name: str = "",
     text_height: float = 150.0,
     span_id_resolver: Callable[[BeamSpan], str] | None = None,
+    column_outlines: Iterable[ColumnOutline] = (),
+    rigid_links: Iterable[RigidLinkGeometry] = (),
+    object_part_labels: Mapping[str, Sequence[tuple[str, tuple[Point3D, ...]]]] | None = None,
+    excluded_source_names: Iterable[str] = (),
 ) -> Path:
     """Export one colored polyline and same-colored Arial label per structural span."""
     spans = list(spans)
     entities: list[str] = []
+    span_elevations = {float(point[2]) for span in spans for point in span.path_points}
+    span_stories = {span.story for span in spans}
+    seen_rigid_names: set[str] = set()
+    for link in rigid_links:
+        if link.name in seen_rigid_names or link.story not in span_stories:
+            continue
+        seen_rigid_names.add(link.name)
+        entities.extend(_line("RIGID_LINK", 1, link.start, link.end))
+    supported_outlines = tuple(
+        outline
+        for outline in column_outlines
+        if any(abs(float(outline.support[2]) - elevation) <= 1.0 for elevation in span_elevations)
+    )
+    entities.extend(_column_outline_entities(supported_outlines))
+    object_part_labels = object_part_labels or {}
+    excluded_sources = {str(name) for name in excluded_source_names}
+    has_object_part_labels = False
     for span in spans:
         primary = span.beam_type == "PB"
         layer = "BEAM_PRIMARY" if primary else "BEAM_SECONDARY"
@@ -459,15 +504,39 @@ def export_structural_spans_dxf(
             span.line_number,
             span.span_index,
         )
-        entities.extend(
-            _text(layer, color, _midpoint(span.path_points), label, text_height, _text_angle(span.path_points))
-        )
+        span_sources = tuple(span.source_objects)
+        if not span_sources or not all(name in excluded_sources for name in span_sources):
+            entities.extend(
+                _text(layer, color, _midpoint(span.path_points), label, text_height, _text_angle(span.path_points))
+            )
+        for part_id, raw_points in object_part_labels.get(label, ()):
+            points = tuple(raw_points)
+            if len(points) < 2:
+                continue
+            has_object_part_labels = True
+            midpoint = _midpoint(points)
+            angle = _text_angle(points)
+            theta = radians(angle)
+            offset = text_height * 0.65
+            display_id = f"{part_id} (CANTILEVER)" if span.is_cantilever else part_id
+            entities.extend(
+                _text(
+                    layer,
+                    color,
+                    (midpoint[0] - sin(theta) * offset, midpoint[1] + cos(theta) * offset, midpoint[2]),
+                    display_id,
+                    text_height * 0.48,
+                    angle,
+                )
+            )
     legend_x, legend_y = _legend_origin_from_paths([span.path_points for span in spans])
     legend = [
         f"STRUCTURAL SPANS | total={len(spans)} primary={sum(span.beam_type == 'PB' for span in spans)}",
         "YELLOW BEAM_PRIMARY = PB span; GREEN BEAM_SECONDARY = SB span",
         "Every POLYLINE is one support-defined span; labels use ARIAL",
     ]
+    if has_object_part_labels:
+        legend.append("Dotted IDs identify source Object parts; each remains within its parent Span")
     for offset, value in enumerate(legend):
         entities.extend(
             _text(

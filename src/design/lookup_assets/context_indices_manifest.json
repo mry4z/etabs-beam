@@ -1,0 +1,73 @@
+{
+  "format": "beam-row-generic-context-index-manifest@1",
+  "description": "Exact candidate interval indices for normalized physical and policy contexts; no beam identifiers, beam lengths, calculated demands, chosen layouts or solved results are stored.",
+  "context_source": "Distinct physical contexts observed in the supplied model, then independently compiled for all finite nonnegative demands; these are exact reusable contexts, not model solution results.",
+  "context_count": 1705,
+  "profiles": {
+    "OMF": 16,
+    "NON_SWAY": 1199,
+    "SMF": 450,
+    "IMF": 40
+  },
+  "widths_mm": [
+    200,
+    300,
+    400,
+    500,
+    550,
+    600,
+    700
+  ],
+  "first_diameter_context_counts": {
+    "None": 538,
+    "20": 439,
+    "25": 439,
+    "16": 289
+  },
+  "matching": "Complete normalized section, material, policy, hoop and candidate controls must match. Missing contexts require exact preparation.",
+  "limitations": "Observed single-hoop contexts only; parent combined hoops and unseen or nonstandard conditions are not claimed.",
+  "files": [
+    {
+      "path": "context_indices.jsonl.xz",
+      "bytes": 424108,
+      "uncompressed_bytes": 20942469,
+      "sha256_uncompressed": "b78430d2b2841beb726c742f75e934c2071fce00924f7bed1e828d50c81d8ed9"
+    },
+    {
+      "path": "context_indices_first.jsonl.xz",
+      "bytes": 313448,
+      "uncompressed_bytes": 15958100,
+      "sha256_uncompressed": "0b87aa39d00ffef07b8c2d4a311accc748a978d574b439de086f6187a1ca5444"
+    },
+    {
+      "path": "context_indices_first16.jsonl.xz",
+      "bytes": 118708,
+      "uncompressed_bytes": 6124950,
+      "sha256_uncompressed": "e030f998600e5d3fc68982787e94212d9a9838cc3371b734495a8684d0253c43"
+    },
+    {
+      "path": "context_indices_generic_l1.jsonl.xz",
+      "bytes": 28784,
+      "contexts": 170,
+      "source": "Exact contexts collected during the L1 run preparation, prior to solving.",
+      "uncompressed_bytes": 1785428,
+      "sha256_uncompressed": "50edc1850348dbb1797a14e5cf5e5c688acdb87d1c0d5b150a93279974a57b4a"
+    },
+    {
+      "path": "context_indices_generic_all.jsonl.xz",
+      "bytes": 294416,
+      "contexts": 325,
+      "source": "Exact contexts collected during full-input preparation, prior to solving.",
+      "uncompressed_bytes": 23734357,
+      "sha256_uncompressed": "3974bae8a4b452c46ddedcc648ee392031bddf274c5d4e941f2b2a34089ff1de"
+    }
+  ],
+  "materials_and_cover": {
+    "clear_cover_mm": 40,
+    "aggregate_mm": 25,
+    "fc_mpa": 25,
+    "fy_mpa": 420,
+    "fyt_mpa": 420
+  },
+  "compression": "XZ (LZMA preset 6); JSONL index shards only"
+}

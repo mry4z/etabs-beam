@@ -45,6 +45,12 @@ class DesignStation:
     source_object: str = ""
     units: str = "N_mm_C"
     result_source: str = ""
+    # Read-time provenance for station-domain projections.  Raw provider
+    # results leave these unset; span adapters fill them without losing the
+    # native ETABS station coordinate.
+    native_location_mm: float | None = None
+    parent_location_mm: float | None = None
+    station_projection_error: str = ""
 
     @property
     def as_total_top_mm2(self) -> float:

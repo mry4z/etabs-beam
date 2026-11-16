@@ -103,6 +103,24 @@ internal sealed class PluginSettings
     public bool ExportBeamResultDxf { get; set; }
 
     public int DxfTextHeight { get; set; } = 100;
+
+    public string DetailingPolicy { get; set; } = DetailingPolicyIds.Default;
+}
+
+internal static class DetailingPolicyIds
+{
+    public const string Legacy = "legacy";
+    public const string Drawing20260924V1 = "drawing_20260924_v1";
+    public const string DrawingV3 = "drawing_v3";
+    public const string Default = DrawingV3;
+
+    public static bool IsValid(string? value) =>
+        value is Legacy or Drawing20260924V1 or DrawingV3;
+}
+
+internal sealed record DetailingPolicyOption(string Id, string Label)
+{
+    public override string ToString() => Label;
 }
 
 internal sealed record WorkflowRunRequest(
@@ -122,5 +140,6 @@ internal sealed record WorkflowRunRequest(
     bool TowerCreateGroups = false,
     string TowerPlanPath = "",
     bool ExportBeamResultDxf = false,
-    int DxfTextHeight = 100
+    int DxfTextHeight = 100,
+    string DetailingPolicy = DetailingPolicyIds.Default
 );

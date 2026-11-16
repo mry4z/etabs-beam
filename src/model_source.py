@@ -8,7 +8,13 @@ from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 from src.core.etabs_connector import api_values, model_paths_match
 from src.core.etabs_tower import EtabsTowerReader
 from src.core.tower_assignment import TowerAssignmentReport
-from src.core.geometry_extractor import BeamGeometry, GeometryExtractor, SelectionError
+from src.core.geometry_extractor import (
+    BeamGeometry,
+    ColumnOutline,
+    GeometryExtractor,
+    RigidLinkGeometry,
+    SelectionError,
+)
 from src.core.model_writeback import EtabsWriteback, FrameState
 from src.design.etabs_result import EtabsResultProvider
 from src.design.provider import BeamDesignResult, DesignResultStatus
@@ -50,6 +56,12 @@ class ReadModelSource(Protocol):
     ) -> list[BeamGeometry]: ...
 
     def column_supports(self) -> dict[str, Point3D]: ...
+
+    def column_anchor_names(self) -> set[str]: ...
+
+    def rigid_links_for_beams(self, beams: Sequence[BeamGeometry]) -> tuple[RigidLinkGeometry, ...]: ...
+
+    def column_outlines(self) -> tuple[ColumnOutline, ...]: ...
 
     def frame_states(self, beams: Sequence[BeamGeometry]) -> dict[str, FrameState]: ...
 
@@ -168,6 +180,15 @@ class EtabsOapiReadSource:
     def column_supports(self) -> dict[str, Point3D]:
         return self._geometry.column_supports()
 
+    def column_anchor_names(self) -> set[str]:
+        return self._geometry.column_anchor_names()
+
+    def rigid_links_for_beams(self, beams: Sequence[BeamGeometry]) -> tuple[RigidLinkGeometry, ...]:
+        return self._geometry.rigid_links_for_beams(beams)
+
+    def column_outlines(self) -> tuple[ColumnOutline, ...]:
+        return self._geometry.column_outlines()
+
     def frame_states(self, beams: Sequence[BeamGeometry]) -> dict[str, FrameState]:
         return EtabsWriteback(self.sap).snapshot_from_geometry(beams)
 
@@ -270,26 +291,50 @@ class SqliteReadSource:
             raise SnapshotTableError("SNAPSHOT_SELECTION_UNSUPPORTED: only all is available")
         _emit_progress(progress, 0, "读取快照梁几何")
         beams = self._source.extract_beams()
-        design_names = set(self._design.beam_names())
-        eligible = [beam for beam in beams if beam.name in design_names]
+        designs = {
+            name: self._design.get_beam_design(name)
+            for name in self._design.beam_names()
+        }
+        eligible_statuses = {DesignResultStatus.AVAILABLE, DesignResultStatus.PARTIAL}
+        eligible_names = {
+            name for name, result in designs.items()
+            if result.status in eligible_statuses
+        }
         self._design_exclusions = [
             {
                 "object_name": beam.name,
                 "label": beam.label,
                 "story": beam.story,
                 "section": beam.section,
-                "status": DesignResultStatus.NO_RESULTS.value,
-                "reason": "快照设计结果中不存在当前对象。",
+                "status": (
+                    designs[beam.name].status.value
+                    if beam.name in designs else DesignResultStatus.NO_RESULTS.value
+                ),
+                "reason": (
+                    designs[beam.name].status_message
+                    if beam.name in designs and designs[beam.name].status_message
+                    else "快照中没有该对象的混凝土设计结果。"
+                ),
             }
             for beam in beams
-            if beam.name not in design_names
+            if beam.name not in eligible_names
         ]
+        eligible = [beam for beam in beams if beam.name in eligible_names]
         result = beams if include_design_ineligible else eligible
         _emit_progress(progress, 100, f"快照梁几何读取完成（{len(result)} 梁）")
         return result
 
     def column_supports(self) -> dict[str, Point3D]:
         return self._source.column_supports()
+
+    def column_anchor_names(self) -> set[str]:
+        return self._source.raw_table_column_anchor_names()
+
+    def rigid_links_for_beams(self, beams: Sequence[BeamGeometry]) -> tuple[RigidLinkGeometry, ...]:
+        return self._source.rigid_links_for_beams(beams)
+
+    def column_outlines(self) -> tuple[ColumnOutline, ...]:
+        return self._source.column_outlines()
 
     def frame_states(self, beams: Sequence[BeamGeometry]) -> dict[str, FrameState]:
         return self._source.frame_states(beams)

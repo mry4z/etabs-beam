@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from src.design.region_results import (
+    LEGACY_DETAILING_POLICY_ID,
+    SUPPORTED_DETAILING_POLICY_IDS,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MAX_AGGREGATE_SIZE_MM = 25.0
@@ -37,6 +43,10 @@ class DesignSettings:
     clear_cover_source: str = ""
     max_aggregate_size_mm: float = DEFAULT_MAX_AGGREGATE_SIZE_MM
     max_aggregate_size_source: str = DEFAULT_MAX_AGGREGATE_SIZE_SOURCE
+    detailing_policy: str = LEGACY_DETAILING_POLICY_ID
+    layout_dictionary_path: Path | None = None
+    rebar_workers: int = 1
+    candidate_lookup: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,14 @@ def _normalize_design_standard(value: object) -> str:
     raise ValueError("当前配筋引擎仅支持 ACI 318-14。")
 
 
+def _normalize_detailing_policy(value: object) -> str:
+    normalized = str(value).strip()
+    if normalized not in SUPPORTED_DETAILING_POLICY_IDS:
+        choices = ", ".join(sorted(SUPPORTED_DETAILING_POLICY_IDS))
+        raise ValueError(f"配置项 design.detailing_policy 必须为以下稳定 ID 之一：{choices}。")
+    return normalized
+
+
 def _optional_positive(value: object, name: str) -> float | None:
     if value is None or str(value).strip() == "":
         return None
@@ -127,10 +145,27 @@ def _resolve_max_aggregate_size(design: dict[str, Any]) -> tuple[float, str]:
     return size, source
 
 
+def parse_rebar_workers(value: int | str) -> int | str:
+    """Preserve explicit integer overrides or the unresolved automatic setting."""
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "auto"
+    try:
+        workers = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("rebar_workers must be auto or an integer from 1 to 64") from exc
+    if workers < 1 or workers > 64:
+        raise ValueError("rebar_workers must be auto or an integer from 1 to 64")
+    return workers
+
+
 def load_config(
     path: str | Path | None = None,
     *,
     etabs_dll_path: str | Path | None = None,
+    detailing_policy_id: str | None = None,
+    layout_dictionary_path: str | Path | None = None,
+    rebar_workers: int | str | None = None,
+    candidate_lookup: str | None = None,
 ) -> AppConfig:
     """Load ``config.yaml``; fall back to the checked-in example configuration."""
     config_path = Path(path) if path else PROJECT_ROOT / "config.yaml"
@@ -163,6 +198,33 @@ def load_config(
         "design.clear_cover_source",
     )
     aggregate_size, aggregate_source = _resolve_max_aggregate_size(design)
+    detailing_policy = _normalize_detailing_policy(
+        detailing_policy_id
+        if detailing_policy_id is not None
+        else design.get("detailing_policy", LEGACY_DETAILING_POLICY_ID)
+    )
+    configured_dictionary_path = design.get("layout_dictionary_path")
+    if layout_dictionary_path is not None:
+        resolved_dictionary_path = Path(layout_dictionary_path).resolve()
+    elif configured_dictionary_path is not None and str(configured_dictionary_path).strip():
+        resolved_dictionary_path = _resolve_path(configured_dictionary_path, config_directory)
+    else:
+        resolved_dictionary_path = None
+    worker_setting = parse_rebar_workers(
+        rebar_workers if rebar_workers is not None else design.get("rebar_workers", "auto")
+    )
+    configured_rebar_workers = (
+        max(1, (os.cpu_count() or 1) - 1) if worker_setting == "auto" else worker_setting
+    )
+    lookup_mode = str(candidate_lookup if candidate_lookup is not None else design.get("candidate_lookup", "auto")).strip().lower()
+    if lookup_mode not in {"auto", "off"}:
+        raise ValueError("candidate_lookup must be auto or off")
+    # A configured default applies only to fresh drawing runs. Explicit CLI
+    # combinations are retained so the engine can report incompatible input.
+    if candidate_lookup is None and lookup_mode == "auto" and (
+        detailing_policy == LEGACY_DETAILING_POLICY_ID or resolved_dictionary_path is not None
+    ):
+        lookup_mode = "off"
 
     return AppConfig(
         etabs=EtabsSettings(
@@ -182,6 +244,10 @@ def load_config(
             clear_cover_source=clear_cover_source,
             max_aggregate_size_mm=aggregate_size,
             max_aggregate_size_source=aggregate_source,
+            detailing_policy=detailing_policy,
+            layout_dictionary_path=resolved_dictionary_path,
+            rebar_workers=configured_rebar_workers,
+            candidate_lookup=lookup_mode,
         ),
         output=OutputSettings(
             reports_dir=_resolve_path(output.get("reports_dir", "build/output/reports"), config_directory),

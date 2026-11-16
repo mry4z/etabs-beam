@@ -43,6 +43,8 @@ def calculate_single_layer_max_bars(
     stirrup_diameter_mm: float,
     maximum_aggregate_size_mm: float,
     longitudinal_bar_diameter_mm: float,
+    *,
+    minimum_clear_spacing_override_mm: float | None = None,
 ) -> int:
     """Calculate the maximum number of equal bars that fit in one layer."""
 
@@ -60,10 +62,13 @@ def calculate_single_layer_max_bars(
     if inside_stirrup_width_mm < longitudinal_bar_diameter_mm:
         return 0
 
-    clear_spacing_mm = minimum_clear_bar_spacing_mm(
-        longitudinal_bar_diameter_mm,
-        maximum_aggregate_size_mm,
+    clear_spacing_mm = (
+        minimum_clear_bar_spacing_mm(longitudinal_bar_diameter_mm, maximum_aggregate_size_mm)
+        if minimum_clear_spacing_override_mm is None
+        else float(minimum_clear_spacing_override_mm)
     )
+    if clear_spacing_mm <= 0:
+        raise ValueError("minimum clear spacing must be positive")
     # n*db + (n-1)*s_clear <= available inside-stirrup width.
     return max(
         0,
@@ -97,6 +102,8 @@ def single_layer_max_bars(
     stirrup_diameter_mm: float,
     maximum_aggregate_size_mm: float,
     longitudinal_bar_diameter_mm: float,
+    *,
+    minimum_clear_spacing_override_mm: float | None = None,
 ) -> int:
     """Look up a standard combination, falling back for non-standard sizes."""
 
@@ -107,7 +114,7 @@ def single_layer_max_bars(
         maximum_aggregate_size_mm,
         longitudinal_bar_diameter_mm,
     )
-    if all(float(value).is_integer() for value in values):
+    if minimum_clear_spacing_override_mm is None and all(float(value).is_integer() for value in values):
         key: SingleLayerCapacityKey = (
             int(beam_width_mm),
             int(clear_cover_mm),
@@ -119,4 +126,7 @@ def single_layer_max_bars(
         if cached is not None:
             return cached
 
-    return calculate_single_layer_max_bars(*values)
+    return calculate_single_layer_max_bars(
+        *values,
+        minimum_clear_spacing_override_mm=minimum_clear_spacing_override_mm,
+    )

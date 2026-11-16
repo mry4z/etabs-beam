@@ -14,6 +14,7 @@ from src.core.beam_merger import MergeRecord
 from src.core.continuity_analyzer import ContinuityGroup
 from src.core.geometry_extractor import BeamGeometry
 from src.design.key_positions import key_positions
+from src.design.no_design import is_explicit_no_design
 from src.design.provider import BeamDesignResult
 from src.excel_span_adapter import SpanScheduleMapping
 from src.utils.io import available_output_path
@@ -89,6 +90,8 @@ def export_beam_schedule(
     rows, station_rows = [], []
     for beam in beams:
         design = designs.get(beam.name, BeamDesignResult(beam.name))
+        if is_explicit_no_design(design.status, design.status_message):
+            continue
         group_id, position, group_size, neighbors = memberships.get(beam.name, (0, 1, 1, (None, None)))
         row = {
             "梁对象": beam.name,
